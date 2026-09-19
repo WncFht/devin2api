@@ -124,6 +124,19 @@ func main() {
 		return
 	}
 
+	// reuseport 并组是静默的：开了 DEVIN2API_REUSEPORT 的裸进程不撞
+	// EADDRINUSE，而是直接并进监听组成为影子实例（9-15 事故：野进程
+	// 并组 ~3 天吃掉 ~99% 流量、stderr 无处可查）。开 reuseport 必须
+	// 持有托管出处，三者皆无即拒绝并组——不带 REUSEPORT env 的普通
+	// 裸跑不受影响，仍是熟悉的 EADDRINUSE。检查在子命令 early-return
+	// 之后：-export-legacy/-cells-audit 不监听端口，不受准入约束。
+	if reusePortEnabled() && !reusePortProvenance() {
+		slog.Error("DEVIN2API_REUSEPORT set without managed-service provenance; refusing silent reuseport join",
+			"accepted", "INVOCATION_ID (systemd), DEVIN2API_HANDOFF (deploy takeover), DEVIN2API_MANAGED (service managers)",
+			"fix", "run under a service manager or unset DEVIN2API_REUSEPORT")
+		os.Exit(1)
+	}
+
 	resolvedConfigPath, err := config.ResolveConfigPath(*configPath)
 	if err != nil {
 		slog.Error("resolve config path failed", "error", err)
@@ -764,6 +777,19 @@ const drainKillGrace = 5 * time.Second
 func reusePortEnabled() bool {
 	v := os.Getenv("DEVIN2API_REUSEPORT")
 	return reusePortSupported && (v == "1" || strings.EqualFold(v, "true"))
+}
+
+// reusePortProvenance 报告进程是否持有允许加入 reuseport 组的托管出处，
+// 三选一即放行：INVOCATION_ID（systemd 每次拉起 unit 自动注入，手写
+// unit 与 systemd-run 同样覆盖）、DEVIN2API_HANDOFF（lib-deploy.sh
+// spawn_handoff 给交接进程的标记）、DEVIN2API_MANAGED（launchd 等无
+// systemd 原生标记的托管器由服务定义显式注入——deploy.sh 的 plist 与
+// deploy-linux.sh 的 unit 都写它，其它托管体系照此声明）。env 证明防的
+// 是不知情并组：同机能设 env 的进程仍可伪造，这层是准入宣告不是认证。
+func reusePortProvenance() bool {
+	return os.Getenv("INVOCATION_ID") != "" ||
+		os.Getenv("DEVIN2API_HANDOFF") != "" ||
+		os.Getenv("DEVIN2API_MANAGED") != ""
 }
 
 // run 启动 HTTP 服务直到 ctx 取消（SIGINT/SIGTERM），随后优雅排空：

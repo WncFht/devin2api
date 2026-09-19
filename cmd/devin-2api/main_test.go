@@ -45,6 +45,26 @@ func TestListenURL(t *testing.T) {
 	}
 }
 
+// TestReusePortProvenance verifies the reuseport admission check accepts the
+// three managed-service provenance envs and refuses bare invocations — the
+// guard exists because SO_REUSEPORT join is silent (no EADDRINUSE), so a
+// rogue/manual process with the env would otherwise shadow the real instance.
+func TestReusePortProvenance(t *testing.T) {
+	for _, env := range []string{"INVOCATION_ID", "DEVIN2API_HANDOFF", "DEVIN2API_MANAGED"} {
+		t.Setenv(env, "")
+	}
+	if reusePortProvenance() {
+		t.Error("reusePortProvenance() = true with no provenance env")
+	}
+	for _, env := range []string{"INVOCATION_ID", "DEVIN2API_HANDOFF", "DEVIN2API_MANAGED"} {
+		t.Setenv(env, "x")
+		if !reusePortProvenance() {
+			t.Errorf("reusePortProvenance() = false with %s set", env)
+		}
+		t.Setenv(env, "")
+	}
+}
+
 // TestRunReturnsServeError verifies unexpected server failures are returned to main.
 func TestRunReturnsServeError(t *testing.T) {
 	// 已关闭的 listener 让 Serve 立即返回错误——无需伪造 server。

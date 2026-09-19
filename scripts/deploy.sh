@@ -48,7 +48,9 @@ svc_reload_restart() {
 }
 
 # plist_content：目标服务定义。EnvironmentVariables 注入 reuseport 是
-# 重叠交接的前提；ExitTimeOut 须覆盖二进制 drainTimeout（600s）+退出余量。
+# 重叠交接的前提；MANAGED 是 reuseport 准入的出处声明（launchd 无
+# systemd INVOCATION_ID，必须由服务定义显式注入）。ExitTimeOut 须覆盖
+# 二进制 drainTimeout（600s）+退出余量。
 plist_content() {
 	cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -68,6 +70,7 @@ plist_content() {
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>DEVIN2API_REUSEPORT</key><string>1</string>
+		<key>DEVIN2API_MANAGED</key><string>1</string>
 	</dict>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>

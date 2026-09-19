@@ -522,8 +522,11 @@ wait_healthz_version() {
 # listener → 托管新实例拉起入队 → 交接进程退场」这条链里任意时刻都有
 # 健康 socket 接新连接——零 503、零拒绝、在途不受打断。
 # 前提：组内所有 socket 都开了 SO_REUSEPORT（env 注入给托管实例与交接
-# 进程；裸跑二进制拿不到 env，单实例端口冲突保护不变）。在跑的旧实例
-# 没有 env 时交接进程 bind 必失败——spawn 探测失败后自动退化为经典重启。
+# 进程；裸跑二进制拿不到 env，单实例端口冲突保护不变）。开 reuseport
+# 还需托管出处才被二进制放行（INVOCATION_ID / DEVIN2API_HANDOFF /
+# DEVIN2API_MANAGED 三选一——spawn_handoff 注入的 HANDOFF 同时充任
+# 交接进程的准入凭证）。在跑的旧实例没有 env 时交接进程 bind 必失败
+# ——spawn 探测失败后自动退化为经典重启。
 
 # handoff_pidfile：交接进程 pid 记录——部署中断残留供下次部署回收。
 handoff_pidfile() { printf '%s' "${STATE_DIR}/.handoff.pid"; }

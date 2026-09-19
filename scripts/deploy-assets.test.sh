@@ -50,6 +50,8 @@ check "spawn 失败按返回码分诊" has scripts/lib-deploy.sh 'spawn_rc'
 check "非端口冲突一律中止部署" has scripts/lib-deploy.sh '中止部署'
 check "杀桥前先证接管" has scripts/lib-deploy.sh '先证接管再放桥'
 check "credentials_file 存在性预检" has scripts/lib-deploy.sh 'config_credentials_files'
+# 交接进程靠 DEVIN2API_HANDOFF 过 reuseport 出处准入——标记丢了 spawn 必被拒。
+check "交接进程携带 HANDOFF 出处标记" has scripts/lib-deploy.sh 'DEVIN2API_HANDOFF=1'
 
 echo "== deploy.sh（macOS launchd）=="
 check "限定 Darwin" has scripts/deploy.sh 'Darwin'
@@ -58,6 +60,9 @@ check "优雅退出窗口" has scripts/deploy.sh 'ExitTimeOut'
 check "kickstart -k 发 SIGTERM" has scripts/deploy.sh 'kickstart -k'
 check "部署后断言 healthz pid==托管 pid" has scripts/deploy.sh 'wait_healthz_pid "${HEALTH_URL}" "${NEW_PID}"'
 check "禁 kill -9 约定" bash -c "! grep -qF 'kill -9' scripts/deploy.sh"
+# launchd 没有 systemd 的 INVOCATION_ID：plist 必须显式注入 MANAGED，
+# 否则托管实例被自己设的 reuseport 准入拒掉。
+check "plist 注入 MANAGED 出处标记" has scripts/deploy.sh 'DEVIN2API_MANAGED'
 
 echo "== deploy-linux.sh（systemd --user）=="
 check "限定 Linux" has scripts/deploy-linux.sh 'Linux'
@@ -68,6 +73,9 @@ check "日志落状态目录" has scripts/deploy-linux.sh 'StandardOutput=append
 # version 匹配不等于托管实例在服役——healthz 应答者必须是 MainPID 本体。
 check "部署后断言 healthz pid==MainPID" has scripts/deploy-linux.sh 'wait_healthz_pid "${HEALTH_URL}" "${NEW_PID}"'
 check "崩溃循环 NRestarts 告警" has scripts/deploy-linux.sh 'NRestarts'
+# 与 plist 口径一致：unit 显式声明 MANAGED（INVOCATION_ID 本就够格，
+# 标记让服务定义自描述、防止未来把 env 行挪去非 systemd 托管器时漏证）。
+check "unit 注入 MANAGED 出处标记" has scripts/deploy-linux.sh 'Environment=DEVIN2API_MANAGED=1'
 
 echo "== deploy-remote.sh（开发机 → 生产机驱动）=="
 check "目标机走 DEVIN2API_HOST" has scripts/deploy-remote.sh 'DEVIN2API_HOST'

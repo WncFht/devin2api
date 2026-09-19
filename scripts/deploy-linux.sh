@@ -36,7 +36,9 @@ svc_pid()     { systemctl --user show -p MainPID --value "${UNIT}" 2>/dev/null; 
 svc_restart() { systemctl --user restart "${UNIT}"; }
 
 # unit_content：目标服务定义。Environment 注入 reuseport 是重叠交接的前提；
-# TimeoutStopSec 须覆盖二进制 drainTimeout（600s）+退出余量。
+# MANAGED 是 reuseport 准入的出处声明（systemd 的 INVOCATION_ID 已可作证，
+# 这里显式声明让服务定义自描述、与其它托管器口径一致）。TimeoutStopSec
+# 须覆盖二进制 drainTimeout（600s）+退出余量。
 unit_content() {
 	cat <<EOF
 [Unit]
@@ -47,6 +49,7 @@ After=network-online.target
 ExecStart=${BIN_DIR}/devin-2api -config ${CONFIG_DIR}/config.yaml -state-dir ${STATE_DIR}
 WorkingDirectory=${STATE_DIR}
 Environment=DEVIN2API_REUSEPORT=1
+Environment=DEVIN2API_MANAGED=1
 Restart=always
 RestartSec=5
 TimeoutStopSec=660

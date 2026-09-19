@@ -20,7 +20,7 @@
 
 - **运行时状态归 SQLite**：`<state-dir>/devin-2api.db`（WAL，伴生 `-wal`/`-shm`）装全部持久化状态——`logs` 请求行、`debug_files`/`debug_chunks` 调试 payload、`log_cells`/`log_err_cells`（logs 的 600s 预聚合 rollup，usage 聚合整格读）、`auth_tokens`、`model_registry`、`settings`、`quota_samples`、`gate_windows`（闸门分钟窗口聚合账）、`lane_attempt_causes`（号池被放弃 lane 尝试的日粒度聚合账）、`runtime_state`（闸门闩态等）。`<state-dir>/logs/` 只剩进程输出（`stdout.log`/`stderr.log`）与启动早期取证标记（`bind-failure.json` 端口争夺、`config-fallback.json` 兜底服役——见下）。仓库里的 `logs/` 只是指向本机状态目录的符号链接（开发便利，非必需）。旧版「单运行目录」布局由部署脚本自动迁移（`migrate_legacy_runtime`）：config/logs 挪到平台目录、删旧二进制，目标已存在时不覆盖。文件时代的 `index.jsonl`/`auth_tokens.json`/`models.json`/`panel-settings.json`/`quota.jsonl`/`gate-state*.json` 由启动导入器搬进库后改名 `<name>.migrated`（回滚 = 旧二进制 + 改回原文件名，见 AGENTS.md「服务排障」节）。`<state-dir>/last-good-config.yaml` 是最近一次成功加载的自包含配置投影（accounts 的 credentials_file 已物化成 token 并摘除——兜底服役的重校验不再触外部文件）：boot 加载失败且缓存存在时按它降级服役而非退出（与 reload 校验失败保留旧配置同一判据：坏的新配置永不顶替最近一次的好配置），兜底期 `logs/config-fallback.json` 记次数与恢复边界，`/admin/config` 强制 `stale` 并透 `served_from`/`cached_at`，`/healthz` 带 `config_last_good`；首装无缓存仍照旧退出。
 - **优雅排空是硬要求**：进程实现 `SIGTERM` 优雅退出（`signal.NotifyContext`）——收到信号进入 draining：`/healthz` 继续应答但带 `draining: true`，新的 `/v1/*` 立即 `503 + Retry-After: 1`，在途请求跑完；排空上限 600s，超时先对在途请求做带因取消——被掐请求走正常收尾管道落 `result=aborted`/`error_stage=drain_timeout` 的 logs 行与 error.json（进程侧掐断，与客户端断连分开归因）——再强关剩余连接，另留 5s 宽限等收尾 bookkeeping 落盘。两个服务定义都给 660s 停止超时覆盖该上限加余量。重启只发 SIGTERM，禁用 `kill -9` 抢时间（Ctrl+C 在 Windows 前台触发同一套排空）。listener 在排空期的行为取决于 `DEVIN2API_REUSEPORT`：未开启时保持打开（新请求拿应用层 503 而非内核拒绝）；开启时立即关闭——reuseport 组内新连接按绑定序（macOS）或哈希（Linux）落到组内其它 socket，旧实例只有让出监听，deploy 预置的交接进程才能接管。排空起点同时 `SetKeepAlivesEnabled(false)`：drain 前已 accept 的 keep-alive 连接关 listener 管不着，会一直被钉在旧实例上整窗吃 503；关掉 keep-alive 后这些连接在下一个响应带 `Connection: close` 收尾，客户端重连即落到接替者——陈旧连接最多吃一次 503。
-- **重叠交接部署（reuseport handoff）**：`deploy.sh`/`deploy-linux.sh` 的重启路径是「先起交接进程 → 重启托管实例 → 等托管新实例拉起 → 退交接进程」。交接进程是同一二进制的临时副本，带 `DEVIN2API_REUSEPORT=1` 绑定同一端口入队；旧实例 drain 起点即关闭 listener 后它接管全部新连接，直到 KeepAlive/Restart 拉起托管新实例后再 SIGTERM 退场。全程零 503、零拒绝，在途请求只受 600s 排空上限约束，也不再需要等空闲窗口。交接进程 pid 记录在 `<状态目录>/.handoff.pid`；部署中断残留时下次部署自动回收。交接进程同时是新实例的金丝雀（同二进制同 config 走真实启动路径）：spawn 失败按新鲜 stderr 段分诊——`port already in use` 证明旧实例没开 reuseport，回退经典「等空闲 + 重启」；其余死因（config 校验失败、缺凭据文件、panic、静默早夭、超时）说明新实例当前起不来，直接中止部署而不触碰旧实例——9-18 事故正是把 config 校验死误诊为缺 reuseport 并回退重启，把可失败的部署变成 2h55m 断流。同样，托管新实例有 MainPID 不等于已接管：杀桥前先证接管（Linux 轮询 healthz 直到应答 pid==托管 pid；macOS 新连接只派给最先存活 socket，退以 stderr 新 listening 行 + 进程存活作证），120s 证不出则交接进程保留降级服役。收尾除 version 匹配外再断言 healthz 应答 pid==托管 MainPID，堵死交接/野实例答出新版本的假绿。服务定义变更（plist/unit 重写）走同一套交接：重启动词换成「载入新定义」的那个（macOS `bootout+bootstrap`，Linux `systemctl restart` 随已 daemon-reload 的新 unit 生效），交接桥照样盖住整段排空窗口。注意直接 `launchctl kickstart -k` 不走交接：reuseport 实例 drain 即关 listener，排空期新连接是 refused 而非 503（都失败，但拿不到 Retry-After）。
+- **重叠交接部署（reuseport handoff）**：`deploy.sh`/`deploy-linux.sh` 的重启路径是「先起交接进程 → 重启托管实例 → 等托管新实例拉起 → 退交接进程」。交接进程是同一二进制的临时副本，带 `DEVIN2API_REUSEPORT=1` 绑定同一端口入队；旧实例 drain 起点即关闭 listener 后它接管全部新连接，直到 KeepAlive/Restart 拉起托管新实例后再 SIGTERM 退场。全程零 503、零拒绝，在途请求只受 600s 排空上限约束，也不再需要等空闲窗口。reuseport 是准入制：并组不撞 EADDRINUSE（内核语义就是同端口多 socket 共存），所以二进制发现 `DEVIN2API_REUSEPORT` 开启时要求进程持有托管出处——systemd 的 `INVOCATION_ID`、交接进程的 `DEVIN2API_HANDOFF`、或服务定义注入的 `DEVIN2API_MANAGED`（plist/unit 都写），三者皆无直接拒绝启动——手动带 env 裸跑从此是明确报错而非静默并组成影子实例。交接进程 pid 记录在 `<状态目录>/.handoff.pid`；部署中断残留时下次部署自动回收。交接进程同时是新实例的金丝雀（同二进制同 config 走真实启动路径）：spawn 失败按新鲜 stderr 段分诊——`port already in use` 证明旧实例没开 reuseport，回退经典「等空闲 + 重启」；其余死因（config 校验失败、缺凭据文件、panic、静默早夭、超时）说明新实例当前起不来，直接中止部署而不触碰旧实例——9-18 事故正是把 config 校验死误诊为缺 reuseport 并回退重启，把可失败的部署变成 2h55m 断流。同样，托管新实例有 MainPID 不等于已接管：杀桥前先证接管（Linux 轮询 healthz 直到应答 pid==托管 pid；macOS 新连接只派给最先存活 socket，退以 stderr 新 listening 行 + 进程存活作证），120s 证不出则交接进程保留降级服役。收尾除 version 匹配外再断言 healthz 应答 pid==托管 MainPID，堵死交接/野实例答出新版本的假绿。服务定义变更（plist/unit 重写）走同一套交接：重启动词换成「载入新定义」的那个（macOS `bootout+bootstrap`，Linux `systemctl restart` 随已 daemon-reload 的新 unit 生效），交接桥照样盖住整段排空窗口。注意直接 `launchctl kickstart -k` 不走交接：reuseport 实例 drain 即关 listener，排空期新连接是 refused 而非 503（都失败，但拿不到 Retry-After）。
 - **单实例**：托管器（KeepAlive/Restart=always）会与手动起的实例互抢监听端口，交替时全部在途流被掐。所有实例必须经托管器启停；冒烟验证用空闲端口起临时二进制，验证完立即关闭，不留常驻侧实例。
 - **版本可见性**：`main.version` 由构建期 `-X` 注入（`git describe --tags --always --dirty` 或 tag 名），`stderr.log` 启动行、`/healthz`、`-version` flag 三处可查。部署后脚本轮询 `/healthz` 直到 version 等于刚部署的版本——排空期旧进程仍在应答旧版本，首次 200 不代表切换完成。
 - 重启、换二进制前先确认目标端口上没有遗留测试进程（`lsof -nP -iTCP:<port> -sTCP:LISTEN`，Windows 用 `netstat -ano | findstr <port>`）。
@@ -58,6 +58,7 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>DEVIN2API_REUSEPORT</key><string>1</string>
+		<key>DEVIN2API_MANAGED</key><string>1</string>
 	</dict>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
@@ -71,14 +72,14 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 
 各键的含义与取舍：
 
-| 键                     | 当前值                  | 说明                                                                                                                        |
-| ---------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `RunAtLoad`            | true                    | 登录即启动                                                                                                                  |
-| `KeepAlive`            | true                    | 任何退出都重拉——含 `bootout` 外的主动 `kill`。若想「干净退出不复活」，改为 `<dict><key>SuccessfulExit</key><false/></dict>` |
-| `ThrottleInterval`     | 5                       | 崩溃循环时每 5 秒才重试，防止拉满 CPU                                                                                       |
-| `ExitTimeOut`          | 660                     | SIGTERM 后最多等 660s 再 SIGKILL；覆盖二进制 600s 排空上限 + 退出余量                                                       |
-| `EnvironmentVariables` | `DEVIN2API_REUSEPORT=1` | 注入 SO_REUSEPORT——重叠交接部署的前提；裸跑二进制没有它，仍会撞单实例端口冲突保护                                           |
-| `StandardErrorPath`    | logs/stderr.log         | slog 输出落盘；轮转由配套 logrotate agent 每日执行，见下节                                                                  |
+| 键                     | 当前值                                         | 说明                                                                                                                                                                       |
+| ---------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RunAtLoad`            | true                                           | 登录即启动                                                                                                                                                                 |
+| `KeepAlive`            | true                                           | 任何退出都重拉——含 `bootout` 外的主动 `kill`。若想「干净退出不复活」，改为 `<dict><key>SuccessfulExit</key><false/></dict>`                                                |
+| `ThrottleInterval`     | 5                                              | 崩溃循环时每 5 秒才重试，防止拉满 CPU                                                                                                                                      |
+| `ExitTimeOut`          | 660                                            | SIGTERM 后最多等 660s 再 SIGKILL；覆盖二进制 600s 排空上限 + 退出余量                                                                                                      |
+| `EnvironmentVariables` | `DEVIN2API_REUSEPORT=1`、`DEVIN2API_MANAGED=1` | 前者注入 SO_REUSEPORT——重叠交接部署的前提；后者是 reuseport 准入的出处声明（launchd 无 `INVOCATION_ID`，缺了它二进制拒绝并组）；两者皆无的裸跑二进制仍撞单实例端口冲突保护 |
+| `StandardErrorPath`    | logs/stderr.log                                | slog 输出落盘；轮转由配套 logrotate agent 每日执行，见下节                                                                                                                 |
 
 ### stderr/stdout 日志轮转
 
@@ -114,6 +115,7 @@ After=network-online.target
 ExecStart=~/.local/bin/devin-2api -config ~/.config/devin-2api/config.yaml -state-dir ~/.local/state/devin-2api
 WorkingDirectory=~/.local/state/devin-2api
 Environment=DEVIN2API_REUSEPORT=1
+Environment=DEVIN2API_MANAGED=1
 Restart=always
 RestartSec=5
 TimeoutStopSec=660
@@ -128,7 +130,7 @@ StandardError=append:~/.local/state/devin-2api/logs/stderr.log
 WantedBy=default.target
 ```
 
-与 macOS 版的对应关系：`Restart=always` + `RestartSec=5` ≈ `KeepAlive` + `ThrottleInterval`，`TimeoutStopSec=660` ≈ `ExitTimeOut`，`Environment=DEVIN2API_REUSEPORT=1` ≈ `EnvironmentVariables`，stdout/stderr 同样落状态目录文件（不走 journal，排障路径与 macOS 一致）。注意 systemd `--user` 上下文里 `XDG_CONFIG_HOME`/`XDG_STATE_HOME` 通常不设，unit 一律用部署期展开的绝对路径。
+与 macOS 版的对应关系：`Restart=always` + `RestartSec=5` ≈ `KeepAlive` + `ThrottleInterval`，`TimeoutStopSec=660` ≈ `ExitTimeOut`，`Environment=` 两键 ≈ `EnvironmentVariables`（`DEVIN2API_MANAGED` 在 systemd 下本有 `INVOCATION_ID` 作证，显式声明让服务定义自描述），stdout/stderr 同样落状态目录文件（不走 journal，排障路径与 macOS 一致）。注意 systemd `--user` 上下文里 `XDG_CONFIG_HOME`/`XDG_STATE_HOME` 通常不设，unit 一律用部署期展开的绝对路径。
 
 stderr/stdout 轮转与 macOS 同脚本同语义：`deploy-linux.sh` 安装 `~/.local/bin/devin-2api-logrotate` 并生成 `devin-2api-logrotate.service`（oneshot）+ `devin-2api-logrotate.timer`（`OnCalendar=daily`，`Persistent=true`）两个 unit，`--uninstall` 一并移除。
 
