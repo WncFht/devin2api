@@ -178,8 +178,10 @@ func (decoder *responseDecoder) start() []llm.ResponseEvent {
 // 会让消费侧并发读到后续帧的写入。Content/Diagnostics 只做整块替换与
 // append（内容块是值类型、在 decoder.text/thinking/state.call 缓冲里
 // 写好后整体拷入），浅拷贝消息体 + 克隆这两个切片即与后续写入隔离。
-// Done 的 Message 与 ToolCallEnd 的 ToolCall 是终态指针（此后不再有
-// 写点），不走这里。
+// delta 事件的 Partial 不是冗余载重：detached_blob 逐事件编码它进块表
+// 去重（持久化完成缓存的取证形态），换成共享 stub 会让 blob 失去逐帧
+// 累计快照语义。Done 的 Message 与 ToolCallEnd 的 ToolCall 是终态指针
+// （此后不再有写点），不走这里。
 func (decoder *responseDecoder) snapshot() *llm.AssistantMessage {
 	partial := decoder.partial
 	partial.Content = slices.Clone(partial.Content)
