@@ -1,3 +1,168 @@
+/* ===== 以下来自 styles.css：tokens 页专属规则 ===== */
+
+@media (max-width: 768px) {
+.form-row-inline {
+    flex-direction: column;
+    align-items: stretch;
+  }
+.form-row-inline__label {
+    min-width: 0;
+    flex-basis: auto;
+  }
+.form-row-inline__content {
+    width: 100%;
+  }
+}
+
+.form-row-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.form-row-inline__label {
+  flex: 0 0 60px;
+  min-width: 60px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.form-row-inline__content {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scroll-pane {
+  overflow-y: auto;
+  border: 1px solid var(--neutral-200);
+  border-radius: 6px;
+}
+
+.scroll-pane--sm {
+  max-height: 300px;
+}
+
+.control-checkbox {
+  width: 18px;
+  height: 18px;
+}
+
+/* ===== 内联编辑表格（Modal内的Key/模型表格） ===== */
+
+.inline-table-container {
+  max-height: 160px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+  background: var(--table-bg);
+}
+
+.inline-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.inline-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-bg-muted);
+}
+
+.inline-table th {
+  padding: 6px 10px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 13px;
+  background-color: var(--surface-bg-muted);
+  color: var(--neutral-900);
+  border-bottom: 2px solid var(--surface-border-strong);
+}
+
+.inline-table td {
+  padding: 4px 8px;
+  color: var(--neutral-800);
+  background: var(--table-bg);
+  border-bottom: 1px solid var(--surface-border);
+}
+
+.inline-table tbody tr:hover {
+  background: var(--table-row-hover);
+}
+
+@media (max-width: 768px) {
+.mobile-inline-table-container {
+    max-height: none;
+    overflow: visible;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+  }
+.mobile-inline-table {
+    width: 100%;
+    table-layout: auto;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+.mobile-inline-table thead {
+    display: none;
+  }
+.mobile-inline-table tbody {
+    display: block;
+  }
+.mobile-inline-table tbody .mobile-inline-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+    margin-bottom: 12px;
+    padding: 14px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 16px;
+    background: var(--surface-bg-strong);
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    position: relative;
+  }
+.mobile-inline-table tbody tr:not(.mobile-inline-row) {
+    display: block;
+    width: 100%;
+  }
+.mobile-inline-table tbody tr:not(.mobile-inline-row) td {
+    display: block;
+    width: 100% !important;
+  }
+.mobile-inline-table tbody .mobile-inline-row td {
+    display: block;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: auto;
+    padding: 0;
+    border: none;
+    text-align: left !important;
+    background: transparent !important;
+  }
+.mobile-inline-table tbody .mobile-inline-row td[data-mobile-label]::before {
+    content: attr(data-mobile-label);
+    display: block;
+    width: 100%;
+    margin-bottom: 6px;
+    color: var(--neutral-500);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+.mobile-inline-table tbody .mobile-inline-row td.mobile-inline-no-label::before {
+    content: none;
+    display: none;
+  }
+}
+
+
     :root {
       --token-active-bg: var(--success-50);
       --token-active-fg: var(--success-800);
