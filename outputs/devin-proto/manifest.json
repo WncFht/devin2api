@@ -1,8 +1,8 @@
 {
-  "binary": "/Applications/Devin.app/Contents/Resources/app/extensions/windsurf/bin/language_server_macos_arm",
+  "binary": "/tmp/devin-app/Devin/resources/app/extensions/windsurf/bin/language_server_linux_x64",
   "bundle": "all-protos.proto",
-  "descriptor_count": 63,
-  "candidate_count": 64,
+  "descriptor_count": 62,
+  "candidate_count": 63,
   "duplicate_count": 1,
   "files_with_source_info": 0,
   "files_with_comments": 0,
@@ -901,6 +901,16 @@
       },
       {
         "kind": "message",
+        "original": "exa.api_server_pb.GetAiGatewayConfigRequest",
+        "flattened": "exa.api_server_pb.GetAiGatewayConfigRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.api_server_pb.GetAiGatewayConfigResponse",
+        "flattened": "exa.api_server_pb.GetAiGatewayConfigResponse"
+      },
+      {
+        "kind": "message",
         "original": "exa.api_server_pb.GetCascadeModelConfigsRequest",
         "flattened": "exa.api_server_pb.GetCascadeModelConfigsRequest"
       },
@@ -1456,6 +1466,46 @@
       },
       {
         "kind": "message",
+        "original": "exa.api_server_pb.GetUserManagedPluginsRequest",
+        "flattened": "exa.api_server_pb.GetUserManagedPluginsRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.api_server_pb.GetUserManagedPluginsResponse",
+        "flattened": "exa.api_server_pb.GetUserManagedPluginsResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.api_server_pb.SetUserManagedPluginsRequest",
+        "flattened": "exa.api_server_pb.SetUserManagedPluginsRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.api_server_pb.SetUserManagedPluginsResponse",
+        "flattened": "exa.api_server_pb.SetUserManagedPluginsResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.api_server_pb.AddUserManagedPluginRequest",
+        "flattened": "exa.api_server_pb.AddUserManagedPluginRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.api_server_pb.AddUserManagedPluginResponse",
+        "flattened": "exa.api_server_pb.AddUserManagedPluginResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.api_server_pb.RemoveUserManagedPluginRequest",
+        "flattened": "exa.api_server_pb.RemoveUserManagedPluginRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.api_server_pb.RemoveUserManagedPluginResponse",
+        "flattened": "exa.api_server_pb.RemoveUserManagedPluginResponse"
+      },
+      {
+        "kind": "message",
         "original": "exa.api_server_pb.DeleteOrgManagedPluginsInternalRequest",
         "flattened": "exa.api_server_pb.DeleteOrgManagedPluginsInternalRequest"
       },
@@ -1918,6 +1968,11 @@
         "kind": "enum",
         "original": "exa.api_server_pb.DeploymentConfigKey",
         "flattened": "exa.api_server_pb.DeploymentConfigKey"
+      },
+      {
+        "kind": "enum",
+        "original": "exa.api_server_pb.ManagedPluginBundleScope",
+        "flattened": "exa.api_server_pb.ManagedPluginBundleScope"
       },
       {
         "kind": "service",
@@ -3926,11 +3981,6 @@
       },
       {
         "kind": "message",
-        "original": "exa.codeium_common_pb.AllowedModelConfig",
-        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_AllowedModelConfig"
-      },
-      {
-        "kind": "message",
         "original": "exa.codeium_common_pb.PlanInfo",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_PlanInfo"
       },
@@ -3938,6 +3988,11 @@
         "kind": "message",
         "original": "exa.codeium_common_pb.DevinPlanInfo",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_DevinPlanInfo"
+      },
+      {
+        "kind": "message",
+        "original": "exa.codeium_common_pb.DevinAcuRequestAction",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_DevinAcuRequestAction"
       },
       {
         "kind": "message",
@@ -4108,6 +4163,21 @@
         "kind": "message",
         "original": "exa.codeium_common_pb.ThinkingMachinesInferenceConfig",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ThinkingMachinesInferenceConfig"
+      },
+      {
+        "kind": "message",
+        "original": "exa.codeium_common_pb.MoonshotInferenceConfig",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_MoonshotInferenceConfig"
+      },
+      {
+        "kind": "message",
+        "original": "exa.codeium_common_pb.NvidiaInferenceConfig",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_NvidiaInferenceConfig"
+      },
+      {
+        "kind": "message",
+        "original": "exa.codeium_common_pb.DeepSeekInferenceConfig",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_DeepSeekInferenceConfig"
       },
       {
         "kind": "message",
@@ -4571,6 +4641,16 @@
       },
       {
         "kind": "message",
+        "original": "exa.codeium_common_pb.VideoData",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_VideoData"
+      },
+      {
+        "kind": "message",
+        "original": "exa.codeium_common_pb.DocumentData",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_DocumentData"
+      },
+      {
+        "kind": "message",
         "original": "exa.codeium_common_pb.TextData",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_TextData"
       },
@@ -4708,11 +4788,6 @@
         "kind": "message",
         "original": "exa.codeium_common_pb.CodeAnnotation",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_CodeAnnotation"
-      },
-      {
-        "kind": "message",
-        "original": "exa.codeium_common_pb.CodeAnnotationsState",
-        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_CodeAnnotationsState"
       },
       {
         "kind": "message",
@@ -9140,6 +9215,71 @@
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelDimensionKind.ExaCodeiumCommonPb_ModelDimensionKind_MODEL_DIMENSION_KIND_COST_FUZZY"
       },
       {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelDimensionKind.MODEL_DIMENSION_KIND_COST_UNIT",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelDimensionKind.ExaCodeiumCommonPb_ModelDimensionKind_MODEL_DIMENSION_KIND_COST_UNIT"
+      },
+      {
+        "kind": "enum",
+        "original": "exa.codeium_common_pb.ModelFamilyDimensionControlType",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelFamilyDimensionControlType"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelFamilyDimensionControlType.MODEL_FAMILY_DIMENSION_CONTROL_TYPE_UNSPECIFIED",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelFamilyDimensionControlType.ExaCodeiumCommonPb_ModelFamilyDimensionControlType_MODEL_FAMILY_DIMENSION_CONTROL_TYPE_UNSPECIFIED"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelFamilyDimensionControlType.MODEL_FAMILY_DIMENSION_CONTROL_TYPE_STEPPER",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelFamilyDimensionControlType.ExaCodeiumCommonPb_ModelFamilyDimensionControlType_MODEL_FAMILY_DIMENSION_CONTROL_TYPE_STEPPER"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelFamilyDimensionControlType.MODEL_FAMILY_DIMENSION_CONTROL_TYPE_OPTION",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelFamilyDimensionControlType.ExaCodeiumCommonPb_ModelFamilyDimensionControlType_MODEL_FAMILY_DIMENSION_CONTROL_TYPE_OPTION"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelFamilyDimensionControlType.MODEL_FAMILY_DIMENSION_CONTROL_TYPE_LIST",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelFamilyDimensionControlType.ExaCodeiumCommonPb_ModelFamilyDimensionControlType_MODEL_FAMILY_DIMENSION_CONTROL_TYPE_LIST"
+      },
+      {
+        "kind": "enum",
+        "original": "exa.codeium_common_pb.ModelComplianceLevel",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelComplianceLevel"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelComplianceLevel.MODEL_COMPLIANCE_LEVEL_UNSPECIFIED",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelComplianceLevel.ExaCodeiumCommonPb_ModelComplianceLevel_MODEL_COMPLIANCE_LEVEL_UNSPECIFIED"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelComplianceLevel.MODEL_COMPLIANCE_LEVEL_FRH",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelComplianceLevel.ExaCodeiumCommonPb_ModelComplianceLevel_MODEL_COMPLIANCE_LEVEL_FRH"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelComplianceLevel.MODEL_COMPLIANCE_LEVEL_IL4",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelComplianceLevel.ExaCodeiumCommonPb_ModelComplianceLevel_MODEL_COMPLIANCE_LEVEL_IL4"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelComplianceLevel.MODEL_COMPLIANCE_LEVEL_IL5",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelComplianceLevel.ExaCodeiumCommonPb_ModelComplianceLevel_MODEL_COMPLIANCE_LEVEL_IL5"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelComplianceLevel.MODEL_COMPLIANCE_LEVEL_IL6",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelComplianceLevel.ExaCodeiumCommonPb_ModelComplianceLevel_MODEL_COMPLIANCE_LEVEL_IL6"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.ModelComplianceLevel.MODEL_COMPLIANCE_LEVEL_ITAR",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_ModelComplianceLevel.ExaCodeiumCommonPb_ModelComplianceLevel_MODEL_COMPLIANCE_LEVEL_ITAR"
+      },
+      {
         "kind": "enum",
         "original": "exa.codeium_common_pb.TransactionStatus",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_TransactionStatus"
@@ -10011,26 +10151,6 @@
       },
       {
         "kind": "enum",
-        "original": "exa.codeium_common_pb.AnnotationsConfig",
-        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_AnnotationsConfig"
-      },
-      {
-        "kind": "enum_value",
-        "original": "exa.codeium_common_pb.AnnotationsConfig.ANNOTATIONS_CONFIG_UNSPECIFIED",
-        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_AnnotationsConfig.ExaCodeiumCommonPb_AnnotationsConfig_ANNOTATIONS_CONFIG_UNSPECIFIED"
-      },
-      {
-        "kind": "enum_value",
-        "original": "exa.codeium_common_pb.AnnotationsConfig.ANNOTATIONS_CONFIG_ENABLED",
-        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_AnnotationsConfig.ExaCodeiumCommonPb_AnnotationsConfig_ANNOTATIONS_CONFIG_ENABLED"
-      },
-      {
-        "kind": "enum_value",
-        "original": "exa.codeium_common_pb.AnnotationsConfig.ANNOTATIONS_CONFIG_DISABLED",
-        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_AnnotationsConfig.ExaCodeiumCommonPb_AnnotationsConfig_ANNOTATIONS_CONFIG_DISABLED"
-      },
-      {
-        "kind": "enum",
         "original": "exa.codeium_common_pb.BrowserExperimentalFeaturesConfig",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_BrowserExperimentalFeaturesConfig"
       },
@@ -10168,6 +10288,11 @@
         "kind": "enum_value",
         "original": "exa.codeium_common_pb.DisplayOption.DISPLAY_OPTION_HIDDEN_TOOL",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_DisplayOption.ExaCodeiumCommonPb_DisplayOption_DISPLAY_OPTION_HIDDEN_TOOL"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.DisplayOption.DISPLAY_OPTION_COMPACTOR",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_DisplayOption.ExaCodeiumCommonPb_DisplayOption_DISPLAY_OPTION_COMPACTOR"
       },
       {
         "kind": "enum_value",
@@ -10476,6 +10601,11 @@
       },
       {
         "kind": "enum_value",
+        "original": "exa.codeium_common_pb.APIProvider.API_PROVIDER_COREWEAVE",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_APIProvider.ExaCodeiumCommonPb_APIProvider_API_PROVIDER_COREWEAVE"
+      },
+      {
+        "kind": "enum_value",
         "original": "exa.codeium_common_pb.APIProvider.API_PROVIDER_NEBIUS",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_APIProvider.ExaCodeiumCommonPb_APIProvider_API_PROVIDER_NEBIUS"
       },
@@ -10523,6 +10653,41 @@
         "kind": "enum_value",
         "original": "exa.codeium_common_pb.APIProvider.API_PROVIDER_BEDROCK_MANTLE_FEDERAL",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_APIProvider.ExaCodeiumCommonPb_APIProvider_API_PROVIDER_BEDROCK_MANTLE_FEDERAL"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.APIProvider.API_PROVIDER_APPLIED_COMPUTE",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_APIProvider.ExaCodeiumCommonPb_APIProvider_API_PROVIDER_APPLIED_COMPUTE"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.APIProvider.API_PROVIDER_OPENAI_INTERNAL_TESTING",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_APIProvider.ExaCodeiumCommonPb_APIProvider_API_PROVIDER_OPENAI_INTERNAL_TESTING"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.APIProvider.API_PROVIDER_MORPH",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_APIProvider.ExaCodeiumCommonPb_APIProvider_API_PROVIDER_MORPH"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.APIProvider.API_PROVIDER_BEDROCK_MANTLE_FEDERAL_ANTHROPIC",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_APIProvider.ExaCodeiumCommonPb_APIProvider_API_PROVIDER_BEDROCK_MANTLE_FEDERAL_ANTHROPIC"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.APIProvider.API_PROVIDER_OPENAI_ZDR_US_IP_WHITELIST",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_APIProvider.ExaCodeiumCommonPb_APIProvider_API_PROVIDER_OPENAI_ZDR_US_IP_WHITELIST"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.APIProvider.API_PROVIDER_ANTHROPIC_EFS_ZDR",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_APIProvider.ExaCodeiumCommonPb_APIProvider_API_PROVIDER_ANTHROPIC_EFS_ZDR"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.APIProvider.API_PROVIDER_ANTHROPIC_CYBER_VERIFIED",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_APIProvider.ExaCodeiumCommonPb_APIProvider_API_PROVIDER_ANTHROPIC_CYBER_VERIFIED"
       },
       {
         "kind": "enum",
@@ -12446,6 +12611,31 @@
       },
       {
         "kind": "enum",
+        "original": "exa.codeium_common_pb.CascadeAvailability",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_CascadeAvailability"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.CascadeAvailability.CASCADE_AVAILABILITY_UNSPECIFIED",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_CascadeAvailability.ExaCodeiumCommonPb_CascadeAvailability_CASCADE_AVAILABILITY_UNSPECIFIED"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.CascadeAvailability.CASCADE_AVAILABILITY_ENABLED",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_CascadeAvailability.ExaCodeiumCommonPb_CascadeAvailability_CASCADE_AVAILABILITY_ENABLED"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.CascadeAvailability.CASCADE_AVAILABILITY_JETBRAINS_ONLY",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_CascadeAvailability.ExaCodeiumCommonPb_CascadeAvailability_CASCADE_AVAILABILITY_JETBRAINS_ONLY"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.codeium_common_pb.CascadeAvailability.CASCADE_AVAILABILITY_DISABLED",
+        "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_CascadeAvailability.ExaCodeiumCommonPb_CascadeAvailability_CASCADE_AVAILABILITY_DISABLED"
+      },
+      {
+        "kind": "enum",
         "original": "exa.codeium_common_pb.PromptTemplaterType",
         "flattened": "exa.api_server_pb.ExaCodeiumCommonPb_PromptTemplaterType"
       },
@@ -14036,11 +14226,6 @@
       },
       {
         "kind": "message",
-        "original": "exa.cortex_pb.AddAnnotationConfig",
-        "flattened": "exa.api_server_pb.ExaCortexPb_AddAnnotationConfig"
-      },
-      {
-        "kind": "message",
         "original": "exa.cortex_pb.CascadeState",
         "flattened": "exa.api_server_pb.ExaCortexPb_CascadeState"
       },
@@ -14313,11 +14498,6 @@
         "kind": "message",
         "original": "exa.cortex_pb.HeuristicPrompt",
         "flattened": "exa.api_server_pb.ExaCortexPb_HeuristicPrompt"
-      },
-      {
-        "kind": "message",
-        "original": "exa.cortex_pb.RevertMetadata",
-        "flattened": "exa.api_server_pb.ExaCortexPb_RevertMetadata"
       },
       {
         "kind": "message",
@@ -14743,6 +14923,11 @@
         "kind": "enum_value",
         "original": "exa.cortex_pb.CortexTrajectoryType.CORTEX_TRAJECTORY_TYPE_BRAIN_UPDATE",
         "flattened": "exa.api_server_pb.ExaCortexPb_CortexTrajectoryType.ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_BRAIN_UPDATE"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.cortex_pb.CortexTrajectoryType.CORTEX_TRAJECTORY_TYPE_AI_GATEWAY",
+        "flattened": "exa.api_server_pb.ExaCortexPb_CortexTrajectoryType.ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_AI_GATEWAY"
       },
       {
         "kind": "enum",
@@ -15528,6 +15713,11 @@
         "kind": "enum_value",
         "original": "exa.cortex_pb.CortexStepType.CORTEX_STEP_TYPE_LIST_MEMORIES",
         "flattened": "exa.api_server_pb.ExaCortexPb_CortexStepType.ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_LIST_MEMORIES"
+      },
+      {
+        "kind": "enum_value",
+        "original": "exa.cortex_pb.CortexStepType.CORTEX_STEP_TYPE_AI_GATEWAY",
+        "flattened": "exa.api_server_pb.ExaCortexPb_CortexStepType.ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_AI_GATEWAY"
       },
       {
         "kind": "enum",
@@ -16453,36 +16643,6 @@
         "kind": "enum_value",
         "original": "exa.diff_action_pb.DiffType.DIFF_TYPE_COMBO",
         "flattened": "exa.api_server_pb.ExaDiffActionPb_DiffType.ExaDiffActionPb_DiffType_DIFF_TYPE_COMBO"
-      },
-      {
-        "kind": "message",
-        "original": "exa.eval.pr_eval.datasets_pb.MetricScoreContribution",
-        "flattened": "exa.api_server_pb.ExaEvalPrEvalDatasetsPb_MetricScoreContribution"
-      },
-      {
-        "kind": "message",
-        "original": "exa.eval.pr_eval.datasets_pb.ScoreCalculationConfig",
-        "flattened": "exa.api_server_pb.ExaEvalPrEvalDatasetsPb_ScoreCalculationConfig"
-      },
-      {
-        "kind": "message",
-        "original": "exa.eval.pr_eval.datasets_pb.DetailStringFilter",
-        "flattened": "exa.api_server_pb.ExaEvalPrEvalDatasetsPb_DetailStringFilter"
-      },
-      {
-        "kind": "message",
-        "original": "exa.eval.pr_eval.datasets_pb.MetricsRecordFilterRequest",
-        "flattened": "exa.api_server_pb.ExaEvalPrEvalDatasetsPb_MetricsRecordFilterRequest"
-      },
-      {
-        "kind": "message",
-        "original": "exa.eval.pr_eval.datasets_pb.FilterTrajectoryStageConfig",
-        "flattened": "exa.api_server_pb.ExaEvalPrEvalDatasetsPb_FilterTrajectoryStageConfig"
-      },
-      {
-        "kind": "message",
-        "original": "exa.eval.pr_eval.datasets_pb.MergeFormattedPreferencePairsConfig",
-        "flattened": "exa.api_server_pb.ExaEvalPrEvalDatasetsPb_MergeFormattedPreferencePairsConfig"
       },
       {
         "kind": "message",
@@ -17661,16 +17821,6 @@
       },
       {
         "kind": "message",
-        "original": "exa.extension_server_pb.CancelVibeAndReplaceRequest",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_CancelVibeAndReplaceRequest"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.CancelVibeAndReplaceResponse",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_CancelVibeAndReplaceResponse"
-      },
-      {
-        "kind": "message",
         "original": "exa.extension_server_pb.StartAudioRecordingRequest",
         "flattened": "exa.api_server_pb.ExaExtensionServerPb_StartAudioRecordingRequest"
       },
@@ -17911,16 +18061,6 @@
       },
       {
         "kind": "message",
-        "original": "exa.extension_server_pb.RefreshURIsRequest",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_RefreshURIsRequest"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.RefreshURIsResponse",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_RefreshURIsResponse"
-      },
-      {
-        "kind": "message",
         "original": "exa.extension_server_pb.OpenConfigurePluginsPageRequest",
         "flattened": "exa.api_server_pb.ExaExtensionServerPb_OpenConfigurePluginsPageRequest"
       },
@@ -17996,36 +18136,6 @@
       },
       {
         "kind": "message",
-        "original": "exa.extension_server_pb.AddAnnotationRequest",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_AddAnnotationRequest"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.AddAnnotationResponse",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_AddAnnotationResponse"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.RemoveAnnotationRequest",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_RemoveAnnotationRequest"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.RemoveAnnotationResponse",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_RemoveAnnotationResponse"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.ShowAnnotationRequest",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_ShowAnnotationRequest"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.ShowAnnotationResponse",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_ShowAnnotationResponse"
-      },
-      {
-        "kind": "message",
         "original": "exa.extension_server_pb.GetSecretValueRequest",
         "flattened": "exa.api_server_pb.ExaExtensionServerPb_GetSecretValueRequest"
       },
@@ -18053,26 +18163,6 @@
         "kind": "message",
         "original": "exa.extension_server_pb.GetRedirectUriResponse",
         "flattened": "exa.api_server_pb.ExaExtensionServerPb_GetRedirectUriResponse"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.CheckExperimentRequest",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_CheckExperimentRequest"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.CheckExperimentResponse",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_CheckExperimentResponse"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.ExperimentVariant",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_ExperimentVariant"
-      },
-      {
-        "kind": "message",
-        "original": "exa.extension_server_pb.ExperimentPayload",
-        "flattened": "exa.api_server_pb.ExaExtensionServerPb_ExperimentPayload"
       },
       {
         "kind": "message",
@@ -19086,16 +19176,6 @@
       },
       {
         "kind": "message",
-        "original": "exa.language_server_pb.GetAuthTokenRequest",
-        "flattened": "exa.api_server_pb.ExaLanguageServerPb_GetAuthTokenRequest"
-      },
-      {
-        "kind": "message",
-        "original": "exa.language_server_pb.GetAuthTokenResponse",
-        "flattened": "exa.api_server_pb.ExaLanguageServerPb_GetAuthTokenResponse"
-      },
-      {
-        "kind": "message",
         "original": "exa.language_server_pb.RecordEventRequest",
         "flattened": "exa.api_server_pb.ExaLanguageServerPb_RecordEventRequest"
       },
@@ -19401,16 +19481,6 @@
       },
       {
         "kind": "message",
-        "original": "exa.language_server_pb.GetFunctionsRequest",
-        "flattened": "exa.api_server_pb.ExaLanguageServerPb_GetFunctionsRequest"
-      },
-      {
-        "kind": "message",
-        "original": "exa.language_server_pb.GetFunctionsResponse",
-        "flattened": "exa.api_server_pb.ExaLanguageServerPb_GetFunctionsResponse"
-      },
-      {
-        "kind": "message",
         "original": "exa.language_server_pb.GetClassInfosRequest",
         "flattened": "exa.api_server_pb.ExaLanguageServerPb_GetClassInfosRequest"
       },
@@ -19593,26 +19663,6 @@
         "kind": "message",
         "original": "exa.language_server_pb.RecordCommitMessageSaveResponse",
         "flattened": "exa.api_server_pb.ExaLanguageServerPb_RecordCommitMessageSaveResponse"
-      },
-      {
-        "kind": "message",
-        "original": "exa.language_server_pb.VibeAndReplaceFile",
-        "flattened": "exa.api_server_pb.ExaLanguageServerPb_VibeAndReplaceFile"
-      },
-      {
-        "kind": "message",
-        "original": "exa.language_server_pb.GenerateVibeAndReplaceStreamingRequest",
-        "flattened": "exa.api_server_pb.ExaLanguageServerPb_GenerateVibeAndReplaceStreamingRequest"
-      },
-      {
-        "kind": "message",
-        "original": "exa.language_server_pb.VibeAndReplaceData",
-        "flattened": "exa.api_server_pb.ExaLanguageServerPb_VibeAndReplaceData"
-      },
-      {
-        "kind": "message",
-        "original": "exa.language_server_pb.GenerateVibeAndReplaceStreamingResponse",
-        "flattened": "exa.api_server_pb.ExaLanguageServerPb_GenerateVibeAndReplaceStreamingResponse"
       },
       {
         "kind": "message",
@@ -22056,6 +22106,11 @@
       },
       {
         "kind": "message",
+        "original": "exa.seat_management_pb.UserGroupMemberships",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_UserGroupMemberships"
+      },
+      {
+        "kind": "message",
         "original": "exa.seat_management_pb.GetUsersResponse",
         "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetUsersResponse"
       },
@@ -22706,6 +22761,16 @@
       },
       {
         "kind": "message",
+        "original": "exa.seat_management_pb.GetConversationSharingPolicyRequest",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetConversationSharingPolicyRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GetConversationSharingPolicyResponse",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetConversationSharingPolicyResponse"
+      },
+      {
+        "kind": "message",
         "original": "exa.seat_management_pb.GetGroupsRequest",
         "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetGroupsRequest"
       },
@@ -23218,6 +23283,21 @@
         "kind": "message",
         "original": "exa.seat_management_pb.SetOrgConfigRecordResponse",
         "flattened": "exa.api_server_pb.ExaSeatManagementPb_SetOrgConfigRecordResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GetAllOrgConfigRecordsRequest",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetAllOrgConfigRecordsRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.OrgConfigRecord",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_OrgConfigRecord"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GetAllOrgConfigRecordsResponse",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetAllOrgConfigRecordsResponse"
       },
       {
         "kind": "message",
@@ -23883,6 +23963,96 @@
         "kind": "message",
         "original": "exa.seat_management_pb.PreviewApiKeyExpirationImpactResponse",
         "flattened": "exa.api_server_pb.ExaSeatManagementPb_PreviewApiKeyExpirationImpactResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.OnPremEntitlementInfo",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_OnPremEntitlementInfo"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.OnPremLicenseInfo",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_OnPremLicenseInfo"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GetOnPremEntitlementInternalRequest",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetOnPremEntitlementInternalRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GetOnPremEntitlementInternalResponse",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetOnPremEntitlementInternalResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.SetOnPremEntitlementInternalRequest",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_SetOnPremEntitlementInternalRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.SetOnPremEntitlementInternalResponse",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_SetOnPremEntitlementInternalResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.RevokeOnPremEntitlementInternalRequest",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_RevokeOnPremEntitlementInternalRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.RevokeOnPremEntitlementInternalResponse",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_RevokeOnPremEntitlementInternalResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.RevokeOnPremLicenseInternalRequest",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_RevokeOnPremLicenseInternalRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.RevokeOnPremLicenseInternalResponse",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_RevokeOnPremLicenseInternalResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GetOnPremLicensesRequest",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetOnPremLicensesRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GetOnPremLicensesResponse",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetOnPremLicensesResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GenerateOnPremLicenseRequest",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GenerateOnPremLicenseRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GenerateOnPremLicenseResponse",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GenerateOnPremLicenseResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.DownloadOnPremLicenseRequest",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_DownloadOnPremLicenseRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.DownloadOnPremLicenseResponse",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_DownloadOnPremLicenseResponse"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GetAirgapDownloadEligibilityRequest",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetAirgapDownloadEligibilityRequest"
+      },
+      {
+        "kind": "message",
+        "original": "exa.seat_management_pb.GetAirgapDownloadEligibilityResponse",
+        "flattened": "exa.api_server_pb.ExaSeatManagementPb_GetAirgapDownloadEligibilityResponse"
       },
       {
         "kind": "enum",
@@ -24811,6 +24981,26 @@
       },
       {
         "kind": "message",
+        "original": "exa.trust_pb.NewTrajectoriesSignal",
+        "flattened": "exa.api_server_pb.ExaTrustPb_NewTrajectoriesSignal"
+      },
+      {
+        "kind": "message",
+        "original": "exa.trust_pb.TrajectoryStepHitsSignal",
+        "flattened": "exa.api_server_pb.ExaTrustPb_TrajectoryStepHitsSignal"
+      },
+      {
+        "kind": "message",
+        "original": "exa.trust_pb.TrajectoryDistinctAccountsSignal",
+        "flattened": "exa.api_server_pb.ExaTrustPb_TrajectoryDistinctAccountsSignal"
+      },
+      {
+        "kind": "message",
+        "original": "exa.trust_pb.MultiAccountSignal",
+        "flattened": "exa.api_server_pb.ExaTrustPb_MultiAccountSignal"
+      },
+      {
+        "kind": "message",
         "original": "exa.trust_pb.CyberAbuseEvent",
         "flattened": "exa.api_server_pb.ExaTrustPb_CyberAbuseEvent"
       },
@@ -25313,6 +25503,26 @@
         "kind": "message",
         "original": "exa.user_analytics_pb.QueryRequestAllUsersCascadeRuns",
         "flattened": "exa.api_server_pb.ExaUserAnalyticsPb_QueryRequestAllUsersCascadeRuns"
+      },
+      {
+        "kind": "message",
+        "original": "exa.user_analytics_pb.QueryRequestAllUsersAgentUsage",
+        "flattened": "exa.api_server_pb.ExaUserAnalyticsPb_QueryRequestAllUsersAgentUsage"
+      },
+      {
+        "kind": "message",
+        "original": "exa.user_analytics_pb.QueryRequestAgentUsage",
+        "flattened": "exa.api_server_pb.ExaUserAnalyticsPb_QueryRequestAgentUsage"
+      },
+      {
+        "kind": "message",
+        "original": "exa.user_analytics_pb.AgentUsageQueryEntry",
+        "flattened": "exa.api_server_pb.ExaUserAnalyticsPb_AgentUsageQueryEntry"
+      },
+      {
+        "kind": "message",
+        "original": "exa.user_analytics_pb.QueryResultAgentUsage",
+        "flattened": "exa.api_server_pb.ExaUserAnalyticsPb_QueryResultAgentUsage"
       },
       {
         "kind": "message",
@@ -25981,6 +26191,11 @@
       },
       {
         "kind": "enum_value",
+        "original": "google.protobuf.Edition.EDITION_UNSTABLE",
+        "flattened": "exa.api_server_pb.GoogleProtobuf_Edition.GoogleProtobuf_Edition_EDITION_UNSTABLE"
+      },
+      {
+        "kind": "enum_value",
         "original": "google.protobuf.Edition.EDITION_1_TEST_ONLY",
         "flattened": "exa.api_server_pb.GoogleProtobuf_Edition.GoogleProtobuf_Edition_EDITION_1_TEST_ONLY"
       },
@@ -26475,8 +26690,8 @@
         "exa/trust_pb/trust.proto",
         "google/protobuf/timestamp.proto"
       ],
-      "messages": 374,
-      "enums": 7,
+      "messages": 384,
+      "enums": 8,
       "services": 1,
       "extensions": 0,
       "source_info_locations": 0,
@@ -26621,8 +26836,8 @@
         "google/protobuf/duration.proto",
         "google/protobuf/timestamp.proto"
       ],
-      "messages": 228,
-      "enums": 97,
+      "messages": 232,
+      "enums": 99,
       "services": 0,
       "extensions": 0,
       "source_info_locations": 0,
@@ -26660,7 +26875,7 @@
         "google/protobuf/empty.proto",
         "google/protobuf/timestamp.proto"
       ],
-      "messages": 313,
+      "messages": 311,
       "enums": 46,
       "services": 0,
       "extensions": 0,
@@ -26696,20 +26911,6 @@
       "locations_with_comments": 0
     },
     {
-      "name": "exa/eval/pr_eval/datasets_pb/datasets.proto",
-      "package": "exa.eval.pr_eval.datasets_pb",
-      "syntax": "proto3",
-      "dependencies": [
-        "exa/cortex_pb/cortex.proto"
-      ],
-      "messages": 6,
-      "enums": 0,
-      "services": 0,
-      "extensions": 0,
-      "source_info_locations": 0,
-      "locations_with_comments": 0
-    },
-    {
       "name": "exa/eval_pb/eval.proto",
       "package": "exa.eval_pb",
       "syntax": "proto3",
@@ -26720,7 +26921,6 @@
         "exa/codeium_common_pb/codeium_common.proto",
         "exa/context_module_pb/context_module.proto",
         "exa/cortex_pb/cortex.proto",
-        "exa/eval/pr_eval/datasets_pb/datasets.proto",
         "exa/model_management_pb/model_management.proto",
         "exa/trainer_pb/config.proto"
       ],
@@ -26741,7 +26941,7 @@
         "exa/cortex_pb/cortex.proto",
         "exa/language_server_pb/language_server.proto"
       ],
-      "messages": 108,
+      "messages": 94,
       "enums": 3,
       "services": 1,
       "extensions": 0,
@@ -26818,7 +27018,7 @@
         "google/protobuf/duration.proto",
         "google/protobuf/timestamp.proto"
       ],
-      "messages": 388,
+      "messages": 380,
       "enums": 11,
       "services": 1,
       "extensions": 0,
@@ -26910,7 +27110,7 @@
         "exa/codeium_common_pb/codeium_common.proto",
         "google/protobuf/timestamp.proto"
       ],
-      "messages": 378,
+      "messages": 402,
       "enums": 9,
       "services": 1,
       "extensions": 0,
@@ -26963,7 +27163,7 @@
       "dependencies": [
         "google/protobuf/timestamp.proto"
       ],
-      "messages": 17,
+      "messages": 21,
       "enums": 4,
       "services": 0,
       "extensions": 0,
@@ -26979,7 +27179,7 @@
         "exa/codeium_common_pb/codeium_common.proto",
         "google/protobuf/timestamp.proto"
       ],
-      "messages": 122,
+      "messages": 126,
       "enums": 4,
       "services": 1,
       "extensions": 0,
