@@ -175,17 +175,13 @@ type rateGate struct {
 	persistDone     chan struct{}
 	// 闩迁移事件环：计数器只说发生过几次上闩，事件环回答「什么时候闩的、
 	// 闩了多久、怎么解的」——概览趋势图的闩时段底色与系统页事件表同源。
-	events    [gateEventCap]GateEvent
-	eventHead int
-	eventSize int
-	// waits/waitHead/waitSize 是 wait 结局样本环（与 events 同构）：
-	// 每次评估从进闸到结局各记一条——放行/拒绝/取消全录，无幸存者
-	// 口径偏差；waitEvals 是启动以来累计评估数（环满后 Samples 饱和、
-	// Evals 继续走）。stats 聚合出分类等待分位与 err 分位
-	// （est−wait），是 expectedWait 估计器的实测校准面。
-	waits     [gateWaitCap]gateWaitSample
-	waitHead  int
-	waitSize  int
+	events eventRing[GateEvent]
+	// waits 是 wait 结局样本环（与 events 同构）：每次评估从进闸到结局
+	// 各记一条——放行/拒绝/取消全录，无幸存者口径偏差；waitEvals 是
+	// 启动以来累计评估数（环满后 Samples 饱和、Evals 继续走）。stats
+	// 聚合出分类等待分位与 err 分位（est−wait），是 expectedWait
+	// 估计器的实测校准面。
+	waits     eventRing[gateWaitSample]
 	waitEvals int
 	// waitTotal* 是进程期累计的分类等待账（与样本环并行：环是近窗，
 	// 账是全期单调计数）——快照差分即任意区间的分类等待率
@@ -338,11 +334,7 @@ func (gate *rateGate) pushEvent(kind string, until time.Time, detail string) {
 		u := until
 		ev.Until = &u
 	}
-	gate.events[gate.eventHead] = ev
-	gate.eventHead = (gate.eventHead + 1) % gateEventCap
-	if gate.eventSize < gateEventCap {
-		gate.eventSize++
-	}
+	gate.events.push(ev)
 }
 
 // expireIfDue 把到期的闩自然失效化：补 expired 事件并清闩——闩到期
@@ -472,6 +464,8 @@ func newRateGate(params GateConfig, states *store.Store, stateKey string) *rateG
 		states:   states,
 		stateKey: stateKey,
 		now:      time.Now,
+		events:   newEventRing[GateEvent](gateEventCap),
+		waits:    newEventRing[gateWaitSample](gateWaitCap),
 	}
 	if rest, ok := strings.CutPrefix(stateKey, "gate:"); ok {
 		gate.lane = rest
@@ -839,9 +833,7 @@ func (gate *rateGate) stats() GateStats {
 			stats.PaceAllowance = gate.bgAllowance(now, ws, stats.Reserve)
 		}
 	}
-	for i := 1; i <= gate.eventSize; i++ {
-		stats.Events = append(stats.Events, gate.events[(gate.eventHead-i+gateEventCap)%gateEventCap])
-	}
+	stats.Events = gate.events.recent()
 	if !gate.limitedUntil.IsZero() {
 		until := gate.limitedUntil
 		stats.LimitedUntil = &until
@@ -854,14 +846,13 @@ func (gate *rateGate) stats() GateStats {
 // waitView 把样本环聚合成分类摘要：等待分位按墙钟毫秒计，结局计数
 // 同步分出（拒绝再按 reason 细账）。调用方须持 mu。
 func (gate *rateGate) waitView() *GateWait {
-	if gate.waitSize == 0 {
+	if gate.waits.size == 0 {
 		return nil
 	}
-	view := &GateWait{Samples: gate.waitSize, Evals: gate.waitEvals}
-	all := make([]gateWaitSample, 0, gate.waitSize)
+	view := &GateWait{Samples: gate.waits.size, Evals: gate.waitEvals}
+	all := make([]gateWaitSample, 0, gate.waits.size)
 	var fg, bg []gateWaitSample
-	for i := gate.waitSize; i >= 1; i-- {
-		s := gate.waits[(gate.waitHead-i+gateWaitCap)%gateWaitCap]
+	gate.waits.each(func(s gateWaitSample) {
 		if s.outcome == gateWaitReject {
 			if view.Rejects == nil {
 				view.Rejects = map[string]int{}
@@ -874,7 +865,7 @@ func (gate *rateGate) waitView() *GateWait {
 		} else {
 			fg = append(fg, s)
 		}
-	}
+	})
 	since := all[0].at // 环按写入序遍历，首元素即最老样本
 	view.Since = &since
 	view.All = summarizeWaits(all)
@@ -1052,7 +1043,7 @@ func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used i
 // 仍在闩中的时段收到 now；当前闩的开窗事件滚出环外时给 nil Start。
 // 调用方须持 mu。
 func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
-	if gate.eventSize == 0 {
+	if gate.events.size == 0 {
 		return nil
 	}
 	var ranges []GateLatchRange
@@ -1065,8 +1056,7 @@ func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
 		}
 	}
 	// 事件环按写入序（旧到新）重放——stats.Events 的新在前序是展示序。
-	for i := gate.eventSize; i >= 1; i-- {
-		ev := gate.events[(gate.eventHead-i+gateEventCap)%gateEventCap]
+	gate.events.each(func(ev GateEvent) {
 		until := ev.At
 		if ev.Until != nil {
 			until = *ev.Until
@@ -1089,7 +1079,7 @@ func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
 		case gateEventExpired:
 			closeOpen(until)
 		}
-	}
+	})
 	if open != nil {
 		end := open.End
 		if now.Before(end) {
@@ -1347,11 +1337,7 @@ func (gate *rateGate) recordWait(class string, err error, entered time.Time, est
 		sample.outcome = gateWaitCancel
 	}
 	gate.mu.Lock()
-	gate.waits[gate.waitHead] = sample
-	gate.waitHead = (gate.waitHead + 1) % gateWaitCap
-	if gate.waitSize < gateWaitCap {
-		gate.waitSize++
-	}
+	gate.waits.push(sample)
 	gate.waitEvals++
 	total := &gate.waitTotalFg
 	if class == adapter.ClassBG {

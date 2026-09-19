@@ -1171,8 +1171,7 @@ func TestRateGateWaitSamples(t *testing.T) {
 		t.Fatalf("fg err summary = count %d p50 %dms, want count=1 err≈0", fg.ErrCount, fg.ErrP50Ms)
 	}
 	var admits, rejects, cancels int
-	for i := 0; i < gate.waitSize; i++ {
-		s := gate.waits[(gate.waitHead-1-i+gateWaitCap)%gateWaitCap]
+	for _, s := range gate.waits.recent() {
 		switch s.outcome {
 		case gateWaitAdmit:
 			admits++

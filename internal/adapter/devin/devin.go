@@ -188,10 +188,10 @@ type Adapter struct {
 	// ensureCatalog 调用方拿到同一 modelsErr，不记会按请求频率
 	// 刷屏；下一次拉取失败提交新冷却时重置（见 ListModels）。
 	modelsErrWarned bool
-	// modelsFetch 非 nil 表示有目录拉取在锁外进行中：等待者 select 该
-	// channel（吃自己的 ctx，断连可中途退出），拉取方提交缓存/冷却
-	// 之后 close 它，被唤醒方重走复查路径拿结果。
-	modelsFetch chan struct{}
+	// catalogFlights 收敛并发目录拉取为单次上游调用：目录全局一份
+	// 单槽键（catalogFlightKey），登记锁取 modelsMu——目录缓存/冷却窗/
+	// 在飞登记同属一个锁域。
+	catalogFlights flightCache[string, []adapter.ModelInfo]
 	// warnedAbsentModels 给「模型缺席目录」告警按 uid 去重：别名目标
 	// 是配置级事实，每进程警一次足够，不该按请求频率刷屏。
 	warnedAbsentModels sync.Map
@@ -206,10 +206,10 @@ type Adapter struct {
 	// 每请求一次的解析往返。
 	assignmentsMu sync.Mutex
 	assignments   map[string]resolvedAssignment
-	// assignmentsFetch 登记同键的在飞 AssignModel 调用：同会话并发
-	// 请求共享一次解析（模式同 modelsFetch），等待者收 done 后直接
-	// 读 flight 上的共享结果，不各发一次 RPC。
-	assignmentsFetch map[string]*assignFlight
+	// assignFlights 收敛同键的在飞 AssignModel 调用：同会话并发请求
+	// 共享一次解析（模式同 catalogFlights），等待者收 done 后直接读
+	// flight 上的共享结果，不各发一次 RPC。
+	assignFlights flightCache[string, resolvedAssignment]
 	// detached 是完成缓存：客户端断开后仍在后台续命的流按语义请求
 	// 键登记，同键重试重放已缓冲事件或挂接追帧（见 detached.go）。
 	// 号池下逐 lane 各持一份——重试经 SessionAffinity 钉回同 lane
@@ -221,15 +221,6 @@ type Adapter struct {
 type resolvedAssignment struct {
 	modelUID string
 	jwt      string
-}
-
-// assignFlight 是一次在飞 AssignModel 调用的共享句柄：done 关闭前
-// result/err 已写定（close 建立 happens-before），同键等待者直接取
-// 共享结果——失败也随结果广播，不产生逐个重试的串行风暴。
-type assignFlight struct {
-	done   chan struct{}
-	result resolvedAssignment
-	err    error
 }
 
 // upstreamLink 是一次「上游端点」的固化产物：stream/api 两个 connect
@@ -482,11 +473,11 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 		// assignment jwt 绑 cascade_id 且只认签发它的端点与凭据：换端点
 		// 或换账号后旧缓存若被复用会撞 jwt↔account 校验（permission_denied
 		// 且自愈救不回），清空强制重 assign——清缓存只付一次重解析，
-		// 方向安全。assignmentsFetch 同清：在飞调用的提交以「flight 仍是
+		// 方向安全。assignFlights 同清：在飞调用的提交以「flight 仍是
 		// 注册项」为前提，清表即让旧端点/旧凭据在飞的解析结果不落缓存。
 		adapter.assignmentsMu.Lock()
 		clear(adapter.assignments)
-		clear(adapter.assignmentsFetch)
+		adapter.assignFlights.reset()
 		adapter.assignmentsMu.Unlock()
 	}
 
@@ -1270,53 +1261,33 @@ var preGateTimeout = 10 * time.Second
 // docs/upstream-protocol.md 路由节：非 router uid → invalid_argument，
 // 不存在的 router → not_found。
 //
-// 同键并发收敛为单次上游调用（模式同 ListModels 的 modelsFetch）：在飞
-// 调用 detach 自首发者 ctx——结果是键级共享状态，一个客户端断连不该
-// 让全体等待者吃 context.Canceled；等待者吃自己的 ctx 可随时退出。
+// 同键并发收敛为单次上游调用（assignFlights 骨架，模式同 ListModels）：
+// 在飞调用 detach 自首发者 ctx——结果是键级共享状态，一个客户端断连
+// 不该让全体等待者吃 context.Canceled；等待者吃自己的 ctx 可随时退出。
 // detach 的在飞调用由 preGateTimeout 兜底，等待者经 done 广播共享
 // 同一超时失败，不必各自设限。
 // 提交只在 flight 仍是注册项时生效：配置清空（换端点/换凭据）后在飞
 // 解析结果落进缓存就是把陈旧 jwt 借尸还魂。
 func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID string) (resolvedAssignment, error) {
 	key := routerUID + "|" + cascadeID
-	adapter.assignmentsMu.Lock()
-	if cached, ok := adapter.assignments[key]; ok {
-		adapter.assignmentsMu.Unlock()
-		return cached, nil
-	}
-	if flight := adapter.assignmentsFetch[key]; flight != nil {
-		adapter.assignmentsMu.Unlock()
-		select {
-		case <-flight.done:
-			return flight.result, flight.err
-		case <-ctx.Done():
-			return resolvedAssignment{}, ctx.Err()
-		}
-	}
-	if adapter.assignmentsFetch == nil {
-		adapter.assignmentsFetch = make(map[string]*assignFlight)
-	}
-	flight := &assignFlight{done: make(chan struct{})}
-	adapter.assignmentsFetch[key] = flight
-	adapter.assignmentsMu.Unlock()
-
-	result, err := adapter.callAssignModel(context.WithoutCancel(ctx), routerUID, cascadeID)
-
-	adapter.assignmentsMu.Lock()
-	if adapter.assignmentsFetch[key] == flight {
-		delete(adapter.assignmentsFetch, key)
-		if err == nil {
-			// 有界缓存：会话级键随运行时长累积，触顶整体清空让会话重新解析。
-			if len(adapter.assignments) >= 4096 {
-				adapter.assignments = make(map[string]resolvedAssignment)
+	return adapter.assignFlights.run(ctx, key, &adapter.assignmentsMu,
+		func() (resolvedAssignment, error, bool) {
+			cached, ok := adapter.assignments[key]
+			return cached, nil, ok
+		},
+		func(fetchCtx context.Context) (resolvedAssignment, error) {
+			return adapter.callAssignModel(fetchCtx, routerUID, cascadeID)
+		},
+		func(_ context.Context, result resolvedAssignment, err error) (resolvedAssignment, error) {
+			if err == nil {
+				// 有界缓存：会话级键随运行时长累积，触顶整体清空让会话重新解析。
+				if len(adapter.assignments) >= 4096 {
+					adapter.assignments = make(map[string]resolvedAssignment)
+				}
+				adapter.assignments[key] = result
 			}
-			adapter.assignments[key] = result
-		}
-	}
-	flight.result, flight.err = result, err
-	adapter.assignmentsMu.Unlock()
-	close(flight.done)
-	return result, err
+			return result, err
+		})
 }
 
 // callAssignModel 执行一次 AssignModel RPC 并整形结果；在飞去重、缓存
@@ -1401,58 +1372,51 @@ func modelLikelySupportsImages(model string) bool {
 	return true
 }
 
+// catalogFlightKey 是目录拉取在 catalogFlights 里的单槽键：目录全局
+// 一份，不需要按请求参数分键。
+const catalogFlightKey = "catalog"
+
 // ListModels 通过 GetCliModelConfigs 拉取可用模型目录，结果带 TTL 缓存。
-// 并发 miss 收敛为单次上游调用（singleflight）：拉取在锁外进行且 detach
-// 自调用方 ctx——目录是 adapter 级共享状态，一个客户端断连不该掐死
-// 全体等待者共享的拉取；等待者吃自己的 ctx，可随时退出。
-// 缓存/冷却先于 close(fetch) 提交，被唤醒方走复查只会看到已提交状态。
+// 并发 miss 收敛为单次上游调用（catalogFlights 骨架）：拉取在锁外进行且
+// detach 自调用方 ctx——目录是 adapter 级共享状态，一个客户端断连不该掐死
+// 全体等待者共享的拉取；等待者吃自己的 ctx，可随时退出。读锁快路在骨架
+// 之外——新鲜缓存不付写锁；commit 先于 done 广播，被唤醒方拿到的就是
+// 已提交的缓存/冷却结局。
 // CLI 版响应比 Cascade 版多 subagent_default_model_uid/default_override_model_config，
 // 且 modelInfo.modelFeatures 提供 tool_calls/thinking/parallel 能力位。
 func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
-	for {
-		a.modelsMu.RLock()
-		if a.models != nil && time.Now().Before(a.modelsExpiry) {
-			cached := a.models
-			a.modelsMu.RUnlock()
-			return cached, nil
-		}
+	// 读锁快路：新鲜缓存不付写锁。
+	a.modelsMu.RLock()
+	if a.models != nil && time.Now().Before(a.modelsExpiry) {
+		cached := a.models
 		a.modelsMu.RUnlock()
+		return cached, nil
+	}
+	a.modelsMu.RUnlock()
 
-		a.modelsMu.Lock()
-		if a.models != nil && time.Now().Before(a.modelsExpiry) {
-			models := a.models
-			a.modelsMu.Unlock()
-			return models, nil
-		}
-		// 失败冷却期不再打上游：有旧值回旧值，空缓存回上次错误。
-		if time.Now().Before(a.modelsRetryUntil) {
-			if a.models != nil {
-				models := a.models
-				a.modelsMu.Unlock()
+	return a.catalogFlights.run(ctx, catalogFlightKey, &a.modelsMu,
+		func() ([]adapter.ModelInfo, error, bool) {
+			if a.models != nil && time.Now().Before(a.modelsExpiry) {
+				return a.models, nil, true
+			}
+			// 失败冷却期不再打上游：有旧值回旧值，空缓存回上次错误。
+			if time.Now().Before(a.modelsRetryUntil) {
+				if a.models != nil {
+					return a.models, nil, true
+				}
+				return nil, a.modelsErr, true
+			}
+			return nil, nil, false
+		},
+		a.fetchModelCatalog,
+		func(callerCtx context.Context, models []adapter.ModelInfo, err error) ([]adapter.ModelInfo, error) {
+			if err == nil {
+				a.models = models
+				a.modelsExpiry = time.Now().Add(a.modelsCacheTTL)
+				a.modelsRetryUntil = time.Time{}
+				a.modelsErr = nil
 				return models, nil
 			}
-			err := a.modelsErr
-			a.modelsMu.Unlock()
-			return nil, err
-		}
-		if fetch := a.modelsFetch; fetch != nil {
-			a.modelsMu.Unlock()
-			select {
-			case <-fetch:
-				continue // 拉取方已提交缓存或冷却，复查拿结果
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-		a.modelsFetch = make(chan struct{})
-		a.modelsMu.Unlock()
-
-		models, err := a.fetchModelCatalog(context.WithoutCancel(ctx))
-
-		a.modelsMu.Lock()
-		done := a.modelsFetch
-		a.modelsFetch = nil
-		if err != nil {
 			// fetch 的 ctx 经 WithoutCancel detach，调用方取消传不进来
 			//（Canceled 实际不可达，留作兜底判据）；可达的 ctx 错误是
 			// preGateTimeout 的 DeadlineExceeded——那是上游挂起的
@@ -1471,26 +1435,15 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 			}
 			// 目录刷新失败但有旧缓存时回旧值：catalog 缺席会让面板与
 			// 能力位校验同时失去依据，比数据稍旧危害更大。
-			stale := a.models
-			a.modelsMu.Unlock()
-			close(done)
-			if stale != nil {
+			if a.models != nil {
 				// 调用方 ctx 已死（排空/断连）时的失败属噪声不报。
-				if ctx.Err() == nil {
+				if callerCtx.Err() == nil {
 					slog.Warn("model catalog refresh failed; serving stale cache", "error", err)
 				}
-				return stale, nil
+				return a.models, nil
 			}
 			return nil, err
-		}
-		a.models = models
-		a.modelsExpiry = time.Now().Add(a.modelsCacheTTL)
-		a.modelsRetryUntil = time.Time{}
-		a.modelsErr = nil
-		a.modelsMu.Unlock()
-		close(done)
-		return models, nil
-	}
+		})
 }
 
 // fetchModelCatalog 执行一次 GetCliModelConfigs 拉取并整形目录（去重、

@@ -319,12 +319,10 @@ type cacheWarmer struct {
 	retiredByCause         WarmRetiredStats
 	pingMissPrefillTokens  int64
 	pingHitCacheReadTokens int64
-	// events/eventHead/eventSize 是 ping 结局事件环（与 gate.events
-	// 同构）：每轮 ping 一条，hit/miss/skip/error 全录——计数器只有
-	// 累计量，miss 连发的时间分布与 skip 成因靠本环观测。
-	events    [warmEventCap]WarmEvent
-	eventHead int
-	eventSize int
+	// events 是 ping 结局事件环（与 gate.events 同构）：每轮 ping 一条，
+	// hit/miss/skip/error 全录——计数器只有累计量，miss 连发的时间
+	// 分布与 skip 成因靠本环观测。
+	events eventRing[WarmEvent]
 }
 
 // newCacheWarmer 创建并启动保温调度协程：Enabled 与否都起——开关
@@ -334,6 +332,7 @@ func newCacheWarmer(adapter *Adapter, params WarmConfig) *cacheWarmer {
 		adapter:  adapter,
 		sendPing: adapter.sendWarmPing,
 		now:      time.Now,
+		events:   newEventRing[WarmEvent](warmEventCap),
 		jitter:   func() float64 { return rand.Float64()*2 - 1 },
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -522,11 +521,7 @@ func (w *cacheWarmer) noteCompleted(key warmLineageKey, msg *llm.AssistantMessag
 // 同源）。调用方须持 mu。
 func (w *cacheWarmer) pushEvent(ev WarmEvent) {
 	ev.At = w.now()
-	w.events[w.eventHead] = ev
-	w.eventHead = (w.eventHead + 1) % warmEventCap
-	if w.eventSize < warmEventCap {
-		w.eventSize++
-	}
+	w.events.push(ev)
 }
 
 // stats 返回簿记快照；顺带按当前参数统计 promoted/suspect 现值，
@@ -549,9 +544,7 @@ func (w *cacheWarmer) stats() WarmStats {
 		PingHitCacheReadTokens: w.pingHitCacheReadTokens,
 		FailoverSuspects:       w.failoverSuspects,
 	}
-	for i := 1; i <= w.eventSize; i++ {
-		stats.Events = append(stats.Events, w.events[(w.eventHead-i+warmEventCap)%warmEventCap])
-	}
+	stats.Events = w.events.recent()
 	for _, entry := range w.entries {
 		if !entry.suspectAt.IsZero() {
 			stats.Suspects++

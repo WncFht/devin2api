@@ -310,9 +310,7 @@ type detachedRegistry struct {
 	// 折损率都从这俩数读，与台账 ledgerDrops 分开记账。
 	seeded    int64
 	blobDrops int64
-	events    [detachedEventCap]DetachedEvent
-	eventHead int
-	eventSize int
+	events    eventRing[DetachedEvent]
 }
 
 // detachedEventCap 是缓存事件环容量：脱钩/挂接/终局/移除低频，
@@ -537,7 +535,12 @@ func mergeDetachedStats(per map[string]DetachedStats) DetachedStats {
 // newDetachedRegistry 创建空缓存。ledger 非空时生命周期事件同步落
 // detached_events 台账（每事件一行）；lane 名作为台账的归属维写入。
 func newDetachedRegistry(ledger *store.Store, lane string) *detachedRegistry {
-	return &detachedRegistry{entries: make(map[string]*detachedEntry), ledger: ledger, lane: lane}
+	return &detachedRegistry{
+		entries: make(map[string]*detachedEntry),
+		ledger:  ledger,
+		lane:    lane,
+		events:  newEventRing[DetachedEvent](detachedEventCap),
+	}
 }
 
 // detachedPeersKey 是兄弟 lane 完成缓存登记表在请求 ctx 里的挂接键
@@ -858,17 +861,13 @@ func (registry *detachedRegistry) noteBlobDrop() {
 // 是内存环之下的持久层，不是替代。
 func (registry *detachedRegistry) pushEvent(kind, key, originDir, detail string) {
 	at := time.Now()
-	registry.events[registry.eventHead] = DetachedEvent{
+	registry.events.push(DetachedEvent{
 		At:     at,
 		Kind:   kind,
 		Key:    detachedRingKey(key),
 		Detail: detail,
 		Label:  detachedEventLabel(kind, detail),
-	}
-	registry.eventHead = (registry.eventHead + 1) % detachedEventCap
-	if registry.eventSize < detachedEventCap {
-		registry.eventSize++
-	}
+	})
 	if registry.ledger == nil {
 		return
 	}
@@ -946,9 +945,7 @@ func (registry *detachedRegistry) stats() DetachedStats {
 	stats.LedgerDrops = registry.ledgerDrops
 	stats.Seeded = registry.seeded
 	stats.BlobDrops = registry.blobDrops
-	for i := 1; i <= registry.eventSize; i++ {
-		stats.Events = append(stats.Events, registry.events[(registry.eventHead-i+detachedEventCap)%detachedEventCap])
-	}
+	stats.Events = registry.events.recent()
 	return stats
 }
 
