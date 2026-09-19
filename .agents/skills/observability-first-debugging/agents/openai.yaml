@@ -1,3 +1,0 @@
-interface:
-  display_name: "可观测性优先调试"
-  short_description: "调试时先证据后假设"
