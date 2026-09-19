@@ -236,6 +236,29 @@ if [[ "${NRESTARTS_AFTER:-0}" -gt "${NRESTARTS_BEFORE:-0}" ]]; then
 fi
 echo "==> running: pid=${NEW_PID:-?} version=${RUNNING}"
 
+# -wal 高水位化石回收：RESTART/PASSIVE checkpoint 只回写不截文件，reuseport
+# 交接又让 db 永远没有「最后连接关闭」时机——文件涨到多大就冻在多大。
+# TRUNCATE 是唯一收缩路径：帧全部回写 db 后才 ftruncate 到零，回写在前
+# 所以崩溃安全。新实例已接管、旧进程在排空/已退出——此时做 best-effort
+# 回收：busy_timeout 等排空期残留的 reader/writer 让位，等不到或 sqlite3
+# 失败只告警跳过（化石留给下次部署），绝不因回收失败拖垮部署。
+DB_FILE="${STATE_DIR}/devin-2api.db"
+WAL_FILE="${DB_FILE}-wal"
+if [[ -f "${DB_FILE}" && -f "${WAL_FILE}" ]] && command -v sqlite3 >/dev/null; then
+	WAL_BYTES="$(stat -c %s "${WAL_FILE}" 2>/dev/null || echo 0)"
+	# 阈值与 Maintain 的 64MB 一致：之下的 wal 由运行期 RESTART 维持即可。
+	if [[ "${WAL_BYTES}" -gt 67108864 ]]; then
+		CKPT_OUT="$(timeout 30 sqlite3 "${DB_FILE}" \
+			"PRAGMA busy_timeout=10000; PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null)" || CKPT_OUT=""
+		CKPT_ROW="$(printf '%s\n' "${CKPT_OUT}" | tail -n 1)"
+		if [[ "${CKPT_ROW%%|*}" == "0" ]]; then
+			echo "==> wal_checkpoint(TRUNCATE): ${CKPT_ROW##*|} 页回写，-wal $((WAL_BYTES / 1048576))MB → $(($(stat -c %s "${WAL_FILE}" 2>/dev/null || echo 0) / 1048576))MB"
+		else
+			warn "wal_checkpoint(TRUNCATE) 未完成（${CKPT_ROW:-sqlite3 失败或超时}）——-wal 保留 $((WAL_BYTES / 1048576))MB，不影响部署结果"
+		fi
+	fi
+fi
+
 # user 服务随最后一个会话退出；要未登录也常驻需开 linger（免 root，
 # 部分发行版经 polkit 弹授权）。
 if ! loginctl show-user "${USER}" -p Linger --value 2>/dev/null | grep -qx yes; then
