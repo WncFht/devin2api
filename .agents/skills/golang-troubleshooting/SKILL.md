@@ -1,6 +1,6 @@
 ---
 name: golang-troubleshooting
-description: "系统化排障 Go 程序——找到并修复根因。在 Go 代码遇到 bug、崩溃、死锁、数据竞争或异常行为时使用。涵盖调试方法论、常见 Go 陷阱、测试驱动调试、pprof 配置与采集、Delve、竞态检测、GODEBUG 追踪与生产环境排障。任何「有东西不对」的情况从这里开始。不用于：解读 profile 或基准测试（→ 见 `samber/cc-skills-golang@golang-benchmark` skill）、应用优化模式（→ 见 `samber/cc-skills-golang@golang-performance` skill）、设计新代码（防御式编程见 `samber/cc-skills-golang@golang-safety` skill、并发设计见 `samber/cc-skills-golang@golang-concurrency` skill）。'troubleshoot golang' 'something is wrong' 'deadlock' 'data race' 'debugging'"
+description: "系统化排障 Go 程序——找到并修复根因。在 Go 代码遇到 bug、崩溃、死锁、数据竞争或异常行为时使用。涵盖调试方法论、常见 Go 陷阱、测试驱动调试、pprof 配置与采集、Delve、竞态检测、GODEBUG 追踪与生产环境排障。任何「有东西不对」的情况从这里开始。不用于：解读 profile 或基准测试（→ 见 `golang-benchmark` skill）、应用优化模式（→ 见 `golang-performance` skill）、设计新代码（并发设计见 `golang-concurrency` skill）。'troubleshoot golang' 'something is wrong' 'deadlock' 'data race' 'debugging'"
 user-invocable: true
 allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(git:*) Bash(dlv:*) Agent WebFetch WebSearch AskUserQuestion
 ---
@@ -128,7 +128,7 @@ Go 的错误信息是精确的。做任何事之前先完整读它：
 
 标记 bug 或提修复之前，先追数据流、查上游处理。孤立看有问题的函数在上下文里可能是对的——调用方可能校验了输入，中间件可能维持了不变量，周围代码可能保证了函数依赖的条件。
 
-1. **追调用方**——谁调这个函数、传的什么值？调用点可以用代码搜索工具找。→ 见 `samber/cc-skills-golang@golang-gopls` skill，它能穿过接口与嵌套解析真实符号——找到间接调用点，跳过纯 grep 会漏或误配的同名标识符。
+1. **追调用方**——谁调这个函数、传的什么值？调用点可以用代码搜索工具找——优先 gopls 类的语义工具，它能穿过接口与嵌套解析真实符号、找到间接调用点；纯 grep 会漏这类调用点，或误配同名标识符。
 2. **查上游校验**——链上更早的输入解析、类型转换或 guard 子句可能让这个「bug」不可达。
 3. **读周围代码**——中间件、拦截器或 init 函数可能建立了函数依赖的状态。
 
@@ -174,7 +174,7 @@ Go 的错误信息是精确的。做任何事之前先完整读它：
 
 ## 交叉引用
 
-- → 定位瓶颈后的优化模式见 `samber/cc-skills-golang@golang-performance` skill
-- → Go runtime 监控的指标、告警与 Grafana 面板见 `samber/cc-skills-golang@golang-observability` skill
-- → 生产事故调查中查询 Prometheus 指标见 `samber/cc-skills@promql-cli` skill
-- → 另见 `samber/cc-skills-golang@golang-concurrency`、`samber/cc-skills-golang@golang-safety`、`samber/cc-skills-golang@golang-error-handling` skills
+- → 定位瓶颈后的优化模式见 `golang-performance` skill
+- → Go runtime 监控的指标、告警与 Grafana 面板见 `golang-performance` skill（references/observability.md）
+- → 生产事故调查中的 PromQL 查询同样见 `golang-performance` skill（references/observability.md）
+- → 另见 `golang-concurrency` skill

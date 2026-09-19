@@ -129,4 +129,4 @@ stack                # 显示堆栈
 
 ## 高级分析
 
-→ 逃逸分析解读、汇编检查与编译器诊断（SSA dump、内联决策）的详细指南见 `samber/cc-skills-golang@golang-benchmark` skill（compiler-analysis.md）。执行 tracer 分析另见 trace.md。
+→ 逃逸分析解读、汇编检查与编译器诊断（SSA dump、内联决策）的详细指南见 `golang-benchmark` skill 的 `compiler-analysis.md`；执行 tracer 分析另见其 `trace.md`。

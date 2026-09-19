@@ -1,6 +1,6 @@
 ---
 name: golang-benchmark
-description: "Golang 基准测试、profiling 与性能度量。当编写、运行或比较 Go 基准测试，用 pprof 分析热点路径，解读 CPU/内存/trace profile，用 benchstat 分析结果，搭建 CI 基准回归检测，或用 Prometheus runtime 指标排查生产性能时使用。当开发者需要对某个性能指标做深入分析时也使用——本 skill 提供测量方法论，优化模式由 `samber/cc-skills-golang@golang-performance` 提供。'golang benchmark' 'go benchmarking' 'benchstat' 'benchmark regression' 'cpu profile' 'memory profile'"
+description: "Golang 基准测试、profiling 与性能度量。当编写、运行或比较 Go 基准测试，用 pprof 分析热点路径，解读 CPU/内存/trace profile，用 benchstat 分析结果，搭建 CI 基准回归检测，或用 Prometheus runtime 指标排查生产性能时使用。当开发者需要对某个性能指标做深入分析时也使用——本 skill 提供测量方法论，优化模式由 `golang-performance` 提供。'golang benchmark' 'go benchmarking' 'benchstat' 'benchmark regression' 'cpu profile' 'memory profile'"
 user-invocable: true
 allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(git:*) Agent WebFetch Bash(benchstat:*) Bash(benchdiff:*) Bash(cob:*) Bash(gobenchdata:*) Bash(curl:*) mcp__context7__resolve-library-id mcp__context7__query-docs WebSearch AskUserQuestion EnterWorktree ExitWorktree
 ---
@@ -19,7 +19,7 @@ allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(g
 
 没有度量就没有性能改进——能度量，才能改进。
 
-本 skill 覆盖完整度量工作流：写基准测试、跑基准测试、对结果做 profile、以统计严谨性做前后对比、在 CI 中跟踪回归。测量之后要应用的优化模式，→ 见 `samber/cc-skills-golang@golang-performance` skill。在运行中服务上配置 pprof，→ 见 `samber/cc-skills-golang@golang-troubleshooting` skill。
+本 skill 覆盖完整度量工作流：写基准测试、跑基准测试、对结果做 profile、以统计严谨性做前后对比、在 CI 中跟踪回归。测量之后要应用的优化模式，→ 见 `golang-performance` skill。在运行中服务上配置 pprof，→ 见 `golang-troubleshooting` skill。
 
 ## 编写基准测试
 
@@ -29,7 +29,7 @@ allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(g
 
 - 把基准测试放在独立文件（而不是混进 `parser_test.go`）能让 `go test -bench=. ./pkg/parser` 的输出不夹杂无关的 `Test*` 噪声。
 - 它把为度量设计的 fixture（大输入、长生命周期 setup）与为正确性设计的 fixture 分开——两者很少共用同一种形态。
-- 该文件仍遵循 Go 的「一个源文件对应一个测试文件」约定（→ 见 `samber/cc-skills-golang@golang-testing` skill），只是用 `_bench` 后缀标明其更窄的用途。
+- 该文件仍遵循 Go 的「一个源文件对应一个测试文件」约定，只是用 `_bench` 后缀标明其更窄的用途。
 
 `parser_bench_test.go` 内的 `Benchmark*` 函数顺序应与 `parser.go` 中被测函数/方法的顺序一致——读者自上而下对照两个文件时，`BenchmarkParse` 应处在与 `Parse` 相同的相对位置。
 
@@ -183,8 +183,8 @@ go tool trace trace.out
 
 ## 交叉引用
 
-- → 测量之后要应用的优化模式（「X 瓶颈就用 Y」）见 `samber/cc-skills-golang@golang-performance` skill
-- → 运行中服务上的 pprof 配置（启用、加固、采集）、Delve 调试器、GODEBUG flag、根因方法论见 `samber/cc-skills-golang@golang-troubleshooting` skill
-- → 日常常驻监控、持续 profiling（Pyroscope）、分布式追踪（OpenTelemetry）见 `samber/cc-skills-golang@golang-observability` skill
-- → 通用测试实践见 `samber/cc-skills-golang@golang-testing` skill
-- → 在生产环境查询 Prometheus runtime 指标以验证基准测试结论，见 `samber/cc-skills@promql-cli` skill
+- → 测量之后要应用的优化模式（「X 瓶颈就用 Y」）见 `golang-performance` skill
+- → 运行中服务上的 pprof 配置（启用、加固、采集）、Delve 调试器、GODEBUG flag、根因方法论见 `golang-troubleshooting` skill
+- → 日常常驻监控与持续 profiling（Pyroscope）见 `golang-performance` skill（references/observability.md）
+- → 通用测试实践见 `golang-pro` skill（references/testing.md）
+- → 在生产环境查询 Prometheus runtime 指标以验证基准测试结论，见 `golang-performance` skill（references/observability.md）

@@ -452,12 +452,12 @@ go tool trace snapshot.trace
 
 ### flight recorder 与常规 trace 怎么选
 
-| 场景                   | 工具                                                        | 为什么                                     |
-| ---------------------- | ----------------------------------------------------------- | ------------------------------------------ |
-| 排查已知的慢操作       | `go test -trace` 或 `trace.Start`/`Stop`                    | 你知道何时开始何时结束                     |
-| 生产中的间歇延迟尖刺   | Flight recorder                                             | 不知道尖刺何时来——缓冲区事后回溯捕捉       |
-| 超时或崩溃后的事后分析 | Flight recorder                                             | 问题已经发生；常规 trace 会错过            |
-| 持续性能监控           | `samber/cc-skills-golang@golang-observability`（Pyroscope） | Flight recorder 是一次性诊断，不是持续采集 |
+| 场景                   | 工具                                                                               | 为什么                                     |
+| ---------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------ |
+| 排查已知的慢操作       | `go test -trace` 或 `trace.Start`/`Stop`                                           | 你知道何时开始何时结束                     |
+| 生产中的间歇延迟尖刺   | Flight recorder                                                                    | 不知道尖刺何时来——缓冲区事后回溯捕捉       |
+| 超时或崩溃后的事后分析 | Flight recorder                                                                    | 问题已经发生；常规 trace 会错过            |
+| 持续性能监控           | Pyroscope 类平台（见 `golang-performance` skill 的 `references/observability.md`） | Flight recorder 是一次性诊断，不是持续采集 |
 
 ## 开销与实际限制
 

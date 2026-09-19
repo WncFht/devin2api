@@ -1,6 +1,6 @@
 # pprof 参考
 
-`go tool pprof` 是理解 Go 程序中 CPU 时间、内存与争用去向的主力工具。本文讲怎么**用** CLI 以及怎么**解读**输出。在运行中服务上启用 pprof 端点（net/http/pprof import、认证、安全）→ 见 `samber/cc-skills-golang@golang-troubleshooting` skill。
+`go tool pprof` 是理解 Go 程序中 CPU 时间、内存与争用去向的主力工具。本文讲怎么**用** CLI 以及怎么**解读**输出。在运行中服务上启用 pprof 端点（net/http/pprof import、认证、安全）→ 见 `golang-troubleshooting` skill。
 
 ## 目录
 
@@ -122,7 +122,7 @@ go test -bench=BenchmarkParse -cpuprofile=cpu.prof -memprofile=mem.prof ./pkg/pa
 
 ### 从运行中服务生成
 
-需要 `import _ "net/http/pprof"`（安全配置见 `samber/cc-skills-golang@golang-troubleshooting` skill）：
+需要 `import _ "net/http/pprof"`（安全配置见 `golang-troubleshooting` skill）：
 
 ```bash
 # CPU profile——采集 30 秒 CPU 样本
@@ -854,7 +854,7 @@ go tool pprof -http=:8081 cpu-after.prof
 
 ### `alloc_objects` 高、`inuse_space` 低
 
-短生命周期分配造成 GC 搅动——对象快速分配又快速释放，单个都便宜但总量触发频繁 GC 周期。常见来源：热路径里的 `fmt.Errorf`（每次调用都分配）、接口装箱（`any` 参数）、string 与 byte 互转、未预分配的 slice 增长。分配削减模式 → 见 `samber/cc-skills-golang@golang-performance` skill。
+短生命周期分配造成 GC 搅动——对象快速分配又快速释放，单个都便宜但总量触发频繁 GC 周期。常见来源：热路径里的 `fmt.Errorf`（每次调用都分配）、接口装箱（`any` 参数）、string 与 byte 互转、未预分配的 slice 增长。分配削减模式 → 见 `golang-performance` skill。
 
 ### `inuse_space` 随时间增长
 
@@ -862,7 +862,7 @@ go tool pprof -http=:8081 cpu-after.prof
 
 ### Mutex/block profile 热
 
-是争用不是 CPU——goroutine 全在等同一把锁或读同一个 channel 而不是干活。缩小临界区、把锁分片到多个 mutex，或用无锁结构（`sync/atomic`，读多场景用 `sync.Map`）。→ 见 `samber/cc-skills-golang@golang-concurrency` skill。
+是争用不是 CPU——goroutine 全在等同一把锁或读同一个 channel 而不是干活。缩小临界区、把锁分片到多个 mutex，或用无锁结构（`sync/atomic`，读多场景用 `sync.Map`）。→ 见 `golang-concurrency` skill。
 
 ### 大量 goroutine 阻塞在同一 channel/mutex
 
@@ -870,7 +870,7 @@ go tool pprof -http=:8081 cpu-after.prof
 
 ### `runtime.mallocgc` 占据 CPU profile
 
-瓶颈是分配速率而不是计算。Go runtime 花在分配与收垃圾上的时间比跑你的代码还多。切到 `alloc_objects` 堆 profile 找哪些函数分配最多，然后 → 见 `samber/cc-skills-golang@golang-performance` skill 找削减模式。
+瓶颈是分配速率而不是计算。Go runtime 花在分配与收垃圾上的时间比跑你的代码还多。切到 `alloc_objects` 堆 profile 找哪些函数分配最多，然后 → 见 `golang-performance` skill 找削减模式。
 
 ### `runtime.memmove` 在 CPU profile 中偏高
 

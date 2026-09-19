@@ -129,7 +129,7 @@ pacer 提前开始回收，保证在触及目标前完成。分配速率快则�
 
 - 尽量用**值类型而非指针类型**——值留在栈上（不经 GC），指针逃逸到堆
 - 用 `sync.Pool` **池化频繁分配的对象**（见 [memory.md](./memory.md)）
-- **预分配切片与 map**——→ 见 `samber/cc-skills-golang@golang-data-structures` skill
+- **预分配切片与 map**——容量提示省 rehash 与扩容，见 [memory.md](./memory.md)
 - 热路径中**避免接口装箱**——用类型化参数或泛型
 
 ## 容器中的 GOMAXPROCS

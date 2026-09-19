@@ -339,4 +339,4 @@ return g.Wait()
 
 多数场景下它取代手写 worker pool。
 
-→ 高层模式与决策树见 `samber/cc-skills-golang@golang-concurrency` skill。
+→ 高层模式与决策树见 [SKILL.md](../SKILL.md)。

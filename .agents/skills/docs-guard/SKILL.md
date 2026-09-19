@@ -1,6 +1,6 @@
 ---
 name: docs-guard
-description: 文档交付前的守卫审查——README、API 参考、docstring、PHPDoc/JSDoc、changelog、教程、文档站。最适合在 agent 写完或改完文档后、代码改动改变了已文档化的行为后、或文档发布前被动使用。当用户说「review 一下文档」「文档准吗」「更新文档」「写个 README」「给这个 API 写文档」「加 docstring」「加 changelog」'review the docs' 'is this documentation accurate' 'write a README' 时使用。核心职责：把文档里引用的每个函数、flag、endpoint、配置项和代码示例对照源码核验；抓文档与代码的漂移；删掉废话和无法证实的断言。不要用于：生产代码评审（用 clean-code-guard）、测试评审（用 test-guard）、营销文案或博客、非技术写作的行文润色、文档站主题美化。
+description: 文档交付前的守卫审查——README、API 参考、docstring、PHPDoc/JSDoc、changelog、教程、文档站。最适合在 agent 写完或改完文档后、代码改动改变了已文档化的行为后、或文档发布前被动使用。当用户说「review 一下文档」「文档准吗」「更新文档」「写个 README」「给这个 API 写文档」「加 docstring」「加 changelog」'review the docs' 'is this documentation accurate' 'write a README' 时使用。核心职责：把文档里引用的每个函数、flag、endpoint、配置项和代码示例对照源码核验；抓文档与代码的漂移；删掉废话和无法证实的断言。不要用于：生产代码评审、测试评审、营销文案或博客、非技术写作的行文润色、文档站主题美化。
 ---
 
 # Docs Guard
@@ -91,6 +91,6 @@ description: 文档交付前的守卫审查——README、API 参考、docstring
 
 ## 本 skill 不做什么
 
-- 评审代码本身——那是 clean-code-guard 的辖区。本 skill 评审的是文档对代码的*断言*。
+- 评审代码本身——本 skill 评审的是文档对代码的*断言*，代码实现质量另有评审手段。
 - 从零生成文档策略或信息架构——它守准确性和实质，不管范围决策。
 - 执行行文风格规范——语气归项目管，事实归本 skill 管。

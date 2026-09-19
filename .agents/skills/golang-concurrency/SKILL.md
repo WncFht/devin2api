@@ -1,6 +1,6 @@
 ---
 name: golang-concurrency
-description: "Go 并发设计——goroutine 生命周期与泄漏预防、channel 与 `select`、channel 所有权与方向、`sync.Mutex`/`RWMutex`/`sync.Map`/`sync.Once`/atomic、`errgroup`、`singleflight`、worker pool、fan-out/fan-in 流水线。编写或评审并发 Go 代码、在 channel 与 mutex 之间取舍、保护共享 map 或计数器、或 goroutine 没有明确退出路径时使用。不用于与并发无关的防御性编程，如 nil panic、slice 别名、数值溢出（→ 见 `samber/cc-skills-golang@golang-safety` skill），也不用于事后调试某个挂起、崩溃或数据竞争的具体程序（→ 见 `samber/cc-skills-golang@golang-troubleshooting` skill）。'writing or reviewing concurrent Go code' 'choosing between channels and mutexes' 'goroutine has no clear exit'"
+description: "Go 并发设计——goroutine 生命周期与泄漏预防、channel 与 `select`、channel 所有权与方向、`sync.Mutex`/`RWMutex`/`sync.Map`/`sync.Once`/atomic、`errgroup`、`singleflight`、worker pool、fan-out/fan-in 流水线。编写或评审并发 Go 代码、在 channel 与 mutex 之间取舍、保护共享 map 或计数器、或 goroutine 没有明确退出路径时使用。不用于与并发无关的防御性编程，如 nil panic、slice 别名、数值溢出，也不用于事后调试某个挂起、崩溃或数据竞争的具体程序（→ 见 `golang-troubleshooting` skill）。'writing or reviewing concurrent Go code' 'choosing between channels and mutexes' 'goroutine has no clear exit'"
 user-invocable: true
 allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(git:*) Agent AskUserQuestion
 ---
@@ -17,7 +17,7 @@ allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(g
 - **评审模式**——评审 PR 中的并发代码改动。聚焦 diff：查 goroutine 泄漏、缺失的 context 传播、所有权违规、未保护的共享状态。顺序执行。
 - **审计模式**——审计代码库中已有的并发代码。按「并行化并发审计」一节所述，最多用 5 个并行 sub-agent。
 
-> **社区默认值。** 显式声明取代 `samber/cc-skills-golang@golang-concurrency` 的公司内部 skill 优先。
+> **社区默认值。** 项目内显式声明的约定优先于本 skill。
 
 # Go 并发最佳实践
 
@@ -113,12 +113,11 @@ channel/select 的详细代码示例见 [Channel 与 Select 模式](references/c
 
 ## 交叉引用
 
-- → false sharing、cache-line padding、`sync.Pool` 热路径模式见 `samber/cc-skills-golang@golang-performance` skill
-- → 取消传播与超时模式见 `samber/cc-skills-golang@golang-context` skill
-- → 并发 map 访问与数据竞争防护见 `samber/cc-skills-golang@golang-safety` skill
-- → goroutine 泄漏与死锁调试见 `samber/cc-skills-golang@golang-troubleshooting` skill
-- → 优雅关停模式见 `samber/cc-skills-golang@golang-design-patterns` skill
-- → 按上述准则在 CI 中做 AI 驱动的自动代码评审见 `samber/cc-skills-golang@golang-continuous-integration` skill
+- → false sharing、cache-line padding、`sync.Pool` 热路径模式见 `golang-performance` skill
+- → 取消传播与超时模式见 [Channel 与 Select 模式](references/channels-and-select.md)
+- → 并发 map 访问与数据竞争防护见 [Sync 原语深入](references/sync-primitives.md)
+- → goroutine 泄漏与死锁调试见 `golang-troubleshooting` skill
+- → 优雅关停模式见 [流水线与 Worker Pool](references/pipelines.md)
 
 ### Goroutine 泄漏 profile
 

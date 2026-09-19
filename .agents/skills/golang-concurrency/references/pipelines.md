@@ -272,4 +272,4 @@ func TestMain(m *testing.M) {
 | 经 channel 发送可变数据   | 发送副本或不可变值                           |
 | 不带 select 的阻塞发送    | channel 发送包在带 `ctx.Done()` 的 select 里 |
 
-→ sync 原语与 channel 模式见 `samber/cc-skills-golang@golang-concurrency` skill。
+→ sync 原语与 channel 模式见 [sync-primitives.md](sync-primitives.md) 与 [channels-and-select.md](channels-and-select.md)。

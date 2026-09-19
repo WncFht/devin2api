@@ -1,6 +1,6 @@
 ---
 name: golang-performance
-description: "Go 性能优化模式与方法论——瓶颈是 X 就应用 Y。覆盖减少分配、CPU 效率、内存布局、GC 调优、对象池、缓存与热路径优化。当 profiling 或基准测试已定位瓶颈、需要正确的优化模式来修复时使用；做性能代码评审、提出改进建议、或评估哪些基准测试能快速发现性能收益时也可使用。不用于测量方法论（→ 见 `samber/cc-skills-golang@golang-benchmark` skill）或调试工作流（→ 见 `samber/cc-skills-golang@golang-troubleshooting` skill）。'if X bottleneck then apply Y' 'allocation reduction' 'GC tuning' 'hot-path optimization' 'performance code review'"
+description: "Go 性能优化模式与方法论——瓶颈是 X 就应用 Y。覆盖减少分配、CPU 效率、内存布局、GC 调优、对象池、缓存与热路径优化。当 profiling 或基准测试已定位瓶颈、需要正确的优化模式来修复时使用；做性能代码评审、提出改进建议、或评估哪些基准测试能快速发现性能收益时也可使用。不用于测量方法论（→ 见 `golang-benchmark` skill）或调试工作流（→ 见 `golang-troubleshooting` skill）。'if X bottleneck then apply Y' 'allocation reduction' 'GC tuning' 'hot-path optimization' 'performance code review'"
 user-invocable: true
 allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(git:*) Agent WebFetch Bash(benchstat:*) Bash(fieldalignment:*) Bash(staticcheck:*) Bash(curl:*) Bash(fgprof:*) Bash(perf:*) WebSearch AskUserQuestion EnterWorktree ExitWorktree
 ---
@@ -27,7 +27,7 @@ allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(g
 
 ## 核心理念
 
-1. **先 profiling 再优化**——对瓶颈位置的直觉约 80% 是错的。用 pprof 找真正的热点（→ 见 `samber/cc-skills-golang@golang-troubleshooting` skill）
+1. **先 profiling 再优化**——对瓶颈位置的直觉约 80% 是错的。用 pprof 找真正的热点（→ 见 `golang-troubleshooting` skill）
 2. **减少分配回报最大**——Go 的 GC 快但不是免费。减少每请求分配常常比微调 CPU 更值得
 3. **优化要写文档**——加注释说明为什么这个模式更快，有基准数据就附上数字。后来的读者需要这些上下文，才不会把「没必要」的优化回滚掉
 
@@ -37,14 +37,14 @@ allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(g
 
 **诊断：**1- `fgprof`——同时捕获 on-CPU 与 off-CPU（I/O 等待）时间；off-CPU 占主导说明瓶颈在外部 2- `go tool pprof`（goroutine profile）——大量 goroutine 阻塞在 `net.(*conn).Read` 或 `database/sql` 就是外部等待 3- 分布式追踪（OpenTelemetry）——span 分解能看出哪个上游慢
 
-**确认是外部瓶颈时：**去优化那个组件——查询调优、缓存、连接池、熔断器（→ 见 `samber/cc-skills-golang@golang-database` skill、[缓存模式](references/caching.md)）。
+**确认是外部瓶颈时：**去优化那个组件——查询调优、缓存、连接池、熔断器（见 [缓存模式](references/caching.md) 与 [I/O 与网络](references/io-networking.md)）。
 
 ## 迭代优化方法论
 
 ### 循环：定义目标 → 基准测试 → 诊断 → 改进 → 基准测试
 
 1. **定义指标**——延迟、吞吐、内存还是 CPU？没有目标的优化是乱枪打鸟
-2. **写原子化基准测试**——每个基准测试只隔离一个函数，避免结果互相污染（→ 见 `samber/cc-skills-golang@golang-benchmark` skill）
+2. **写原子化基准测试**——每个基准测试只隔离一个函数，避免结果互相污染（→ 见 `golang-benchmark` skill）
 3. **测基线**——`go test -bench=BenchmarkMyFunc -benchmem -count=6 ./pkg/... | tee /tmp/report-1.txt`
 4. **诊断**——用各深入章节的 **诊断** 行选工具
 5. **改进**——一次只应用一个优化，并加注释说明
@@ -54,20 +54,20 @@ allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(g
 
 动手造方案前先查库文档里的已知模式。保留所有 `/tmp/report-*.txt` 文件作为审计轨迹。
 
-当多个候选优化方案竞争同一个瓶颈时，把每个方案放进独立 worktree、由各自的 sub-agent 实现——然后 → 见 `samber/cc-skills-golang@golang-benchmark` skill 对比各变体，并注意其串行测量警告（共享 CPU 上并发跑基准测试会污染结果，即使实现本身是并行构建的）。
+当多个候选优化方案竞争同一个瓶颈时，把每个方案放进独立 worktree、由各自的 sub-agent 实现——然后 → 见 `golang-benchmark` skill 对比各变体，并注意其串行测量警告（共享 CPU 上并发跑基准测试会污染结果，即使实现本身是并行构建的）。
 
 ## 决策树：时间花在哪？
 
-| 瓶颈             | 信号（来自 pprof）                 | 动作                                                    |
-| ---------------- | ---------------------------------- | ------------------------------------------------------- |
-| 分配过多         | heap profile 中 `alloc_objects` 高 | [内存优化](references/memory.md)                        |
-| CPU 受限的热循环 | 某函数主导 CPU profile             | [CPU 优化](references/cpu.md)                           |
-| GC 停顿 / OOM    | GC% 高、容器限额                   | [Runtime 调优](references/runtime.md)                   |
-| 网络 / I/O 延迟  | goroutine 阻塞在 I/O 上            | [I/O 与网络](references/io-networking.md)               |
-| 重复的昂贵工作   | 同一计算/拉取执行多次              | [缓存模式](references/caching.md)                       |
-| 算法选错         | 存在 O(n) 却用了 O(n²)             | [算法复杂度](references/caching.md#算法复杂度)          |
-| 锁竞争           | mutex/block profile 热             | → 见 `samber/cc-skills-golang@golang-concurrency` skill |
-| 慢查询           | trace 中 DB 时间占主导             | → 见 `samber/cc-skills-golang@golang-database` skill    |
+| 瓶颈             | 信号（来自 pprof）                 | 动作                                                                       |
+| ---------------- | ---------------------------------- | -------------------------------------------------------------------------- |
+| 分配过多         | heap profile 中 `alloc_objects` 高 | [内存优化](references/memory.md)                                           |
+| CPU 受限的热循环 | 某函数主导 CPU profile             | [CPU 优化](references/cpu.md)                                              |
+| GC 停顿 / OOM    | GC% 高、容器限额                   | [Runtime 调优](references/runtime.md)                                      |
+| 网络 / I/O 延迟  | goroutine 阻塞在 I/O 上            | [I/O 与网络](references/io-networking.md)                                  |
+| 重复的昂贵工作   | 同一计算/拉取执行多次              | [缓存模式](references/caching.md)                                          |
+| 算法选错         | 存在 O(n) 却用了 O(n²)             | [算法复杂度](references/caching.md#算法复杂度)                             |
+| 锁竞争           | mutex/block profile 热             | → 见 `golang-concurrency` skill                                            |
+| 慢查询           | trace 中 DB 时间占主导             | 查询调优、索引、攒批；重复查询结果缓存见 [缓存模式](references/caching.md) |
 
 ## 常见错误
 
@@ -92,14 +92,14 @@ allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(g
 
 ## CI 回归检测
 
-在 CI 里自动化基准测试对比，在回归进入生产前抓住它。`benchdiff` 与 `cob` 的配置 → 见 `samber/cc-skills-golang@golang-benchmark` skill。
+在 CI 里自动化基准测试对比，在回归进入生产前抓住它。`benchdiff` 与 `cob` 的配置 → 见 `golang-benchmark` skill。
 
 ## 交叉引用
 
-- → 见 `samber/cc-skills-golang@golang-benchmark` skill：基准测试方法论、`benchstat` 与 `b.Loop()`（Go 1.24+）
-- → 见 `samber/cc-skills-golang@golang-troubleshooting` skill：pprof 工作流、逃逸分析诊断与性能调试
-- → 见 `samber/cc-skills-golang@golang-data-structures` skill：切片/map 预分配与 `strings.Builder`
-- → 见 `samber/cc-skills-golang@golang-concurrency` skill：worker pool、`sync.Pool` API、goroutine 生命周期与锁竞争
-- → 见 `samber/cc-skills-golang@golang-safety` skill：循环中的 defer、切片底层数组别名
-- → 见 `samber/cc-skills-golang@golang-database` skill：连接池调优与批处理
-- → 见 `samber/cc-skills-golang@golang-observability` skill：生产环境持续性能分析
+- → 见 `golang-benchmark` skill：基准测试方法论、`benchstat` 与 `b.Loop()`（Go 1.24+）
+- → 见 `golang-troubleshooting` skill：pprof 工作流、逃逸分析诊断与性能调试
+- → 见 [内存优化](references/memory.md)：切片/map 预分配与 `strings.Builder`
+- → 见 `golang-concurrency` skill：worker pool、`sync.Pool` API、goroutine 生命周期与锁竞争
+- → 循环中的 defer 见 `golang-troubleshooting` skill（common-go-bugs.md）；切片底层数组别名见 [内存优化](references/memory.md)
+- → 见 [I/O 与网络](references/io-networking.md)：连接池调优与批处理
+- → 见 [生产可观测性](references/observability.md)：生产环境持续性能分析

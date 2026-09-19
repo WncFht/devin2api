@@ -48,11 +48,11 @@ go test ./... -v 2>&1
 # 静态分析
 go vet ./...
 
-# 跑 linter——配置见 golang-lint skill
+# 跑 linter——配置见仓库 .golangci.yml
 golangci-lint run ./...
 ```
 
-在调试工作流早期就跑 `golangci-lint`。它能抓出未检查的错误、可疑构造和许多读代码容易漏掉的问题。配置与用法见 `samber/cc-skills-golang@golang-lint` skill。
+在调试工作流早期就跑 `golangci-lint`。它能抓出未检查的错误、可疑构造和许多读代码容易漏掉的问题。配置以仓库的 `.golangci.yml` 为准。
 
 ## 第 3 步：隔离问题
 
@@ -247,4 +247,4 @@ func suspectFunction(val string) {
 
 - **失败 < 3 次：**回到第 1 步。你认错了根因。收集更多证据。
 - **失败 >= 3 次：**停止修复。问题多半是架构性的，不是简单 bug。退后一步，质疑你对系统工作方式的假设。问：「设计本身是健全的，还是我在给一个坏抽象打补丁？」
-- **每修一处冒一个新问题：**你在追症状，不是根因。见 [SKILL.md](./SKILL.md) 的危险信号一节。
+- **每修一处冒一个新问题：**你在追症状，不是根因。见 [SKILL.md](../SKILL.md) 的危险信号一节。

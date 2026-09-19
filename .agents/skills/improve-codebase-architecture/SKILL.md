@@ -61,9 +61,9 @@ disable-model-invocation: true
 
 ### 3. Grilling 回路
 
-用户选定候选后，用 Skill 工具调 "grilling" 陪用户走决策树：约束、依赖、深化后 module 的形状、seam 后面坐什么、哪些测试活下来。
+用户选定候选后，用 Skill 工具调 "grilling"（本机未装则由你逐条追问）陪用户走决策树：约束、依赖、深化后 module 的形状、seam 后面坐什么、哪些测试活下来。
 
-副作用随决策成形就地发生；用 Skill 工具调 "domain-modeling" 让领域模型保持最新：
+副作用随决策成形就地发生；用 Skill 工具调 "domain-modeling"（本机未装则手动维护）让领域模型保持最新：
 
 - **给深化后的 module 起了 `CONTEXT.md` 里没有的概念名？**把该词补进 `CONTEXT.md`。文件不存在就惰性创建。
 - **对话中把模糊的词磨清了？**当场更新 `CONTEXT.md`。

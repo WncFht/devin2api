@@ -332,7 +332,7 @@ delta(process_open_fds[1h])
 process_open_fds / process_max_fds
 ```
 
-→ 直接从 CLI 对你的 Prometheus 实例执行这些查询，见 `samber/cc-skills@promql-cli` skill。
+→ 这些查询可直接在 Prometheus UI 上执行，或用 `promtool query instant <prometheus-url> '<expr>'` 从 CLI 对你的 Prometheus 实例验证。
 
 ## 参考资料
 

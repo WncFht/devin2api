@@ -246,7 +246,7 @@ go func() {
 - **延迟比吞吐重要**——单条记录现在并行穿过 3 个阶段，单条延迟反而上升。
 - **内存紧张**——每个阶段的 channel 缓冲都是内存预算；深缓冲 channel 能耗尽可用 RAM。
 
-→ 见 `samber/cc-skills-golang@golang-concurrency` skill：channel 模式细节与何时该用 worker pool。
+→ 见 `golang-concurrency` skill：channel 模式细节与何时该用 worker pool。
 
 ## 批量操作
 
@@ -278,7 +278,7 @@ for i := 0; i < len(users); i += batchSize {
 }
 ```
 
-→ 见 `samber/cc-skills-golang@golang-database` skill：批处理模式与连接池配置细节。
+→ 批大小按上游承载能力调——从保守值起步，按延迟与错误率上抬。连接池用 `db.SetMaxOpenConns`、`SetMaxIdleConns`、`SetConnMaxLifetime` 约束并发连接数与复用。
 
 ### HTTP：批量 API 调用
 

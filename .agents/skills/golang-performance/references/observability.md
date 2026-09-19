@@ -17,7 +17,7 @@
 
 **接入：**`github.com/prometheus/client_golang`——用 `promhttp.Handler()` 暴露 `/metrics` 端点。默认 collector 自动导出 Go runtime 指标（`go_goroutines`、`go_memstats_*`、`go_gc_duration_seconds`、`process_cpu_seconds_total` 等）。
 
-→ 见 `samber/cc-skills-golang@golang-benchmark` skill（investigation-session.md）：完整 runtime 指标表、调查会话搭建（抓取间隔调优、环境变量开关）与 profiling 工具成本警告。
+→ 见 `golang-benchmark` skill（investigation-session.md）：完整 runtime 指标表、调查会话搭建（抓取间隔调优、环境变量开关）与 profiling 工具成本警告。
 
 ### 性能诊断 PromQL 查询
 
@@ -62,11 +62,11 @@
 
 [示例告警规则](../assets/prometheus-alerts.yml)——阈值按你的应用调整；高吞吐数据管道与轻量 API server 的基线不同。
 
-→ 见 `samber/cc-skills@promql-cli` skill：从 CLI 对你的 Prometheus 实例交互式测试这些 PromQL 表达式。
+→ 这些 PromQL 表达式可直接在 Prometheus UI 上交互验证，或用 `promtool query instant <prometheus-url> '<expr>'` 从 CLI 执行。
 
 ### Grafana 仪表盘
 
-→ 见 `samber/cc-skills-golang@golang-observability` skill：开箱即用的社区 Grafana 仪表盘推荐。
+→ Grafana 仪表盘市场（grafana.com/dashboards）有现成的 Go runtime 社区仪表盘可导入，按上面的指标清单挑覆盖面即可。
 
 ## 持续性能分析
 

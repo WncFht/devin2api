@@ -21,7 +21,7 @@
 | `GODEBUG=schedtrace=1000,scheddetail=1 ./app`     | 在 schedtrace 之上加每个 goroutine 的状态明细           |
 | 堆/分配 profile（`go tool pprof -alloc_objects`） | 分配点与对象搅动；替代已移除/过期的分配 trace flag 使用 |
 
-→ 详细的 GODEBUG 用法与解读见 `samber/cc-skills-golang@golang-troubleshooting` skill。
+→ 详细的 GODEBUG 用法与解读见 `golang-troubleshooting` skill。
 
 ### 编程式 API
 
@@ -43,8 +43,8 @@
 
 ## 第三方 Profiling
 
-| 工具                                                    | 提供什么                                                                                                                      | 什么时候用                                                                                   |
-| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| **fgprof**（`github.com/felixge/fgprof`）               | 完整 goroutine profiler——单个 profile 同时捕捉 on-CPU 与 off-CPU（I/O 等待）时间。标准 pprof CPU profile 只显示 on-CPU 时间。 | pprof CPU profile 显示 CPU% 低但延迟高时。                                                   |
-| **Pyroscope / Parca**                                   | 持续 profiling 平台——按时间聚合 pprof profile、跨部署对比、检测回归。                                                         | 生产性能监控、历史趋势分析。配置 → 见 `samber/cc-skills-golang@golang-observability` skill。 |
-| **Linux perf**（`perf record -g ./app && perf report`） | 硬件性能计数器：cache miss、分支误预测、TLB miss。转 pprof 格式需要 `perf_data_converter`。                                   | pprof 粒度不够时做 CPU 微架构级分析。                                                        |
+| 工具                                                    | 提供什么                                                                                                                      | 什么时候用                                                                                        |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| **fgprof**（`github.com/felixge/fgprof`）               | 完整 goroutine profiler——单个 profile 同时捕捉 on-CPU 与 off-CPU（I/O 等待）时间。标准 pprof CPU profile 只显示 on-CPU 时间。 | pprof CPU profile 显示 CPU% 低但延迟高时。                                                        |
+| **Pyroscope / Parca**                                   | 持续 profiling 平台——按时间聚合 pprof profile、跨部署对比、检测回归。                                                         | 生产性能监控、历史趋势分析。配置 → 见 `golang-performance` skill（references/observability.md）。 |
+| **Linux perf**（`perf record -g ./app && perf report`） | 硬件性能计数器：cache miss、分支误预测、TLB miss。转 pprof 格式需要 `perf_data_converter`。                                   | pprof 粒度不够时做 CPU 微架构级分析。                                                             |

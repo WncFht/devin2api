@@ -149,7 +149,7 @@ reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{
 **Profile 与 trace 的采集是有成本的。** 保持短期、局部：
 
 - **pprof CPU profiling**——采集窗口内 CPU 密集。生产上别连着跑 30s profile。错开跑。
-- **Pyroscope 持续 profiling**——**每实例常驻**约 2-5% CPU 开销。规模大了（几百实例）算力成本与后端存储会累积。在部分实例上开，或用环境变量按需开。Pyroscope 配置 → 见 `samber/cc-skills-golang@golang-observability` skill。
+- **Pyroscope 持续 profiling**——**每实例常驻**约 2-5% CPU 开销。规模大了（几百实例）算力成本与后端存储会累积。在部分实例上开，或用环境变量按需开。Pyroscope 配置 → 见 `golang-performance` skill（references/observability.md）。
 - **执行 trace**——很快产生大文件（MB/s）。最多采 5-10s。更长的 trace 难处理、分析慢。
 - **Debug 日志级别**——分配与 I/O 开销带来显著吞吐影响。绝不长期开着。
 - **所有有成本的特性**都应该能用环境变量开关，不重新编译即时切换。从第一天起按此设计。

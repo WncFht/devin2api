@@ -112,7 +112,7 @@ curl http://localhost:6060/debug/pprof/block > block.prof
 
 ## 分析与解读 Profile
 
-→ 解读 profile——`top`、`list`、`peek`、常见 profile 模式（flat vs cum、GC 抖动、内存泄漏）与编译器诊断——见 `samber/cc-skills-golang@golang-benchmark` skill（pprof.md）。逃逸分析与内联决策另见 compiler-analysis.md。
+→ 解读 profile——`top`、`list`、`peek`、常见 profile 模式（flat vs cum、GC 抖动、内存泄漏）与编译器诊断——见 `golang-benchmark` skill 的 `pprof.md`；逃逸分析与内联决策另见其 `compiler-analysis.md`。
 
 **快速上手：**
 
@@ -130,4 +130,4 @@ go tool pprof -base heap1.prof heap2.prof  # 对比堆快照
 
 ---
 
-→ 用 Pyroscope 做持续 profiling 见 `samber/cc-skills-golang@golang-observability` skill。调查会话搭建与基于 Prometheus 的性能跟踪见 `samber/cc-skills-golang@golang-benchmark` skill。
+→ 用 Pyroscope 做持续 profiling 见 `golang-performance` skill（references/observability.md）。调查会话搭建与基于 Prometheus 的性能跟踪见 `golang-benchmark` skill（investigation-session.md）。

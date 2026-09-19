@@ -1,7 +1,5 @@
 # 常见 Go bug
 
-→ 深入的 nil、slice、map 安全模式见 `samber/cc-skills-golang@golang-safety` skill。
-
 ## 目录
 
 - [nil 指针解引用](#nil-指针解引用)

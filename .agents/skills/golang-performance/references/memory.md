@@ -192,7 +192,7 @@ func handleRequest(data []byte) []byte {
 - 不要池化 >32KB 的对象——大分配不走池的 size class，GC 处理它们本就高效
 - 不要池化用得少的对象——分配稀少时池化开销超过收益
 
-→ 见 `samber/cc-skills-golang@golang-concurrency` skill：`sync.Pool` API 参考与基础用法。
+→ 见 `golang-concurrency` skill：`sync.Pool` API 参考与基础用法。
 
 ## 内存布局
 
