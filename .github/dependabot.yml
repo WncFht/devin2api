@@ -11,7 +11,7 @@ updates:
         patterns: ["*"]
 
   # 生成绑定的独立模块（replace 目标）：go.mod 版本钉死跟随 Taskfile/
-  # check-codegen.sh/ci.yml 的 codegen 工具版本，单升必挂 codegen-drift
+  # codegen.sh/ci.yml 的 codegen 工具版本，单升必挂 codegen-drift
   # （见 PR #4）——全部忽略，要升就连钉一起手动升。
   - package-ecosystem: gomod
     directory: /outputs/devin-proto-go

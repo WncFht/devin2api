@@ -1001,7 +1001,7 @@ func (h *Handler) adminBatchUpdateSettings(w http.ResponseWriter, r *http.Reques
 }
 
 // adminUpdateCheck 实现 POST /admin/update/check：本服务无内建更新器
-// （部署走 scripts/deploy.sh），与 ccLoad updateManager 缺省路径同语义。
+// （部署走 scripts/deploy/deploy.sh），与 ccLoad updateManager 缺省路径同语义。
 func (h *Handler) adminUpdateCheck(w http.ResponseWriter, _ *http.Request) {
 	respondError(w, http.StatusServiceUnavailable, "update manager is not available")
 }

@@ -34,7 +34,7 @@ import (
 )
 
 // version 由构建期 -ldflags "-X main.version=$(git describe --tags --always --dirty)"
-// 注入（见 scripts/deploy.sh）；缺省 dev 表示未注入构建，此时 resolvedVersion
+// 注入（见 scripts/deploy/deploy.sh）；缺省 dev 表示未注入构建，此时 resolvedVersion
 // 逐级回退（见下），让任何渠道构建的二进制都能自报版本。
 var version = "dev"
 

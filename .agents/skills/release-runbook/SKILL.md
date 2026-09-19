@@ -1,23 +1,23 @@
 ---
 name: release-runbook
-description: 通过 scripts/release.sh 端到端跑一次 devin-2api 发布——dry-run 复查、--publish 机制、发布后核验 workflow/资产/checksums/GHCR tag，以及发布损坏时的手工修复。当用户要求 'cut a release' 'publish a release'、检查发布是否正确落地，或 tag / release body 出错需要修复时使用。
+description: 通过 scripts/release/release.sh 端到端跑一次 devin-2api 发布——dry-run 复查、--publish 机制、发布后核验 workflow/资产/checksums/GHCR tag，以及发布损坏时的手工修复。当用户要求 'cut a release' 'publish a release'、检查发布是否正确落地，或 tag / release body 出错需要修复时使用。
 ---
 
 # 发布 Runbook
 
-`scripts/release.sh` 是唯一受支持的发布方式。它从 Conventional Commits 计算下一个版本号，要求被打 tag 的那个确切提交拥有全绿 CI，并推送一个注解 tag——tag 注解即 GitHub Release body（release.yml 提取 `%(contents)`——tag 注解是发布说明的唯一事实源）。
+`scripts/release/release.sh` 是唯一受支持的发布方式。它从 Conventional Commits 计算下一个版本号，要求被打 tag 的那个确切提交拥有全绿 CI，并推送一个注解 tag——tag 注解即 GitHub Release body（release.yml 提取 `%(contents)`——tag 注解是发布说明的唯一事实源）。
 
 ## 前置检查
 
 - 工作树必须干净且 `HEAD` 必须等于 `origin/main`；否则脚本拒绝执行。先提交或 stash 所有改动。
-- 改过 `release.sh` 本身之后跑 `bash scripts/release-selftest.sh`——它离线演练整个流程（bare origin + stub curl），能在真实发布踩坑前抓住 `##` 标题被剥掉这类回归。
+- 改过 `release.sh` 本身之后跑 `bash scripts/check/release-selftest.sh`——它离线演练整个流程（bare origin + stub curl），能在真实发布踩坑前抓住 `##` 标题被剥掉这类回归。
 - 确认版本升级档位正确：0.x 阶段 `feat`/破坏性变更升 minor、其余升 patch；`--version vX.Y.Z` 可覆盖计算值。
 
 ## 流程
 
 ```sh
-scripts/release.sh             # dry-run：打印下一版本 + 分类 changelog
-scripts/release.sh --publish   # VERSION bump 提交 -> 等 CI 绿 -> 打 tag -> 推送
+scripts/release/release.sh             # dry-run：打印下一版本 + 分类 changelog
+scripts/release/release.sh --publish   # VERSION bump 提交 -> 等 CI 绿 -> 打 tag -> 推送
 ```
 
 `--publish` 机制按序执行：

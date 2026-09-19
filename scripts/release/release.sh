@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # release.sh — 按 Conventional Commits 计算下一版本并打 tag 发布。
 #
-#   scripts/release.sh                    # dry-run：打印将要发布的版本与分类 changelog
-#   scripts/release.sh --publish          # VERSION 回写 → 等 CI 绿 → 建 annotated tag 推送
-#   scripts/release.sh --version vX.Y.Z   # 覆盖自动计算的版本（配合 --publish）
+#   scripts/release/release.sh                    # dry-run：打印将要发布的版本与分类 changelog
+#   scripts/release/release.sh --publish          # VERSION 回写 → 等 CI 绿 → 建 annotated tag 推送
+#   scripts/release/release.sh --version vX.Y.Z   # 覆盖自动计算的版本（配合 --publish）
 #
 # 规则（机械化，不靠人守）：tag 只打在 origin/main 上 CI 已绿的提交；
 # --publish 前要求本地 HEAD 已推送，脚本只推送自己的 VERSION bump 提交；
 # 打 tag 前重新 fetch 确认 origin/main 没被别人推进。
 # 0.x 阶段 feat/破坏性变更升 minor，其余升 patch；1.0 之后破坏性变更升 major。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 PUBLISH=0
 OVERRIDE=""
@@ -165,7 +165,7 @@ echo
 cat "${NOTES_FILE}"
 
 [[ "${PUBLISH}" == "1" ]] || {
-	echo "dry-run。确认无误后执行: scripts/release.sh --publish"
+	echo "dry-run。确认无误后执行: scripts/release/release.sh --publish"
 	exit 0
 }
 

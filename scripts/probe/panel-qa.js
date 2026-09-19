@@ -1,9 +1,9 @@
 // panel-qa.js — ccpanel 视觉/交互 QA：截图、溢出检测、i18n 泄漏、console 错误。
 //
 // 用法:
-//   node scripts/panel-qa.js shot [page ...]      截图 + console 断言（默认全部页面）
-//   node scripts/panel-qa.js overflow <page> [w]  元素级溢出检测（含祖先裁剪链判断）
-//   node scripts/panel-qa.js sweep [w ...]        页×宽矩阵：console + 溢出 + i18n 泄漏
+//   node scripts/probe/panel-qa.js shot [page ...]      截图 + console 断言（默认全部页面）
+//   node scripts/probe/panel-qa.js overflow <page> [w]  元素级溢出检测（含祖先裁剪链判断）
+//   node scripts/probe/panel-qa.js sweep [w ...]        页×宽矩阵：console + 溢出 + i18n 泄漏
 //
 // 环境变量:
 //   PANEL_QA_BASE    面板地址（默认 http://127.0.0.1:3033）
@@ -26,7 +26,7 @@ function loadPlaywright() {
     'playwright',
     'playwright-core',
     // panel-verify 套件自带的 playwright
-    path.join(__dirname, 'panel-verify', 'node_modules', 'playwright'),
+    path.join(__dirname, '..', 'panel-verify', 'node_modules', 'playwright'),
     // 用户级全局安装的 playwright
     path.join(home, '.local/lib/node_modules', 'playwright'),
   ].filter(Boolean);

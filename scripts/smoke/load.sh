@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# load-smoke.sh — sqlite 化后的并发冒烟：N 个读 worker 轮询重 /admin 读
+# load.sh — sqlite 化后的并发冒烟：N 个读 worker 轮询重 /admin 读
 # 端点，2 个写 worker 循环改 settings 与 model-registry（db 写路径），
 # 可选打几个真 /v1 请求让 logs 写路径参与。判定：实例日志无
 # SQLITE_BUSY/锁错误、admin 端点无非预期码；汇总每端点 p50/p95/max。
 #
-# 用法: scripts/load-smoke.sh <binary> <state-dir> [config.yaml] [并发N=20] [时长s=60]
+# 用法: scripts/smoke/load.sh <binary> <state-dir> [config.yaml] [并发N=20] [时长s=60]
 #   state-dir 被整体复制到 mktemp，原目录不动；实例日志留在 mktemp 下，
 #   结束时打印路径（自行 rm -rf 清理）。config 缺省取仓库 config.yaml；
 #   面板铸令牌失败或无 devin.model 时跳过 /v1 腿并在输出中注明。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
-BIN="${1:?usage: load-smoke.sh <binary> <state-dir> [config.yaml] [N=20] [seconds=60]}"
+BIN="${1:?usage: load.sh <binary> <state-dir> [config.yaml] [N=20] [seconds=60]}"
 STATE="${2:?}"
 CONFIG="${3:-config.yaml}"
 N="${4:-20}"

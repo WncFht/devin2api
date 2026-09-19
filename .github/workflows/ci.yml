@@ -128,18 +128,18 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Assert deploy assets
-        run: bash scripts/deploy-assets.test.sh
+        run: bash scripts/check/deploy-assets.sh
 
       # release.sh 离线演练：bare origin + stub curl/gh，覆盖 dry-run
       # 版本计算与 publish 的全部拒绝分支，不触网。
       - name: release.sh self-test
-        run: bash scripts/release-selftest.sh
+        run: bash scripts/check/release-selftest.sh
 
       # lib-deploy.sh 交接链路演练：stub 二进制/curl 回放 spawn 死因分诊
       # 与杀桥前证明——9-18 断流事故（config 校验死误诊为缺 reuseport）
       # 的防回归。
       - name: handoff triage self-test
-        run: bash scripts/handoff-triage.test.sh
+        run: bash scripts/check/handoff-triage.sh
 
   # 生成物漂移门禁：outputs/devin-proto-go 是提交进 git 的生成代码，
   # 改了 proto 忘跑 task generate 时提交物与源失配。重生成比对钉住。
@@ -169,7 +169,7 @@ jobs:
           go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.20.0
 
       - name: Regenerate and diff
-        run: bash scripts/check-codegen.sh
+        run: bash scripts/check/codegen.sh
 
   # 生产宿主是 macOS 而 CI 全在 ubuntu：darwin 构建此前只有交叉编译门禁，
   # 从没在真系统上跑过。这里补上真平台的测试与无 token 冒烟——exec、
@@ -191,7 +191,7 @@ jobs:
         run: go test -pgo=off -shuffle=on -timeout 300s ./...
 
       - name: Smoke without upstream
-        run: bash scripts/smoke.sh --no-upstream --config config.example.yaml --port 18099
+        run: bash scripts/smoke/smoke.sh --no-upstream --config config.example.yaml --port 18099
 
   # Windows 是唯一只有交叉编译、从没跑过真机的平台：deploy-windows.ps1
   # 与裸 exe 前台模式全靠编译期门禁兜底。真 runner 上跑全量测试 +
@@ -310,4 +310,4 @@ jobs:
 
       # 与 pre-commit 的 yaml-comment-width 同源：注释行 ≤80 显示列（CJK=2）
       - name: YAML comment width
-        run: python3 scripts/check-yaml-comments.py
+        run: python3 scripts/check/yaml-comments.py

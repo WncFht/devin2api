@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# perf-snapshot.sh — 一次性能快照：源码构建 → upstreamstub 正常全流后端 →
+# snapshot.sh — 一次性能快照：源码构建 → upstreamstub 正常全流后端 →
 # 空闲端口临时实例（pprof 开）→ loadtest 压测 → 抓取 CPU/heap/fgprof
 # 剖析 → 聚合 logs 表导出行的延迟分解字段。全程不碰真实上游与配额，
 # 产物落 outputs/perf/<时间戳>/，临时目录退出即清。
 #
-# 用法: scripts/perf-snapshot.sh [--requests 100] [--concurrency 8]
+# 用法: scripts/perf/snapshot.sh [--requests 100] [--concurrency 8]
 #   [--deltas 200] [--interval 5ms] [--ttfb 50ms] [--profile-seconds 25]
 #   [--debug off] [--out <dir>]
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 PORT=3005
 # stub 默认端口避开手工调试惯用的 48090（upstreamstub 故障注入演练常用它），

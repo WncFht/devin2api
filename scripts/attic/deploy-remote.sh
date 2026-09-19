@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
 # RETIRED 2026-09-18 — 生产实例已迁至本机 Linux 侧（systemd --user :3033，
-# 部署走 scripts/deploy-linux.sh）。Mac 实例与 ~/.cache/devin-2api-staging
+# 部署走 scripts/deploy/deploy-linux.sh）。Mac 实例与 ~/.cache/devin-2api-staging
 # 流程不复存在，本脚本仅留档（worktree→staging 部署模型仍可参考）。
 # ═══════════════════════════════════════════════════════════════════════════
-# deploy-remote.sh — 在开发机上驱动生产机（Mac）的 scripts/deploy.sh。
+# deploy-remote.sh — 在开发机上驱动生产机（Mac）的 scripts/deploy/deploy.sh。
 # 用法见 --help。
 #
 # 三种部署模式对应三类「要部署的东西」：
@@ -23,11 +23,11 @@
 # Mac 端不保留仓库 clone：所有远端操作都落 staging，避免有人在 Mac 仓库里
 # 直接 deploy.sh 部署了落后/分叉的历史。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 if [[ "${1:-}" != "--help" && "${1:-}" != "-h" ]]; then
   echo "deploy-remote.sh is RETIRED (2026-09-18): prod moved to a Linux host :3033." >&2
-  echo "Use scripts/deploy-linux.sh on the prod host. See file header." >&2
+  echo "Use scripts/deploy/deploy-linux.sh on the prod host. See file header." >&2
   exit 1
 fi
 
@@ -132,18 +132,18 @@ case "${MODE}" in
 check)
   rc=0
   echo "== 生产实例（${HOST}）=="
-  ssh -o BatchMode=yes "${HOST}" "cd \"${STAGING}\" && bash scripts/deploy.sh --check" || rc=1
+  ssh -o BatchMode=yes "${HOST}" "cd \"${STAGING}\" && bash scripts/deploy/deploy.sh --check" || rc=1
   echo
   echo "== 验证实例（本机）=="
   if [[ "$(uname -s)" == "Linux" ]]; then
-    bash scripts/deploy-linux.sh --check || rc=1
+    bash scripts/deploy/deploy-linux.sh --check || rc=1
   else
     echo "（本机非 Linux，跳过验证实例检查）"
   fi
   exit "${rc}"
   ;;
 uninstall)
-  cmd="bash \"${STAGING}/scripts/deploy.sh\""
+  cmd="bash \"${STAGING}/scripts/deploy/deploy.sh\""
   for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
   exec ssh -o BatchMode=yes "${HOST}" "${cmd}"
   ;;
@@ -151,7 +151,7 @@ release)
   # 同 ref 分支：先把 staging config 刷成 live 副本，deploy.sh 的预检
   # （端口/api_key/token 来源）与 install_binary 都读它。
   cmd="cp \"${CONFIG_LIVE}\" \"${STAGING}/config.yaml\""
-  cmd+=" && bash \"${STAGING}/scripts/deploy.sh\""
+  cmd+=" && bash \"${STAGING}/scripts/deploy/deploy.sh\""
   for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
   exec ssh -o BatchMode=yes "${HOST}" "${cmd}"
   ;;
@@ -175,7 +175,7 @@ ref)
   # install_binary 又拿它同步 live；不先刷成 live 副本会把 live 侧的
   # 改动（如 devin.accounts）静默回滚成旧快照。
   cmd+=" && cp \"${CONFIG_LIVE}\" \"${STAGING}/config.yaml\""
-  cmd+=" && bash \"${STAGING}/scripts/deploy.sh\""
+  cmd+=" && bash \"${STAGING}/scripts/deploy/deploy.sh\""
   for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
   exec ssh -o BatchMode=yes "${HOST}" "${cmd}"
   ;;
@@ -189,7 +189,7 @@ worktree)
   cmd+=" && tar -xf - -C \"${STAGING}.new\""
   cmd+=" && cp \"${CONFIG_LIVE}\" \"${STAGING}.new/config.yaml\""
   cmd+=" && rm -rf \"${STAGING}\" && mv \"${STAGING}.new\" \"${STAGING}\""
-  cmd+=" && bash \"${STAGING}/scripts/deploy.sh\""
+  cmd+=" && bash \"${STAGING}/scripts/deploy/deploy.sh\""
   for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
   { git ls-files -z --cached --others --exclude-standard && printf '.git\0'; } |
     tar --null --files-from=- -cf - |

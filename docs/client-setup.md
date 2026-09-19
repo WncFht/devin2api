@@ -150,4 +150,4 @@ codex exec -m swe-2-max-ws \
 - **压缩**:四个客户端都自带上下文压缩，代理无需处理——但自动压缩只在客户端声明的窗口 ≤ 上游真实窗口 (262000) 时才可能先于 prompt-too-long 触发；Codex/CC 的窗口声明见上文各节和 `upstream-debug-playbook.md` 的「客户端上下文窗口配置」。
 - **排查**:经 ccload 链时先看 `ccload.db` 的 `debug_logs`(取注入后的真实请求体);再看 devin-2api debug 的 `03-devin-request.json`。详见 `upstream-debug-playbook.md`。
 - **base URL 写 `http://[::1]:<port>` 最稳**：服务绑 `*`（IPv6 双栈 socket）时 `::1` 直连本机；`127.0.0.1` 会被 IDE 的 IPv4 端口转发静默 shadow（VS Code Remote-SSH autoForwardPorts 会把 loopback 绑成隧道，特征是 connect 成功但零字节——curl 000 而非 refused），`localhost` 则依赖 resolver 顺序可能先撞 v4 squatter。诊断与处置见 `upstream-debug-playbook.md` 运维坑节。
-- **跨机访问走 tailnet IP，不走 loopback 转发**：本机示例形如 `http://<tailnet-ip>:3033`（按自己的 tailnet 替换）；`:3003` 旧地址由转发 shim 继续兜住，存量配置不急着改——完整拓扑见 `deployment.md` 末节。本机出向曾挂本地并发闸 gwcap（swe-2-medium 限流），现已下线、仅留档 `scripts/gwcap/`——压测/批跑直接打满上游 `devin.max_rpm` 即可。
+- **跨机访问走 tailnet IP，不走 loopback 转发**：本机示例形如 `http://<tailnet-ip>:3033`（按自己的 tailnet 替换）；`:3003` 旧地址由转发 shim 继续兜住，存量配置不急着改——完整拓扑见 `deployment.md` 末节。本机出向曾挂本地并发闸 gwcap（swe-2-medium 限流），现已下线、仅留档 `scripts/attic/gwcap/`——压测/批跑直接打满上游 `devin.max_rpm` 即可。

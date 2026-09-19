@@ -567,7 +567,7 @@ type cachedToolDefinition struct {
 // 而是经 withToolDescriptions 并入 system prompt。
 //
 // description 字段发名不发真描述的考证：抓包
-// outputs/exa.api_server_pb.ApiServerService/GetChatMessage/{01..07}/request.txt
+// outputs/corpus/GetChatMessage/{01..07}/request.txt
 // 证明真实 CLI（chisel 3000.2.17）在 tools[].description 发完整自然语言
 // 描述（23 个工具全带），我们的掏空形态是有意偏离——schema 内的自然语言
 // 注解已实证触发上游工具分类（isNaturalLanguageAnnotation），description

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# sqlite-live-verify.sh — :3033 验证实例的 sqlite 迁移验收。
+# sqlite-live.sh — :3033 验证实例的 sqlite 迁移验收。
 # 对现役实例（已被 deploy-linux.sh 部署为迁移版）做只读对账 +
 # 一条确定性写路径探针，不重新部署、不动 state。
 #
-# 用法: scripts/sqlite-live-verify.sh [port] [state-dir] [config.yaml]
+# 用法: scripts/smoke/sqlite-live.sh [port] [state-dir] [config.yaml]
 #   默认 :3033 / ~/.local/state/devin-2api / ~/.config/devin-2api/config.yaml
 #
 # 检查项：

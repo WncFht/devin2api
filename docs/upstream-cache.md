@@ -47,7 +47,7 @@ Cascade 轨迹流（`StartCascade`/`SendUserCascadeMessage`）另有 `cache_brea
 
 ## 受控实测的缓存语义（2026-09-15，本机 :3033 暖臂实验）
 
-用受控探针臂（独立 `metadata.user_id` + padded system prompt，绝对偏移时刻表发 seed/ping/probe，`scripts/cache-probe.py` 为该实验骨架的入库形态）测出的机制级结论：
+用受控探针臂（独立 `metadata.user_id` + padded system prompt，绝对偏移时刻表发 seed/ping/probe，`scripts/probe/cache-probe.py` 为该实验骨架的入库形态）测出的机制级结论：
 
 - **滑动 TTL 标称 ~780s**：每次命中把寿命续满（滑动窗而非固定过期），≥840s 静默后死透；另有 **~10% 逐请求早夭 lottery**——未到期也偶发 miss，属上游逐出噪声。
 - **复用规则是逐字前缀**：已缓存的整条存储区间必须是新请求 token-0 起的逐字前缀才命中；中间改写一个 token，其后部分整体失效。
@@ -85,4 +85,4 @@ ping 语义有三条硬边界。其一，只续命不复活：TTL 死透的谱�
 - 免费档命中非保证：偶发 miss 是上游逐出/冷启动，非代理问题。
 - `permission_denied`（含内容策略拦截）在免费档表现非确定性——同一 prompt 可能先封后放（WindsurfAPI 亦记录此现象）。
 - 缓存按账号键控：同一会话前缀必须落在同一 lane 上才谈得上命中——号池的会话亲和绑定（`devin-accounts.md`「会话钉选与绑定」）就是为此存在；同一会话被换 lane 等于冷启动。
-- 命中率统计口径：`logs` 表聚合时必须过滤 `result='completed' AND input_tokens+cache_read_tokens>0`——rate_gate 快败与断开请求的 0-token 行会被误算成 miss；`scripts/index-stream-stats.py` 实现了这套口径（流画像 + gap→hit% 分桶 + miss 归因）。
+- 命中率统计口径：`logs` 表聚合时必须过滤 `result='completed' AND input_tokens+cache_read_tokens>0`——rate_gate 快败与断开请求的 0-token 行会被误算成 miss；`scripts/probe/index-stream-stats.py` 实现了这套口径（流画像 + gap→hit% 分桶 + miss 归因）。

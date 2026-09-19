@@ -14,7 +14,7 @@
 # 已知软肋：编辑器原子保存（写临时文件再 rename）换 inode → runtime.js 硬链
 # 变陈旧——内容分歧时重跑本脚本重建即可。clone 后或链接损坏同样跑一遍。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 SRC="${CROSSNOTE_SRC:-$HOME/.agents/skills/setup-toolchain/assets/.crossnote}"
 [[ -d $SRC ]] || { echo "error: crossnote 事实源不存在: $SRC（可用 CROSSNOTE_SRC= 改指）" >&2; exit 1; }

@@ -3,7 +3,7 @@
 // 「incomplete envelope: unexpected EOF」——与线上 TCP 断流在读帧视角同构。
 // 也可模拟静默收尾、上游错误尾帧、挂死、坏帧，用于验证重试链路与错误分层。
 // stream 场景提供正常全流（可配 delta 数/大小/间隔/TTFT），
-// 作为 perf-snapshot 的确定性压测后端。
+// 作为 scripts/perf/snapshot.sh 的确定性压测后端。
 package main
 
 import (

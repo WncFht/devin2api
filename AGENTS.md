@@ -112,17 +112,17 @@
 
 ## 格式化工具链
 
-`*.md` 提交会走 pre-commit：markdownlint-cli2 --fix 原地修规则 → `autocorrect --stdin | prettier` 经 git-format-staged 只写 index（commit 不被格式化阻断，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）；`*.yaml`/`*.yml` 走 `scripts/check-yaml-comments.py`（check 类：纯注释行 ≤80 显示列、CJK 按 2 列计；断点取标点/从句边界是人工活，机械重排用 vim `gq`/VS Code Rewrap）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`、系统 `python3`。markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。
+`*.md` 提交会走 pre-commit：markdownlint-cli2 --fix 原地修规则 → `autocorrect --stdin | prettier` 经 git-format-staged 只写 index（commit 不被格式化阻断，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）；`*.yaml`/`*.yml` 走 `scripts/check/yaml-comments.py`（check 类：纯注释行 ≤80 显示列、CJK 按 2 列计；断点取标点/从句边界是人工活，机械重排用 vim `gq`/VS Code Rewrap）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`、系统 `python3`。markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。
 
 改 Go 代码提交前跑 `golangci-lint run`（规则见 `.golangci.yml`：default:none + 显式启用 bodyclose/errcheck/gosec/govet/revive/staticcheck/unused），`golangci-lint fmt` 修 gofmt/goimports；CI golangci job 同配置，本地不过 CI 必挂。全量工具链说明见 `docs/toolchain.md`。
 
 ## 版本与发布
 
 - 版本号不写进源码：构建期 `-X main.version=$(git describe --tags --always --dirty)` 注入；运行时解析链见 `resolvedVersion`（ldflags → buildinfo → `vcs.revision` → embed `cmd/devin-2api/VERSION` → `"dev"`）。
-- `scripts/release.sh` 发版：dry-run 打印分类 changelog；`--publish` 自动回写 VERSION 并推送 → 轮询该提交的 CI 到绿 → 复查 `origin/main` 未被推进 → `git tag -a --cleanup=verbatim` 推送。tag 注解是 release body 的唯一事实源（release.yml 取 `%(contents)`）。
+- `scripts/release/release.sh` 发版：dry-run 打印分类 changelog；`--publish` 自动回写 VERSION 并推送 → 轮询该提交的 CI 到绿 → 复查 `origin/main` 未被推进 → `git tag -a --cleanup=verbatim` 推送。tag 注解是 release body 的唯一事实源（release.yml 取 `%(contents)`）。
 - tag 只打在已推送 `origin/main` 且 CI 绿的提交上；0.x 阶段 feat/破坏性变更升 minor、其余升 patch。`latest` 镜像 tag 只跟随稳定版。**已推送的 tag 永不重打**——release body 出错用 `gh release edit --notes-file` 原地修（详见 release-runbook skill）。
-- 改 `scripts/release.sh` 后必跑 `scripts/release-selftest.sh`：bare origin + stub GitHub API 的离线演练，覆盖 dry-run 版本计算与 publish 全部拒绝分支；CI 的 deploy-assets job 同步跑它。
-- `scripts/deploy.sh` 本机升级（`--release <tag>` 可装预编译二进制）。
+- 改 `scripts/release/release.sh` 后必跑 `scripts/check/release-selftest.sh`：bare origin + stub GitHub API 的离线演练，覆盖 dry-run 版本计算与 publish 全部拒绝分支；CI 的 deploy-assets job 同步跑它。
+- `scripts/deploy/deploy.sh` 本机升级（`--release <tag>` 可装预编译二进制）。
 
 ## 服务排障（对运行中的实例）
 
@@ -159,14 +159,14 @@
 
 同一台机器只维护一个实例：systemd --user 服务 `devin-2api.service` 监听 :3033（config 的 `server.listen`），unit 与原理见 docs/deployment.md。
 
-- 启停一律经 systemd；部署统一 `scripts/deploy-linux.sh`（构建 → 装入 `~/.local/bin` 并同步 config 到 `~/.config/devin-2api/` → reuseport 交接进程预接管 → `systemctl --user restart` → 托管新实例拉起后退交接 → healthz 校验版本）。
-- Linux 布局：二进制 `~/.local/bin/devin-2api`，config.yaml 在 `~/.config/devin-2api/`、state 与 logs/ 在 `~/.local/state/devin-2api/`（XDG 三目录）。stderr/stdout.log 由 `devin-2api-logrotate.timer` 每日轮转（copytruncate ≥50MB、留 `.1`–`.3.gz`）。macOS 对应布局语义一致（launchd `com.$USER.devin-2api`、config 与 logs 在 `~/Library/Application Support/devin-2api/`），平台支持仍在（`scripts/deploy.sh`）；当前生产实例是 Linux 侧。
+- 启停一律经 systemd；部署统一 `scripts/deploy/deploy-linux.sh`（构建 → 装入 `~/.local/bin` 并同步 config 到 `~/.config/devin-2api/` → reuseport 交接进程预接管 → `systemctl --user restart` → 托管新实例拉起后退交接 → healthz 校验版本）。
+- Linux 布局：二进制 `~/.local/bin/devin-2api`，config.yaml 在 `~/.config/devin-2api/`、state 与 logs/ 在 `~/.local/state/devin-2api/`（XDG 三目录）。stderr/stdout.log 由 `devin-2api-logrotate.timer` 每日轮转（copytruncate ≥50MB、留 `.1`–`.3.gz`）。macOS 对应布局语义一致（launchd `com.$USER.devin-2api`、config 与 logs 在 `~/Library/Application Support/devin-2api/`），平台支持仍在（`scripts/deploy/deploy.sh`）；当前生产实例是 Linux 侧。
 - **不要手动跑 `./devin-2api` 占端口**：Restart=always 会与手动实例互抢 :3033，交替时全部在途流被掐。
 - 优雅是硬要求：重启只发 SIGTERM（`TimeoutStopSec=660` 覆盖 600s 排空上限，在途流跑完再退），禁用 `kill -9` 抢时间。部署走 `deploy-linux.sh` 的 reuseport 重叠交接才是零停机；直接 `systemctl --user restart` 时排空期新连接是 refused（reuseport 实例 drain 即关 listener）。排空起点对已有连接关 keep-alive（响应带 `Connection: close`），陈旧复用连接最多吃一次 503 即重连到接替者。
-- 冒烟用 `scripts/smoke.sh`（空闲端口起临时实例，healthz + `/v1/models` 真实上游探针后自动关闭）；不保留常驻侧实例。
+- 冒烟用 `scripts/smoke/smoke.sh`（空闲端口起临时实例，healthz + `/v1/models` 真实上游探针后自动关闭）；不保留常驻侧实例。
 - `devin-2api.new` 构建产物若部署中断残留，直接删除即可。
 - 多个会话可能共用同一工作树：`deploy-linux.sh` 构建的就是工作树现状（tracked 含脏改 + **未跟踪非忽略文件**，即他人未提交 WIP 与本地新脚本原样上生产），脏树部署前先确认树上文件的归属与可编译性。
 - `pkill -f <pattern>` 的模式会匹配发起者自己的 shell 命令行 → 整条 shell 被杀（exit 144，踩过多次）。用自排除正则（`pkill -f 'devin-2api-v[0-9]'`、`pkill -f 'state-dir /tmp/d2api-[0-9]'`——`[0-9]`/`[.]` 字面不匹配模式串自身）或先 `pgrep` 拿 pid 再 `kill -TERM`。
 - 提交/部署命令不要把 `cmd | tail` 接进 `&&` 链：管道洗掉退出码，曾把「nothing to commit」当成可重试错误反复触发部署（25 分钟 20+ 次生产重启）。
 
-其它平台的对应物：Linux 用 `scripts/deploy-linux.sh`（systemd --user，XDG 三目录：bin `~/.local/bin`、config `${XDG_CONFIG_HOME:-~/.config}/devin-2api`、state `${XDG_STATE_HOME:-~/.local/state}/devin-2api`，unit 生成在 `~/.config/systemd/user/`）；Windows 不做服务化，裸 exe 前台跑（Ctrl+C 触发同一套优雅排空；exe 在 `%LOCALAPPDATA%\Programs\devin-2api`，config 在 `%APPDATA%\devin-2api`，state 在 `%LOCALAPPDATA%\devin-2api`）。两平台脚本与 macOS 版共享 `scripts/lib-deploy.sh`（release 下载/校验、healthz 版本轮询、stray 检查）。二进制自身的路径解析链：`-config` > `DEVIN2API_CONFIG` > `./config.yaml` > 平台默认；`-state-dir` > `DEVIN2API_STATE_DIR` > 平台默认。
+其它平台的对应物：Linux 用 `scripts/deploy/deploy-linux.sh`（systemd --user，XDG 三目录：bin `~/.local/bin`、config `${XDG_CONFIG_HOME:-~/.config}/devin-2api`、state `${XDG_STATE_HOME:-~/.local/state}/devin-2api`，unit 生成在 `~/.config/systemd/user/`）；Windows 不做服务化，裸 exe 前台跑（Ctrl+C 触发同一套优雅排空；exe 在 `%LOCALAPPDATA%\Programs\devin-2api`，config 在 `%APPDATA%\devin-2api`，state 在 `%LOCALAPPDATA%\devin-2api`）。两平台脚本与 macOS 版共享 `scripts/deploy/lib-deploy.sh`（release 下载/校验、healthz 版本轮询、stray 检查）。二进制自身的路径解析链：`-config` > `DEVIN2API_CONFIG` > `./config.yaml` > 平台默认；`-state-dir` > `DEVIN2API_STATE_DIR` > 平台默认。

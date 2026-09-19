@@ -84,17 +84,17 @@ The state volume keeps `devin-2api.db` (downstream tokens, request logs, quota s
 
 Run as a service (optional):
 
-| Platform | Supervisor                               | Layout                                                                                                       | Install / upgrade            |
-| -------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------- |
-| macOS    | launchd agent                            | bin `~/.local/bin` · config+state `~/Library/Application Support/devin-2api`                                 | `scripts/deploy.sh`          |
-| Linux    | `systemd --user`                         | bin `~/.local/bin` · config `~/.config/devin-2api` · state `~/.local/state/devin-2api`                       | `scripts/deploy-linux.sh`    |
-| Windows  | none — console, or NSSM / Task Scheduler | exe `%LOCALAPPDATA%\Programs\devin-2api` · config `%APPDATA%\devin-2api` · state `%LOCALAPPDATA%\devin-2api` | `scripts/deploy-windows.ps1` |
+| Platform | Supervisor                               | Layout                                                                                                       | Install / upgrade                   |
+| -------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
+| macOS    | launchd agent                            | bin `~/.local/bin` · config+state `~/Library/Application Support/devin-2api`                                 | `scripts/deploy/deploy.sh`          |
+| Linux    | `systemd --user`                         | bin `~/.local/bin` · config `~/.config/devin-2api` · state `~/.local/state/devin-2api`                       | `scripts/deploy/deploy-linux.sh`    |
+| Windows  | none — console, or NSSM / Task Scheduler | exe `%LOCALAPPDATA%\Programs\devin-2api` · config `%APPDATA%\devin-2api` · state `%LOCALAPPDATA%\devin-2api` | `scripts/deploy/deploy-windows.ps1` |
 
 The binary resolves its paths per platform convention: config via `-config` flag → `DEVIN2API_CONFIG` → `./config.yaml` → the platform default above; state via `-state-dir` → `DEVIN2API_STATE_DIR` → platform default. Both deploy scripts install or upgrade in one shot (`--release latest` fetches a prebuilt binary), verify `/healthz` reports the new version, then probe `GET /v1/models` to confirm upstream auth actually works. They treat the repo as home — syncing `config.yaml` into the platform config dir and keeping a `logs` symlink inside the repo pointing at the state dir — so clone first, then run:
 
 ```bash
 git clone https://github.com/WncFht/devin2api && cd devin2api
-bash scripts/deploy-linux.sh --release latest    # macOS: scripts/deploy.sh
+bash scripts/deploy/deploy-linux.sh --release latest    # macOS: scripts/deploy/deploy.sh
 ```
 
 On first run `config.yaml` is generated from `config.example.yaml` with a random `dashboard.password`, and you're prompted for the Devin token (left empty the pool starts empty — add accounts later from the panel); downstream `/v1` tokens are created in the panel (`/web/tokens.html`), never in config. To preset values, `cp config.example.yaml config.yaml` and edit beforehand. `--check` reports installed/running/latest versions; `--uninstall` removes the service and binary while keeping config and logs.

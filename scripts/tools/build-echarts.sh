@@ -4,12 +4,12 @@
 # 面板只用折线/柱状/饼图与少量组件，官方 echarts.min.js (~1.03MB) 大半用不上；
 # 按 echarts 官方的按需引入方式以 esbuild 打包，产物 ~630KB。
 #
-# 用法: scripts/build-echarts.sh [echarts版本，默认 5.6.0]
+# 用法: scripts/tools/build-echarts.sh [echarts版本，默认 5.6.0]
 # 产物直接覆盖 internal/ccpanel/web/assets/js/echarts.min.js，提交进仓库——
 # 单二进制 embed 发布链不引入前端构建步骤，此脚本只在升级版本时手动跑。
 set -euo pipefail
 
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 VER="${1:-5.6.0}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

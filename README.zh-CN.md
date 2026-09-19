@@ -84,17 +84,17 @@ docker run --rm -p 8080:8080 \
 
 以服务方式运行（可选）：
 
-| 平台    | 托管方式                                 | 布局                                                                                                      | 安装 / 升级                  |
-| ------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| macOS   | launchd 代理                             | 二进制 `~/.local/bin` · 配置 + 状态 `~/Library/Application Support/devin-2api`                            | `scripts/deploy.sh`          |
-| Linux   | `systemd --user`                         | 二进制 `~/.local/bin` · 配置 `~/.config/devin-2api` · 状态 `~/.local/state/devin-2api`                    | `scripts/deploy-linux.sh`    |
-| Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | exe `%LOCALAPPDATA%\Programs\devin-2api` · 配置 `%APPDATA%\devin-2api` · 状态 `%LOCALAPPDATA%\devin-2api` | `scripts/deploy-windows.ps1` |
+| 平台    | 托管方式                                 | 布局                                                                                                      | 安装 / 升级                         |
+| ------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| macOS   | launchd 代理                             | 二进制 `~/.local/bin` · 配置 + 状态 `~/Library/Application Support/devin-2api`                            | `scripts/deploy/deploy.sh`          |
+| Linux   | `systemd --user`                         | 二进制 `~/.local/bin` · 配置 `~/.config/devin-2api` · 状态 `~/.local/state/devin-2api`                    | `scripts/deploy/deploy-linux.sh`    |
+| Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | exe `%LOCALAPPDATA%\Programs\devin-2api` · 配置 `%APPDATA%\devin-2api` · 状态 `%LOCALAPPDATA%\devin-2api` | `scripts/deploy/deploy-windows.ps1` |
 
 二进制按平台惯例解析路径：配置走 `-config` flag → `DEVIN2API_CONFIG` → `./config.yaml` → 上表平台默认；状态目录走 `-state-dir` → `DEVIN2API_STATE_DIR` → 平台默认。两个部署脚本都是「首装与升级同一条命令」：`--release latest` 拉预编译二进制，装完轮询 `/healthz` 确认新版本接管，再打一发 `GET /v1/models` 验证上游鉴权真的通了。脚本以仓库为家——同步 `config.yaml` 进平台配置目录、在仓库内维护指向状态目录的 `logs` 符号链接，所以先 clone 再跑：
 
 ```bash
 git clone https://github.com/WncFht/devin2api && cd devin2api
-bash scripts/deploy-linux.sh --release latest    # macOS 用 scripts/deploy.sh
+bash scripts/deploy/deploy-linux.sh --release latest    # macOS 用 scripts/deploy/deploy.sh
 ```
 
 首跑时 `config.yaml` 会自动从 `config.example.yaml` 生成（写入随机 `dashboard.password`，并提示粘贴 Devin token——留空则空池起跑，事后在面板加号；下游 /v1 令牌在面板 `/web/tokens.html` 创建，不入配置）；想提前定制可先 `cp config.example.yaml config.yaml` 手动编辑。`--check` 对比已安装/运行中/最新版本，`--uninstall` 移除服务与二进制（保留 config 与日志）。

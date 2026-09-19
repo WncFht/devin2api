@@ -3,7 +3,7 @@
 # 个二进制，对全部 /admin 读取端点做归一化 diff。用于 D2/D3「JSON 契约
 # 不变」的验收。
 #
-# 用法: scripts/golden-diff.sh <old-binary> <new-binary> <state-dir> [config.yaml] [--traffic] [--keep-db]
+# 用法: scripts/check/golden-diff.sh <old-binary> <new-binary> <state-dir> [config.yaml] [--traffic] [--keep-db]
 #   old/new 二进制各自起在空闲端口（config.yaml 的 listen 被临时改写），
 #   state-dir 被复制两份互不污染。输出逐端点 PASS/DIFF 与首个差异摘要。
 #   GD_PORT_BASE 改基准端口（默认 41711，new 侧 +1）——并发跑多份对拍
@@ -25,7 +25,7 @@
 #                喂 rejects 环），然后重跑 reads + 对新生目录做 debug
 #                对账。专测 D2 的写路径。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 OLD_BIN="${1:?usage: golden-diff.sh <old-bin> <new-bin> <state-dir> [config.yaml] [--traffic] [--keep-db]}"
 NEW_BIN="${2:?}"

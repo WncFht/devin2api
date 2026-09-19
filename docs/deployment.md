@@ -2,17 +2,17 @@
 
 三平台拓扑——各平台按自己的目录规范分家（二进制 / 配置 / 状态日志三类不再同居一个运行目录）：
 
-| 平台    | 托管方式                                   | 二进制                                              | 配置                                                   | 状态/日志                                                                | 部署命令                     |
-| ------- | ------------------------------------------ | --------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------ | ---------------------------- |
-| macOS   | launchd 用户代理 `com.$USER.devin-2api`    | `~/.local/bin/devin-2api`                           | `~/Library/Application Support/devin-2api/config.yaml` | 同配置目录（`logs/` 子目录；macOS 无独立 state 惯例，维持 app 目录模型） | `scripts/deploy.sh`          |
-| Linux   | systemd `--user` unit `devin-2api.service` | `~/.local/bin/devin-2api`                           | `${XDG_CONFIG_HOME:-~/.config}/devin-2api/config.yaml` | `${XDG_STATE_HOME:-~/.local/state}/devin-2api`                           | `scripts/deploy-linux.sh`    |
-| Windows | 无服务化，裸 exe 前台跑                    | `%LOCALAPPDATA%\Programs\devin-2api\devin-2api.exe` | `%APPDATA%\devin-2api\config.yaml`                     | `%LOCALAPPDATA%\devin-2api`                                              | `scripts/deploy-windows.ps1` |
+| 平台    | 托管方式                                   | 二进制                                              | 配置                                                   | 状态/日志                                                                | 部署命令                            |
+| ------- | ------------------------------------------ | --------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------ | ----------------------------------- |
+| macOS   | launchd 用户代理 `com.$USER.devin-2api`    | `~/.local/bin/devin-2api`                           | `~/Library/Application Support/devin-2api/config.yaml` | 同配置目录（`logs/` 子目录；macOS 无独立 state 惯例，维持 app 目录模型） | `scripts/deploy/deploy.sh`          |
+| Linux   | systemd `--user` unit `devin-2api.service` | `~/.local/bin/devin-2api`                           | `${XDG_CONFIG_HOME:-~/.config}/devin-2api/config.yaml` | `${XDG_STATE_HOME:-~/.local/state}/devin-2api`                           | `scripts/deploy/deploy-linux.sh`    |
+| Windows | 无服务化，裸 exe 前台跑                    | `%LOCALAPPDATA%\Programs\devin-2api\devin-2api.exe` | `%APPDATA%\devin-2api\config.yaml`                     | `%LOCALAPPDATA%\devin-2api`                                              | `scripts/deploy/deploy-windows.ps1` |
 
 二进制的路径解析链（服务定义里全部显式传 flag，链只对裸跑生效）：配置文件 `-config` flag → `DEVIN2API_CONFIG` env → `./config.yaml`（存在才选，仓库开发/Windows 解压即跑）→ 上表平台默认；状态目录 `-state-dir` flag → `DEVIN2API_STATE_DIR` env → 上表平台默认。启动日志 `paths resolved` 一行打出实际生效的两个路径。
 
-三个 deploy 脚本（macOS/Linux 共用 `scripts/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `dashboard.password`，tty 下提示粘贴 token；下游 /v1 令牌不入配置，到面板 /web/tokens.html 创建）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突、生效 config 里死引用的 `credentials_file`（9-18 断流根因；加载期现已改判该 lane 降级带病服役而非拒载，带病起跑照样拦下）；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
+三个 deploy 脚本（macOS/Linux 共用 `scripts/deploy/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `dashboard.password`，tty 下提示粘贴 token；下游 /v1 令牌不入配置，到面板 /web/tokens.html 创建）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突、生效 config 里死引用的 `credentials_file`（9-18 断流根因；加载期现已改判该 lane 降级带病服役而非拒载，带病起跑照样拦下）；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
 
-开发机侧曾有远程驱动 `scripts/deploy-remote.sh`（SSH 到生产机执行 `deploy.sh`，worktree 推送模式），2026-09-18 随 Mac 生产实例退役、仅留档（运行即 exit 1）；机制细节见 `toolchain.md` §6。部署后的验证步骤（healthz 版本确认 + 面板套件冒烟）见 `post-deploy-verify.md`。
+开发机侧曾有远程驱动 `scripts/attic/deploy-remote.sh`（SSH 到生产机执行 `deploy.sh`，worktree 推送模式），2026-09-18 随 Mac 生产实例退役、仅留档（运行即 exit 1）；机制细节见 `toolchain.md` §6。部署后的验证步骤（healthz 版本确认 + 面板套件冒烟）见 `post-deploy-verify.md`。
 
 ## 跨平台共同约定
 
@@ -81,7 +81,7 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 
 ### stderr/stdout 日志轮转
 
-debug 请求日志有 retention，但 `stderr.log`（slog 进程日志）与 `stdout.log` 只会增长。这两个文件的写 fd 归 launchd 持有、进程无法 reopen，rename 类轮转会让 fd 跟着旧 inode 走、新写全丢——所以轮转用 copytruncate：`scripts/rotate-logs.sh` 对超 50MB 的 `*.log` 复制后原地截断并 gzip，保留 `.1`–`.3.gz` 三代（截断瞬间并发写入的一行仍可能丢，是该语义的最小代价）。
+debug 请求日志有 retention，但 `stderr.log`（slog 进程日志）与 `stdout.log` 只会增长。这两个文件的写 fd 归 launchd 持有、进程无法 reopen，rename 类轮转会让 fd 跟着旧 inode 走、新写全丢——所以轮转用 copytruncate：`scripts/deploy/rotate-logs.sh` 对超 50MB 的 `*.log` 复制后原地截断并 gzip，保留 `.1`–`.3.gz` 三代（截断瞬间并发写入的一行仍可能丢，是该语义的最小代价）。
 
 `deploy.sh` 把它装成 `~/.local/bin/devin-2api-logrotate` 并加载配套 agent `com.$USER.devin-2api.logrotate`（`StartInterval=86400` 每天一次，输出落 `logs/logrotate.out`/`.err`）；plist 漂移会自动重写并 bootout+bootstrap，`--uninstall` 一并移除。与主服务完全解耦，轮转动作不影响在途请求。注意系统 newsyslog 是 rename+signal 语义，对 launchd 持有的 fd 不适用——这里没有等价替代品，用这个脚本。
 
@@ -102,7 +102,7 @@ tail -f logs/stderr.log                                                       # 
 
 ## Linux（systemd --user）
 
-`scripts/deploy-linux.sh` 生成的 unit（`~/.config/systemd/user/devin-2api.service`）：
+`scripts/deploy/deploy-linux.sh` 生成的 unit（`~/.config/systemd/user/devin-2api.service`）：
 
 ```ini
 [Unit]
@@ -151,7 +151,7 @@ tail -f logs/stderr.log                     # 进程日志
 
 不做服务化：`devin-2api.exe` 前台启动，Ctrl+C 触发与其它平台相同的优雅排空（SIGTERM 路径）；关窗、`taskkill /F`、`Stop-Process` 都是强杀。部署布局按 Microsoft 惯例拆开：exe 在 `%LOCALAPPDATA%\Programs\devin-2api`，`config.yaml` 在 `%APPDATA%\devin-2api`（roaming），`logs\` 在 `%LOCALAPPDATA%\devin-2api`（machine-local）。不用部署脚本直接跑 zip 里的 exe 也可以——`./config.yaml` 存在即被选中（解析链见上），但状态目录仍回落 `%LOCALAPPDATA%\devin-2api`。release zip 内含 exe + `config.example.yaml` + LICENSE。
 
-`scripts/deploy-windows.ps1` 与 bash 版同语义：`-Release latest` 下载 zip 校验 sha256、缺失时生成 config.yaml（随机 `dashboard.password`、`127.0.0.1`+空闲端口、交互粘贴 token；下游 /v1 令牌不入配置，到面板 /web/tokens.html 创建）、独立控制台窗口启动、healthz + `/v1/models` 冒烟；`-Check`/`-Uninstall`/`-NoStart`/`-Force`（允许强杀运行中实例，等价关窗）/`-RuntimeDir`（覆盖 exe 安装目录；配置/状态目录由 `DEVIN2API_CONFIG_DIR`/`DEVIN2API_STATE_DIR` env 覆盖）。旧版「exe 同目录放 config/logs」布局由 `Move-LegacyLayout` 自动迁移。经 SSH 远程执行时实例会随会话结束被系统回收——脚本面向本机交互会话。
+`scripts/deploy/deploy-windows.ps1` 与 bash 版同语义：`-Release latest` 下载 zip 校验 sha256、缺失时生成 config.yaml（随机 `dashboard.password`、`127.0.0.1`+空闲端口、交互粘贴 token；下游 /v1 令牌不入配置，到面板 /web/tokens.html 创建）、独立控制台窗口启动、healthz + `/v1/models` 冒烟；`-Check`/`-Uninstall`/`-NoStart`/`-Force`（允许强杀运行中实例，等价关窗）/`-RuntimeDir`（覆盖 exe 安装目录；配置/状态目录由 `DEVIN2API_CONFIG_DIR`/`DEVIN2API_STATE_DIR` env 覆盖）。旧版「exe 同目录放 config/logs」布局由 `Move-LegacyLayout` 自动迁移。经 SSH 远程执行时实例会随会话结束被系统回收——脚本面向本机交互会话。
 
 ## 面板与 agent 访问
 
@@ -172,4 +172,4 @@ curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/debug-logs/
 
 本节是作者本机部署的拓扑形态（2026-09-18 起生效，地址用占位符），供对照参考，不是部署规范的一部分。
 
-生产实例在 Linux 生产机本机：systemd `--user` 服务 `devin-2api.service` 监听 `:3033`，由 `scripts/deploy-linux.sh` 维护；原 Mac 生产实例已退役，`scripts/deploy-remote.sh` 仅留档。各机 `:3003` 端点由转发 shim 兜住继续可用（旧 Mac launchd `com.devin2api.forwarder` → `<tailnet-ip>:3033`；生产机 systemd --user `devin-2api-compat-3003.service` → `127.0.0.1:3033`；脚本与 unit 模板见 `scripts/compat-forwarder/`），下游客户端无需改动。其它机器经 tailnet `http://<tailnet-ip>:3033` 访问该实例。
+生产实例在 Linux 生产机本机：systemd `--user` 服务 `devin-2api.service` 监听 `:3033`，由 `scripts/deploy/deploy-linux.sh` 维护；原 Mac 生产实例已退役，`scripts/attic/deploy-remote.sh` 仅留档。各机 `:3003` 端点由转发 shim 兜住继续可用（旧 Mac launchd `com.devin2api.forwarder` → `<tailnet-ip>:3033`；生产机 systemd --user `devin-2api-compat-3003.service` → `127.0.0.1:3033`；脚本与 unit 模板见 `scripts/deploy/compat-forwarder/`），下游客户端无需改动。其它机器经 tailnet `http://<tailnet-ip>:3033` 访问该实例。

@@ -2,7 +2,7 @@
 # traffic-probe.sh — 给运行中的 devin-2api 实例灌一段混合流量并核对
 # sqlite logs 行的字段保真度。用于 D2/D3 后「新写入路径」验收。
 #
-# 用法: scripts/traffic-probe.sh <port> <state-dir> [config.yaml]
+# 用法: scripts/smoke/traffic-probe.sh <port> <state-dir> [config.yaml]
 #   覆盖：非流式/流式成功、anthropic /v1/messages、model_disabled 与
 #   request_build 本地拒、上游不存在模型、大请求体、WS /v1/responses。
 #   每发打完后按 dir 从 logs 表取行，逐字段断言（延迟段/token/stream/

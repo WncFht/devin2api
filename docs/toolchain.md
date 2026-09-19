@@ -8,7 +8,7 @@
 
 - `*.md`：`markdownlint-cli2 --fix` 原地修可自动修的规则 → `autocorrect --stdin | prettier` 写 index。markdownlint 原地改写文件时会 fail 一次，**重新 `git add` 再提交**即可，不是错误。
 - `*.go`：`gofmt` 走同一机制。
-- `*.yaml`/`*.yml`：`scripts/check-yaml-comments.py` 查纯注释行 ≤80 显示列（CJK 按 2 列计，check 类、失败才拦）。约定是「≤80 显示列 + 断点取标点/从句边界」——宽度机检、断点只能人工；没有任何 formatter 会重排注释文字（prettier 保留原文、js-yaml/PyYAML 丢注释，该约定纯手写维护），机械重排用编辑器 reflow（vim `gq` / VS Code Rewrap）。yaml 结构格式（缩进/引号）不进门——仓内 yaml 以 config.example.yaml 的注释面为主，prettier 重排它的收益不够付全仓 churn。
+- `*.yaml`/`*.yml`：`scripts/check/yaml-comments.py` 查纯注释行 ≤80 显示列（CJK 按 2 列计，check 类、失败才拦）。约定是「≤80 显示列 + 断点取标点/从句边界」——宽度机检、断点只能人工；没有任何 formatter 会重排注释文字（prettier 保留原文、js-yaml/PyYAML 丢注释，该约定纯手写维护），机械重排用编辑器 reflow（vim `gq` / VS Code Rewrap）。yaml 结构格式（缩进/引号）不进门——仓内 yaml 以 config.example.yaml 的注释面为主，prettier 重排它的收益不够付全仓 churn。
 - 全补丁：gitleaks 密钥扫描（v8.30.1 上游 hook，自定义规则在 `.gitleaks.toml`——GitHub push protection 只认标准 pattern，`devin-session-token$` 这类自有格式靠它拦）。
 - markdownlint / prettier / git-format-staged 的版本锁定在 `package.json`（`npm install` + `npm ci` 在 CI 复现），autocorrect 本机经 `brew install autocorrect` 提供、无版本钉。
 
@@ -21,15 +21,15 @@
 | `go vet ./...`                           | 编译期检查                                                           |                                                                                                                                                                                    |
 | `go test -race ./...`                    | 单测 + race                                                          |                                                                                                                                                                                    |
 | `GOOS=windows go build/vet ./...`        | 交叉编译                                                             | 防止引入 unix-only 调用打断其它平台；darwin 同理                                                                                                                                   |
-| `bash scripts/deploy-assets.test.sh`     | 部署资产断言                                                         | 见 §6                                                                                                                                                                              |
-| `bash scripts/release-selftest.sh`       | release.sh 全流程演练                                                | 见 §5，**改 release.sh 后必跑**                                                                                                                                                    |
+| `bash scripts/check/deploy-assets.sh`    | 部署资产断言                                                         | 见 §6                                                                                                                                                                              |
+| `bash scripts/check/release-selftest.sh` | release.sh 全流程演练                                                | 见 §5，**改 release.sh 后必跑**                                                                                                                                                    |
 | `npm run format:check` / `lint:md`       | markdown 格式/规则                                                   | 与 pre-commit 同套版本                                                                                                                                                             |
-| `python3 scripts/check-yaml-comments.py` | yaml 注释宽度（显示列）                                              | 无参扫 `git ls-files` 全部 yaml；与 pre-commit hook 同款                                                                                                                           |
+| `python3 scripts/check/yaml-comments.py` | yaml 注释宽度（显示列）                                              | 无参扫 `git ls-files` 全部 yaml；与 pre-commit hook 同款                                                                                                                           |
 | `actionlint`（若装了）                   | workflow 语法                                                        | CI 不跑它，本地自查                                                                                                                                                                |
 
 前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`、系统 `python3`（git-format-staged 与 yaml 注释检查共用）。Linux 无 brew 时的等价装法（本机实测）：`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 && ln -sf ~/go/bin/golangci-lint ~/.local/bin/`——版本号与 CI 的 `golangci-lint-action@v9` 固定值对齐。
 
-写 shell 脚本注意 macOS 自带 **bash 3.2**：`mapfile`/`declare -A` 不存在；`set -u` 下展开空数组 `"${arr[@]}"` 报 unbound——仓内脚本统一写 `${arr[@]+"${arr[@]}"}`（release/perf-snapshot/cacheprobe-verify/deploy-remote 全是这个写法，新脚本照抄）。
+写 shell 脚本注意 macOS 自带 **bash 3.2**：`mapfile`/`declare -A` 不存在；`set -u` 下展开空数组 `"${arr[@]}"` 报 unbound——仓内脚本统一写 `${arr[@]+"${arr[@]}"}`（release/snapshot/cacheprobe/deploy-remote 全是这个写法，新脚本照抄）。
 
 ## 3. 版本解析链（4 级 fallback）
 
@@ -47,8 +47,8 @@ push 到 main 与 PR 触发。顶层 `permissions: contents: read`；`concurrenc
 - **test**：`go mod tidy -diff`（go.mod 与 import 漂移拦截）→ gofmt 检查 → `go vet` → `go test -race -shuffle=on -covermode=atomic -coverpkg=./...`（覆盖率只观测不设门槛，total 打日志 + profile 存 artifact）→ `go build` → windows/darwin 交叉编译 + vet。
 - **golangci**：`golangci-lint-action@v9` 固定 `v2.13.2`，与本地版对齐。
 - **actionlint**：workflow 文件自身 lint（钉 v1.7.12，shellcheck 查 run: 块内 bash）。
-- **deploy-assets**：`deploy-assets.test.sh` 断言 + `release-selftest.sh` 演练 + `handoff-triage.test.sh`（lib-deploy 交接链路演练）。
-- **codegen-drift**：钉版 protoc + protoc-gen-go/connect-go 重跑生成 → `scripts/check-codegen.sh` 与提交的 `outputs/devin-proto-go` 逐字节比对，proto 源改了忘重新生成时拦下。
+- **deploy-assets**：`deploy-assets.sh` 断言 + `release-selftest.sh` 演练 + `handoff-triage.sh`（lib-deploy 交接链路演练）。
+- **codegen-drift**：钉版 protoc + protoc-gen-go/connect-go 重跑生成 → `scripts/check/codegen.sh` 与提交的 `outputs/devin-proto-go` 逐字节比对，proto 源改了忘重新生成时拦下。
 - **darwin-smoke**（macos-latest）：macOS 平台的真机验证——`go test ./...` + `smoke.sh --no-upstream`（无 token 环境下断言 `/v1/models` 明确 502、SIGTERM 优雅退出），darwin 产物不再只靠交叉编译门禁。
 - **windows-smoke**（windows-latest）：全量测试 + 启动冒烟（healthz + `/v1/models` 空 token 502）；不验 SIGTERM 排空——Windows 优雅退出走 Ctrl+C/os.Interrupt，git-bash kill 是 TerminateProcess，无从断言。
 - **panel-verify**：`scripts/panel-verify` playwright 套件进 CI（临时实例 + 假上游凭据，不打真上游；firefox 浏览器按 package-lock 缓存）。
@@ -60,7 +60,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 
 `.github/workflows/nightly.yml`（每日 cron + 手动 dispatch）：`upstream-probe` 在 `secrets.DEVIN_E2E_TOKEN` 配置后跑 `smoke.sh` 全真模式（真上游 RPC + SIGTERM 排空；未配置则跳过，fork 不红）；`bench` 跑 `bench.sh` 全基准并把结果存 90 天 artifact 做趋势留痕。`.github/dependabot.yml` 周更 gomod 根、github-actions、npm（根 + panel-verify）；devinproto 生成模块（/outputs/devin-proto-go）登记在周更表内但 `ignore` 全忽略——go.mod 钉死跟随 codegen 工具版本，要升就连钉一起手动升。
 
-## 5. 发布（`scripts/release.sh` + `release.yml`）
+## 5. 发布（`scripts/release/release.sh` + `release.yml`）
 
 ### release.sh 两段式
 
@@ -86,9 +86,9 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 
 ## 6. 部署脚本族 + 资产断言
 
-- `scripts/deploy.sh`（macOS launchd `com.$USER.devin-2api`，监听端口取 `server.listen`、缺省 :3003）、`scripts/deploy-linux.sh`（systemd `--user`）共享 `scripts/lib-deploy.sh`：release 资产下载 + `checksums.txt` 校验、`wait_healthz_version` 部署后版本轮询、stray 进程检查（`pgrep -x` 精确名匹配——`pgrep -f` 会把命令行里含 devin-2api 的无关进程误报成 stray）。两脚本另把 `scripts/rotate-logs.sh` 装成 `~/.local/bin/devin-2api-logrotate` 并登记每日驱动（launchd StartInterval agent / systemd timer），轮转 stderr/stdout.log。三平台部署细节见 `deployment.md`。
-- `scripts/deploy-remote.sh` 曾是开发机侧的远程驱动：经免密 SSH 到生产机执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端 staging 构建部署（`config.yaml` 不进 tar）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比生产与验证实例。三种模式部署前都把 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）刷进 staging——live 是权威副本，`deploy.sh` 预检读的也是它。2026-09-18 起退役留档（运行即 exit 1），部署唯一路径是 `scripts/deploy-linux.sh`。
-- `scripts/deploy-assets.test.sh` 是对这些资产的**字符串断言套件**：plist 必须有 KeepAlive/ExitTimeOut/`kickstart -k`、unit 必须有 Restart=always/TimeoutStopSec、进度输出必须 `>&2`（`$()` 捕获会把 stdout 噪音混进变量）、禁 `kill -9`，外加所有 shell 脚本 `bash -n` 与 `fit.py` 的 `compile()` 语法检查。风格：逐条 `check`/`has` 断言、最后统一退出码——新增断言照抄这个模式。
+- `scripts/deploy/deploy.sh`（macOS launchd `com.$USER.devin-2api`，监听端口取 `server.listen`、缺省 :3003）、`scripts/deploy/deploy-linux.sh`（systemd `--user`）共享 `scripts/deploy/lib-deploy.sh`：release 资产下载 + `checksums.txt` 校验、`wait_healthz_version` 部署后版本轮询、stray 进程检查（`pgrep -x` 精确名匹配——`pgrep -f` 会把命令行里含 devin-2api 的无关进程误报成 stray）。两脚本另把 `scripts/deploy/rotate-logs.sh` 装成 `~/.local/bin/devin-2api-logrotate` 并登记每日驱动（launchd StartInterval agent / systemd timer），轮转 stderr/stdout.log。三平台部署细节见 `deployment.md`。
+- `scripts/attic/deploy-remote.sh` 曾是开发机侧的远程驱动：经免密 SSH 到生产机执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端 staging 构建部署（`config.yaml` 不进 tar）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比生产与验证实例。三种模式部署前都把 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）刷进 staging——live 是权威副本，`deploy.sh` 预检读的也是它。2026-09-18 起退役留档（运行即 exit 1），部署唯一路径是 `scripts/deploy/deploy-linux.sh`。
+- `scripts/check/deploy-assets.sh` 是对这些资产的**字符串断言套件**：plist 必须有 KeepAlive/ExitTimeOut/`kickstart -k`、unit 必须有 Restart=always/TimeoutStopSec、进度输出必须 `>&2`（`$()` 捕获会把 stdout 噪音混进变量）、禁 `kill -9`，外加所有 shell 脚本 `bash -n` 与 `fit.py` 的 `compile()` 语法检查。风格：逐条 `check`/`has` 断言、最后统一退出码——新增断言照抄这个模式。
 - Windows 无服务化：裸 exe 前台跑，Ctrl+C 走同一套优雅排空。
 
 ## 7. 其它设施
@@ -99,19 +99,23 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 
 ## 8. 运维与实验脚本（`scripts/`）
 
-会话排障与上游调研沉淀下来的手工工具，不进 CI：
+`scripts/` 按关注点分目录：`deploy/` 部署族（§6）、`release/` 发版（§5）、`check/` CI 断言套件（离线可跑）、`smoke/` 要活实例或真上游 token 的探针、`probe/` 打活目标的诊断/数据工具、`perf/` 压测与快照（`perf.md`）、`tools/` 构建辅助、`attic/` 退役留档、`quota/`+`toolalign/`+`panel-verify/` 自带目录的套件。其中不进 CI 的手工工具：
 
-| 脚本                              | 干什么                                                                                                                                                                                                                                                                   |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `reqprobe.sh <label> <ep> <body>` | 打一发请求到 `REQPROBE_BASE`（默认 127.0.0.1:3033；自动读 config.yaml 的 dashboard.password，令牌仓闭合时经 /admin/auth-tokens 铸临时令牌、退出即删），打印 X-Request-Id、02 的 Dropped/tool_choice/IR 序列、03 wire 名、SSE/终态 JSON 形态——新客户端/新字段冒烟的第一步 |
-| `index-stream-stats.py`           | join `logs` 表与 debug_files/debug_chunks payload 出流画像：sid/psid 派生、`cc_is_subagent` 标记、gap→hit% 分桶、miss 归因、warm/cold TTFB；`--db` 默认按平台探测 devin-2api.db（只读连接）                                                                              |
-| `cache-probe.py`                  | 缓存受控实验骨架：arm（独立 user_id + padded system）× 绝对偏移时刻表，ThreadPoolExecutor 调度、逐行 JSONL 落盘；`--plan` 或 `--keepalive` 模式                                                                                                                          |
-| `drift-corpus-scan.py`            | 扫 db 里 01 语料统计各协议的漂移形状分布（`--db` 默认按平台探测，`--since/--until YYYYMMDD` 限窗；语料为空 exit 2 防空转误读）                                                                                                                                           |
-| `panel-qa.js`                     | ccpanel 前端走查：`shot`/`overflow`/`sweep` 子命令，playwright 无头截图 + 元素级溢出检测 + i18n 泄漏检查；token 自动读 config.yaml dashboard.password                                                                                                                    |
-| `panel-verify/`                   | ccpanel 断言式验证套件：`./run.sh` 自带临时实例（空闲端口 + 临时 config/state，假上游凭据）跑 playwright 检查——登录角色、断点 nav 裁切、列显隐（含死窗回归）、移动端溢出、零 console 错误；截图只在失败时写 `shots/`                                                     |
-| `remote-logs.sh`                  | 远端实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish——原为远端 Mac 生产而写，生产已迁本机（直读 `~/.local/state/devin-2api/logs/`），脚本留作远端目标通用工具                                                                       |
-| `repo-survey.sh`                  | 一台机器 `~/src/*` 全部 git 仓体检表（branch/dirty/ahead/behind/stash/最后提交），可带 host 参数走 ssh                                                                                                                                                                   |
-| `toolalign/`                      | 客户端工具声明对齐矩阵：`run_matrix.py <cc\|codex>`（逐工具强制调用 + tool_result 回环）、`run_edges.py`（流式/none/image-error/并行配对/namespace 展平边界）                                                                                                            |
+| 脚本                                    | 干什么                                                                                                                                                                                                                                                                   |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `smoke/reqprobe.sh <label> <ep> <body>` | 打一发请求到 `REQPROBE_BASE`（默认 127.0.0.1:3033；自动读 config.yaml 的 dashboard.password，令牌仓闭合时经 /admin/auth-tokens 铸临时令牌、退出即删），打印 X-Request-Id、02 的 Dropped/tool_choice/IR 序列、03 wire 名、SSE/终态 JSON 形态——新客户端/新字段冒烟的第一步 |
+| `smoke/load.sh`                         | sqlite 化后的并发冒烟：N 个读 worker 轮询重 /admin 读端点                                                                                                                                                                                                                |
+| `smoke/pool.sh`                         | 多账号池端到端冒烟：双 lane 起临时实例打真上游，见 `pool-e2e.md`                                                                                                                                                                                                         |
+| `smoke/sqlite-live.sh`                  | 活实例的 sqlite 迁移验收（有状态，打指定端口）                                                                                                                                                                                                                           |
+| `smoke/traffic-probe.sh`                | 活实例流量探针：造请求观察日志/指标落点                                                                                                                                                                                                                                  |
+| `probe/index-stream-stats.py`           | join `logs` 表与 debug_files/debug_chunks payload 出流画像：sid/psid 派生、`cc_is_subagent` 标记、gap→hit% 分桶、miss 归因、warm/cold TTFB；`--db` 默认按平台探测 devin-2api.db（只读连接）                                                                              |
+| `probe/cache-probe.py`                  | 缓存受控实验骨架：arm（独立 user_id + padded system）× 绝对偏移时刻表，ThreadPoolExecutor 调度、逐行 JSONL 落盘；`--plan` 或 `--keepalive` 模式                                                                                                                          |
+| `probe/drift-corpus-scan.py`            | 扫 db 里 01 语料统计各协议的漂移形状分布（`--db` 默认按平台探测，`--since/--until YYYYMMDD` 限窗；语料为空 exit 2 防空转误读）                                                                                                                                           |
+| `probe/panel-qa.js`                     | ccpanel 前端走查：`shot`/`overflow`/`sweep` 子命令，playwright 无头截图 + 元素级溢出检测 + i18n 泄漏检查；token 自动读 config.yaml dashboard.password                                                                                                                    |
+| `panel-verify/`                         | ccpanel 断言式验证套件：`./run.sh` 自带临时实例（空闲端口 + 临时 config/state，假上游凭据）跑 playwright 检查——登录角色、断点 nav 裁切、列显隐（含死窗回归）、移动端溢出、零 console 错误；截图只在失败时写 `shots/`                                                     |
+| `probe/remote-logs.sh`                  | 远端实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish——原为远端 Mac 生产而写，生产已迁本机（直读 `~/.local/state/devin-2api/logs/`），脚本留作远端目标通用工具                                                                       |
+| `probe/repo-survey.sh`                  | 一台机器 `~/src/*` 全部 git 仓体检表（branch/dirty/ahead/behind/stash/最后提交），可带 host 参数走 ssh                                                                                                                                                                   |
+| `toolalign/`                            | 客户端工具声明对齐矩阵：`run_matrix.py <cc\|codex>`（逐工具强制调用 + tool_result 回环）、`run_edges.py`（流式/none/image-error/并行配对/namespace 展平边界）                                                                                                            |
 
 脏树时拿干净构建验证的配方：`git worktree add $W/wt HEAD && go build -C $W/wt -o $W/devin-2api ./cmd/devin-2api` 出 HEAD 态二进制 → scratch 目录备一份 `config.yaml`（`listen` 换空闲端口、`debug.enabled: true`）→ `-state-dir .` 让 logs 落本地 → `(nohup … &)` 起 → 测完 `git worktree remove --force` 收尾。多人共用工作树时这是不动主树的验证通道。
 
@@ -124,13 +128,13 @@ go test -race ./...                      # 测试
 npm run format:check && npm run lint:md  # markdown
 
 # 发版（详见 release-runbook skill）
-scripts/release.sh                       # dry-run
-scripts/release.sh --publish             # VERSION 回写→等 CI 绿→打 tag
-bash scripts/release-selftest.sh         # 改 release.sh 后必跑
+scripts/release/release.sh                       # dry-run
+scripts/release/release.sh --publish             # VERSION 回写→等 CI 绿→打 tag
+bash scripts/check/release-selftest.sh         # 改 release.sh 后必跑
 
 # 部署与排障（生产 = 本机 :3033）
-scripts/deploy-linux.sh [--release vX.Y.Z|--check]  # 生产部署唯一路径（零停机交接）
-scripts/deploy.sh [--release vX.Y.Z]     # macOS 本机升级（非生产拓扑）
-# scripts/deploy-remote.sh               # 2026-09-18 退役：运行即 exit 1，仅留档
-bash scripts/deploy-assets.test.sh       # 部署资产断言
+scripts/deploy/deploy-linux.sh [--release vX.Y.Z|--check]  # 生产部署唯一路径（零停机交接）
+scripts/deploy/deploy.sh [--release vX.Y.Z]     # macOS 本机升级（非生产拓扑）
+# scripts/attic/deploy-remote.sh               # 2026-09-18 退役：运行即 exit 1，仅留档
+bash scripts/check/deploy-assets.sh       # 部署资产断言
 ```

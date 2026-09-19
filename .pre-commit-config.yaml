@@ -26,7 +26,7 @@ repos:
       # check 类、失败才拦；断点语义（从句边界）机检不了，靠人工。
       - id: yaml-comment-width
         name: yaml comment width (display cols)
-        entry: python3 scripts/check-yaml-comments.py
+        entry: python3 scripts/check/yaml-comments.py
         language: system
         types: [yaml]
   # secret 门控：GitHub push protection 只认标准 pattern，devin-session-token$

@@ -12,9 +12,9 @@
 ## 使用
 
 ```sh
-sudo sh scripts/gwcap/install.sh install    # 建 gwcap 用户 + 装文件 + enable 两单元
-sudo sh scripts/gwcap/install.sh status     # 看单元/表/healthz
-sudo sh scripts/gwcap/install.sh uninstall  # 全拆
+sudo sh scripts/attic/gwcap/install.sh install    # 建 gwcap 用户 + 装文件 + enable 两单元
+sudo sh scripts/attic/gwcap/install.sh status     # 看单元/表/healthz
+sudo sh scripts/attic/gwcap/install.sh uninstall  # 全拆
 ```
 
 ## 已知坑（2026-09-17 实发过一次）

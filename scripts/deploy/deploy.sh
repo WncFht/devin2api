@@ -2,14 +2,14 @@
 # deploy.sh — 构建或下载并热替换本机 launchd 托管的 devin-2api（仅 macOS）。
 # 用法见 --help。launchd 服务未加载时自动生成 plist 并 bootstrap，
 # config.yaml 缺失时自动从 example 生成——首装与升级同一条命令：
-# 新机器只要同步本仓库再跑 deploy.sh。Linux 用 scripts/deploy-linux.sh
-# （systemd --user），两者共享 scripts/lib-deploy.sh。
+# 新机器只要同步本仓库再跑 deploy.sh。Linux 用 scripts/deploy/deploy-linux.sh
+# （systemd --user），两者共享 scripts/deploy/lib-deploy.sh。
 set -euo pipefail
-cd "$(dirname "$0")/.."
-source scripts/lib-deploy.sh
+cd "$(dirname "$0")/../.."
+source scripts/deploy/lib-deploy.sh
 
 [[ "$(uname -s)" == "Darwin" ]] || {
-	echo "deploy.sh 仅适用 macOS（launchd）；Linux 用 scripts/deploy-linux.sh" >&2
+	echo "deploy.sh 仅适用 macOS（launchd）；Linux 用 scripts/deploy/deploy-linux.sh" >&2
 	exit 1
 }
 

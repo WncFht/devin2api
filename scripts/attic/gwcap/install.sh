@@ -1,6 +1,6 @@
 #!/bin/sh
 # gwcap 装机/卸载/状态——本机出向并发闸，当前为留档未部署状态。
-# 用法：sudo sh scripts/gwcap/install.sh [install|uninstall|status]
+# 用法：sudo sh scripts/attic/gwcap/install.sh [install|uninstall|status]
 # 机制：nftables `inet gwcap` output nat 把到网关 $GWCAP_TARGET_V4 / $GWCAP_TARGET_V6 的 tcp/3003 REDIRECT 到
 # 127.0.0.1+::1 :3399 的 gw-cap-proxy（gwcap 用户自己的上游连接按 skuid 豁免），
 # 代理对 model 命中 swe-2-medium 的请求过全局信号量（代理默认 4，部署单元以

@@ -1,6 +1,6 @@
-# 多账号池端到端冒烟（devin-pool-smoke.sh）
+# 多账号池端到端冒烟（pool.sh）
 
-`scripts/devin-pool-smoke.sh` 用「一好一坏」两条 lane 起临时实例，对真实上游验证号池的钉选、换号与归因——它是对单测的补充：只有真上游才能暴露「凭据失效到底在哪个阶段冒头」这类行为。
+`scripts/smoke/pool.sh` 用「一好一坏」两条 lane 起临时实例，对真实上游验证号池的钉选、换号与归因——它是对单测的补充：只有真上游才能暴露「凭据失效到底在哪个阶段冒头」这类行为。
 
 ## 验证点
 
@@ -13,8 +13,8 @@
 ## 用法
 
 ```bash
-DEVIN_TOKEN_GOOD=<tok> scripts/devin-pool-smoke.sh [--port 3199]
-scripts/devin-pool-smoke.sh --config config.yaml   # 取首个 devin.accounts 凭据/model/base_url
+DEVIN_TOKEN_GOOD=<tok> scripts/smoke/pool.sh [--port 3199]
+scripts/smoke/pool.sh --config config.yaml   # 取首个 devin.accounts 凭据/model/base_url
 ```
 
 构建临时二进制 → 空闲端口起独立实例（`-state-dir` 指向 mktemp 目录，不污染真实状态）→ 两轮 12 个 `POST /v1/chat/completions`（`user` 字段做亲和键、`X-Client-Request-Id` 做关联、`max_tokens:8` 压成本）→ 查 `logs` 表与 `/admin/runtime-metrics` 断言。

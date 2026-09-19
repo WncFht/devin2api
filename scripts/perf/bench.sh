@@ -2,12 +2,12 @@
 # bench.sh — 跑全部微基准并存基线：自动找出含 Benchmark 的包，
 # -count=10 -benchmem 输出落 outputs/bench/<label>.txt。
 # 优化前后各跑一遍，用 benchstat 做统计显著性对比：
-#   scripts/bench.sh before   # 改前基线
-#   scripts/bench.sh after    # 改后
+#   scripts/perf/bench.sh before   # 改前基线
+#   scripts/perf/bench.sh after    # 改后
 #   benchstat outputs/bench/before.txt outputs/bench/after.txt
 # （benchstat: go install golang.org/x/perf/cmd/benchstat@latest）
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 LABEL="${1:-bench-$(git rev-parse --short HEAD 2>/dev/null || echo local)}"
 COUNT="${2:-10}"

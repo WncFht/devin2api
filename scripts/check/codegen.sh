@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-codegen.sh — 生成物漂移检查：把 Taskfile 的 generate 任务在临时
+# codegen.sh — 生成物漂移检查：把 Taskfile 的 generate 任务在临时
 # 目录重跑一遍，与提交的 outputs/devin-proto-go/ 逐字节比对。
 # 改了 outputs/devin-proto/ 的 proto 源但忘了重新生成时在此拦下。
 #
@@ -7,9 +7,9 @@
 # 不一致会产生虚假漂移）、protoc-gen-go、protoc-gen-connect-go。
 # 版本钉法见 Taskfile 注释与 .github/workflows/ci.yml 的 codegen-drift job。
 #
-# 用法: scripts/check-codegen.sh
+# 用法: scripts/check/codegen.sh
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 PROTO_DIR=outputs/devin-proto
 GEN_DIR=outputs/devin-proto-go

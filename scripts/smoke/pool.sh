@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# devin-pool-smoke.sh — 多账号池端到端冒烟：双 lane（好号 + 故意坏号）起临时
+# pool.sh — 多账号池端到端冒烟：双 lane（好号 + 故意坏号）起临时
 # 实例，验证 rendezvous 钉选、unauthenticated failover 换号、凭据冷却降级，
 # 以及 logs 表 / meta.json / runtime-metrics 的逐账号归因字段。
 #
 # 用法:
-#   DEVIN_TOKEN_GOOD=<tok> scripts/devin-pool-smoke.sh [--port 3199]
-#   scripts/devin-pool-smoke.sh --config config.yaml   # 取首个 devin.accounts 凭据/model/base_url
+#   DEVIN_TOKEN_GOOD=<tok> scripts/smoke/pool.sh [--port 3199]
+#   scripts/smoke/pool.sh --config config.yaml   # 取首个 devin.accounts 凭据/model/base_url
 #
 # 坏号固定为 "devin-session-token$invalid.badtoken.for-smoke"（DEVIN_TOKEN_BAD
 # 可覆盖）。每个会话亲和键经复刻的 rendezvous 打分预知钉选 lane——脚本按
 # 需挑选钉到 bad 与 good 的键各三个，两轮请求覆盖「failover 换号」与
 # 「冷却降级直发」两条路径。真实上游调用十几次，均为极小请求。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 PORT=3199
 SRC_CONFIG=""

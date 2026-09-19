@@ -4,7 +4,7 @@
 
 ## 步骤
 
-1. 部署：`scripts/deploy-linux.sh`（构建工作树现状并部署）。
+1. 部署：`scripts/deploy/deploy-linux.sh`（构建工作树现状并部署）。
 2. 确认版本：`curl -s http://127.0.0.1:3033/healthz`，`version` 字段等于刚部署的版本才算切换完成——排空期旧进程仍以旧版本应答，脚本退出或首个 200 都不代表切完。同一信息也可看 `/public/version`。
 3. 跑面板验证：`scripts/panel-verify/run.sh --base http://127.0.0.1:3033 --admin-pw "$PW"`，`$PW` 取法见下节。`--base` 模式跳过构建与实例生命周期，同一套 playwright 断言直接打目标实例。
 4. 判定：退出码 0 且输出 `PASS: all checks green` 即通过；失败按 `FAIL` 行定位，截图在 `scripts/panel-verify/shots/`（gitignore）。单跑某条：`PV_BASE=http://127.0.0.1:3033 node scripts/panel-verify/checks/<name>.js`。

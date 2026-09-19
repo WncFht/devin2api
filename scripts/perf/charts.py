@@ -1,6 +1,6 @@
 """生成 docs/perf.md 引用的性能基线图，产物落 docs/images/perf-*.png。
 
-用法：uv run --with matplotlib scripts/perf-charts.py
+用法：uv run --with matplotlib scripts/perf/charts.py
 数据是 2026-09-14 基线快照（outputs/perf/first/，本机桩 interval=0、8 并发）的
 硬编码抄录——图的意义是定格那次测量，重测后改这里的数据再跑一遍即可。
 样式复用 ~/.claude/skills/plot-skill 的 preset 体系；该 skill 不在时脚本不可用，

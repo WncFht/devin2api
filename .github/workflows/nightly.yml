@@ -50,7 +50,7 @@ jobs:
 
       - name: Smoke with real upstream
         if: steps.gate.outputs.enabled == 'true'
-        run: bash scripts/smoke.sh --config e2e-config.yaml --port 18096
+        run: bash scripts/smoke/smoke.sh --config e2e-config.yaml --port 18096
 
   # 基准遥测：bench.sh 全基准低 count 跑一遍，结果存 artifact 留趋势。
   # 不做 baseline 门限——benchstat 没有内置回归阈值退出码，先把逐日
@@ -67,7 +67,7 @@ jobs:
         uses: ./.github/actions/setup-go
 
       - name: Run benchmarks
-        run: bash scripts/bench.sh "nightly-$(date +%F)" 5
+        run: bash scripts/perf/bench.sh "nightly-$(date +%F)" 5
 
       - name: Upload bench results
         uses: actions/upload-artifact@v7

@@ -20,7 +20,7 @@ config.yaml
 /outputs/*.json
 /outputs/*.txt
 /outputs/*.py
-# 性能快照与基准基线（可由 scripts/perf-snapshot.sh、scripts/bench.sh 重新生成）
+# 性能快照与基准基线（可由 scripts/perf/snapshot.sh、scripts/perf/bench.sh 重新生成）
 /outputs/perf/
 /outputs/bench/
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# cacheprobe-verify.sh — 缓存门探针的桩侧验证：源码构建 → upstreamstub
+# cacheprobe.sh — 缓存门探针的桩侧验证：源码构建 → upstreamstub
 # 语义缓存桩（-cache-mode）→ mktemp devin-2api → probe cacheprobe 两种
 # mode 各跑一遍 → 断言 verdict hint 与 stub 语义一致。全程不碰真实上游
 # 与配额——桩是按「两种竞争缓存模型」各自语义记账的 oracle，探针须能
 # 在两边都判对。
 #
-# 用法: scripts/cacheprobe-verify.sh [--out <dir>]
+# 用法: scripts/check/cacheprobe.sh [--out <dir>]
 #   断言：trajectory 桩下 verdict=trajectory-gated；content 桩下
 #   verdict=content-addressed；两 mode（proxy 经实例 / upstream 直连）同断言。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 PORT=31195
 STUB_PORT=31196

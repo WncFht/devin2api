@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# handoff-triage.test.sh — lib-deploy.sh 交接链路的离线演练：
+# handoff-triage.sh — lib-deploy.sh 交接链路的离线演练：
 # spawn_handoff 的死因分诊（EADDRINUSE→rc2 回退 / 启动期死→rc1 中止部署）
 # 与「先证接管再放桥」顺序，用 stub 二进制 + stub curl + stub uname +
 # stub svc_pid 回放。9-18 断流事故（config 校验死被误诊为缺 reuseport
 # 并回退重启）的防回归断言。不跑真实 deploy、不碰端口、不触 systemd：
 # healthz 由 stub curl 按 answer_pid 文件应答。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 FAILED=0
 pass() { echo "ok    $1"; }
@@ -111,7 +111,7 @@ fake_managed_start() {
 }
 fake_restart() { touch "${WORK}/restart_called"; fake_managed_start; }
 
-source scripts/lib-deploy.sh
+source scripts/deploy/lib-deploy.sh
 
 # 超时压缩：被测分支逻辑不变，spawn_handoff 就绪窗口压回 10s（生产值
 # 180s 只为共享库大库慢启动，harness 的 slow 桩 60s 就死，不用等满）。

@@ -14,10 +14,10 @@
 # 凭据全假，base_url 指 127.0.0.1:1（零出向，上游拒绝即定失败）。
 # 端点未实现（404/405/501/503）记 SKIP 不记 FAIL；FAIL>0 退出码非零。
 #
-# 用法: scripts/pool-e2e.sh [devin-2api 二进制路径]
+# 用法: scripts/check/pool-e2e.sh [devin-2api 二进制路径]
 set -uo pipefail
 
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$(mktemp -d)"
 SRVPID=""
 cleanup() {

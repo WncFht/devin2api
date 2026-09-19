@@ -6,7 +6,7 @@
 # 计算、publish 全流程、全部拒绝分支，以及 tag 注解中 "## 节标题" 的保真
 # 回归（git tag -a -F 默认 cleanup=strip 会吃掉它们）。
 set -euo pipefail
-REAL_REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REAL_REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 
 FAILED=0
 pass() { echo "ok    $1"; }
@@ -107,8 +107,8 @@ setup_repo() {
 	git -C "${dir}" config user.name selftest
 	git -C "${dir}" remote add origin https://github.com/test/repo.git
 	git -C "${dir}" config url."file://${dir}-origin.git".insteadOf "https://github.com/test/repo.git"
-	mkdir -p "${dir}/scripts" "${dir}/cmd/devin-2api"
-	cp "${REAL_REPO}/scripts/release.sh" "${dir}/scripts/"
+	mkdir -p "${dir}/scripts/release" "${dir}/cmd/devin-2api"
+	cp "${REAL_REPO}/scripts/release/release.sh" "${dir}/scripts/release/"
 	echo v0.5.0 > "${dir}/cmd/devin-2api/VERSION"
 	echo readme > "${dir}/README.md"
 	git -C "${dir}" add -A
@@ -135,7 +135,7 @@ run_release() {
 		export FIXTURE_MODE="${FIXTURE_MODE:-green}"
 		export CALLS_FILE="${CALLS_FILE:-${WORK}/calls-default}"
 		export SABOTAGE_HOOK="${SABOTAGE_HOOK:-}"
-		bash scripts/release.sh "$@"
+		bash scripts/release/release.sh "$@"
 	)
 }
 

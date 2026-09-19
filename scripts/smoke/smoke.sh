@@ -6,13 +6,13 @@
 # /v1/models 走 adapter 的 GetCliModelConfigs 真实上游调用但不烧 chat
 # 配额，一条探针覆盖「配置加载 → 鉴权 → adapter → 上游 RPC」整条链。
 #
-# 用法: scripts/smoke.sh [--port 3005] [--config <config.yaml 路径>] [--no-upstream]
+# 用法: scripts/smoke/smoke.sh [--port 3005] [--config <config.yaml 路径>] [--no-upstream]
 #   --config 缺省 ./config.yaml；独立状态目录由 mktemp 提供，logs 不污染
 #   真实实例。端口被占或实例中途退出都会明确报错。
 #   --no-upstream 跳过真上游探针（断言 /v1/models 对空 token 明确 502），
 #   给 CI 这类无 token 环境用；两种模式都验证 SIGTERM 优雅退出。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 PORT=3005
 SRC_CONFIG="config.yaml"

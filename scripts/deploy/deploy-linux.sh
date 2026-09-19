@@ -12,11 +12,11 @@
 # 注意：systemctl --user 需要 user manager（SSH 进来一般可用）；想让服务
 # 在未登录时也常驻，跑 loginctl enable-linger $USER（脚本会提示）。
 set -euo pipefail
-cd "$(dirname "$0")/.."
-source scripts/lib-deploy.sh
+cd "$(dirname "$0")/../.."
+source scripts/deploy/lib-deploy.sh
 
 [[ "$(uname -s)" == "Linux" ]] || {
-	echo "deploy-linux.sh 仅适用 Linux；macOS 用 scripts/deploy.sh" >&2
+	echo "deploy-linux.sh 仅适用 Linux；macOS 用 scripts/deploy/deploy.sh" >&2
 	exit 1
 }
 command -v systemctl >/dev/null || {

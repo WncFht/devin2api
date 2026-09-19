@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """本机网关并发闸：出向 tcp/3003 被 nftables REDIRECT 到本代理，按 model 名做过闸。
 
-部署见 scripts/gwcap/install.sh（gwcap 系统用户 + systemd 双单元 + inet gwcap 表）。
+部署见 scripts/attic/gwcap/install.sh（gwcap 系统用户 + systemd 双单元 + inet gwcap 表）。
 代理一律转发 GWCAP_UPSTREAM；POST body JSON 的 ``model`` 命中 ``GWCAP_MODEL_PREFIX``
 的请求先取全局信号量（``GWCAP_LIMIT``），SSE 流式响应持有到 body 传完。
 ``GET /__gwcap/healthz`` 本地应答不转发，供 ExecStartPre 就绪探测与人工观测。

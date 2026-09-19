@@ -1,6 +1,6 @@
 # FROM 的 Go 版本必须 ≥ go.mod 的 go 指令：官方镜像 GOTOOLCHAIN=local
 # 不会自动换 toolchain，低于指令时 go mod download 直接失败。
-# deploy-assets.test.sh 有对应断言，改 go.mod 时记得同步这里。
+# deploy-assets.sh 有对应断言，改 go.mod 时记得同步这里。
 FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine AS builder
 
 ARG TARGETARCH

@@ -214,7 +214,7 @@ install_binary() {
 # install_rotate_script：把 copytruncate 轮转脚本装到 BIN_DIR（脱离仓库路径
 # 也能被定时任务引用——worktree 部署会整个重铺 staging，仓库路径不可靠）。
 install_rotate_script() {
-	install -m 755 scripts/rotate-logs.sh "${BIN_DIR}/devin-2api-logrotate"
+	install -m 755 scripts/deploy/rotate-logs.sh "${BIN_DIR}/devin-2api-logrotate"
 }
 
 # migrate_legacy_runtime <旧运行目录>：把上一版「单运行目录」布局迁到拆分

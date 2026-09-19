@@ -156,11 +156,11 @@ The admin panel at `/web` (login: `dashboard.password`) renders these logs as a 
 
 Releases follow [SemVer](https://semver.org/). While the project is in the 0.x phase, breaking changes bump the minor version (`v0.1.0` → `v0.2.0`), not the major one.
 
-A release is a `v`-prefixed tag published via `scripts/release.sh`. The script derives the next version from Conventional Commits since the last tag, then gates on `HEAD == origin/main` and a green `CI` workflow run for that commit — tags are only ever placed on pushed, tested commits:
+A release is a `v`-prefixed tag published via `scripts/release/release.sh`. The script derives the next version from Conventional Commits since the last tag, then gates on `HEAD == origin/main` and a green `CI` workflow run for that commit — tags are only ever placed on pushed, tested commits:
 
 ```bash
-scripts/release.sh            # dry-run: next version, changelog, gate status
-scripts/release.sh --publish  # create + push the annotated tag
+scripts/release/release.sh            # dry-run: next version, changelog, gate status
+scripts/release/release.sh --publish  # create + push the annotated tag
 ```
 
 Pushing the tag triggers the `release.yml` workflow (full test suite, per-platform binaries built with `-X main.version=<tag>`, packaged into a multi-arch image pushed to GHCR `ghcr.io/wncfht/devin2api`, plus a GitHub Release whose notes come from the tag annotation).
