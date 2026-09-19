@@ -11,8 +11,15 @@ export default defineConfig({
 		'en/:rest*': ':rest*',
 	},
 
+	head: [
+		['link', { rel: 'icon', type: 'image/svg+xml', href: '/devin2api/favicon.svg' }],
+		['link', { rel: 'icon', type: 'image/x-icon', href: '/devin2api/favicon.ico' }],
+		['link', { rel: 'apple-touch-icon', href: '/devin2api/apple-touch-icon.png' }],
+	],
+
 	themeConfig: {
 		// https://vitepress.dev/reference/default-theme-config
+		logo: '/logo.png',
 		nav: [
 			{ text: 'Home', link: '/' },
 			{ text: 'Quick Start', link: '/introduction/quick-start' },

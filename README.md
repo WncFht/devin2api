@@ -1,5 +1,9 @@
 # devin-2api
 
+<p align="center">
+  <img src="docs/images/logo.png" alt="devin-2api logo" width="128">
+</p>
+
 > **English** | [中文](README.zh-CN.md)
 
 devin-2api is an unofficial protocol adapter that exposes the models available to your Devin account ([app.devin.ai](https://app.devin.ai/)) behind OpenAI- and Anthropic-compatible endpoints — so standard clients (Codex, Claude Code, any SDK) can call them through familiar APIs.

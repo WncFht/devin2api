@@ -1,5 +1,9 @@
 # devin-2api
 
+<p align="center">
+  <img src="docs/images/logo.png" alt="devin-2api logo" width="128">
+</p>
+
 > [English](README.md) | **中文**
 
 devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.ai](https://app.devin.ai/)）可用的模型包装在 OpenAI / Anthropic 兼容接口后面——让标准客户端（Codex、Claude Code、任意 SDK）通过熟悉的 API 调用它们。
