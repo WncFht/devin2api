@@ -563,8 +563,10 @@ func DefaultStateDir() (string, error) {
 	}
 }
 
-// devinCredentialsTokenPattern 匹配 credentials.toml 中的 windsurf_api_key。
-var devinCredentialsTokenPattern = regexp.MustCompile(`(?m)^\s*windsurf_api_key\s*=\s*"([^"]+)"`)
+// devinCredentialsTokenPattern 匹配 credentials.toml 中的 windsurf_api_key
+// ——basic（"…"）与 literal（'…'）两种 TOML 串都认：CLI 总是写双引号，
+// 但手编与面板粘贴的 literal 形态合法，漏匹配会让整条 lane 无 key 死。
+var devinCredentialsTokenPattern = regexp.MustCompile(`(?m)^\s*windsurf_api_key\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 
 // ResolveDevinToken 从本地 Devin 客户端状态中发现 session token。
 // 依次尝试 DEVIN_TOKEN / WINDSURF_API_KEY 环境变量与 Devin CLI 登录产物
@@ -611,8 +613,13 @@ func readCredentialsFile(path string) (string, error) {
 // windsurf_api_key；无该键返回空串。与文件版共用同一解析——面板的
 // credentials_content 粘贴上传在落盘前先过它校验。
 func TokenFromCredentialsContent(data []byte) string {
-	if match := devinCredentialsTokenPattern.FindSubmatch(data); len(match) == 2 {
-		return strings.TrimSpace(string(match[1]))
+	if match := devinCredentialsTokenPattern.FindSubmatch(data); match != nil {
+		// basic 与 literal 各居一个捕获组，取非空的那个。
+		for _, group := range match[1:] {
+			if len(group) > 0 {
+				return strings.TrimSpace(string(group))
+			}
+		}
 	}
 	return ""
 }
