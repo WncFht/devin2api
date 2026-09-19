@@ -268,8 +268,6 @@
             total: debugTotal || t('trend.unknown')
           }) + ' · ' + t('trend.updatedAt', { time: fmtBucketTime(Date.now(), false, true) });
         }
-        // 信息片宽度随数据变化，可能改变切换组是否溢出
-        updateToolbarScrollHint();
 
       } catch (error) {
         console.error('加载趋势数据失败:', error);
@@ -449,8 +447,16 @@
       return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha.toFixed(2)})`;
     }
 
-    function renderChart() {
+    async function renderChart() {
       if (!window.trendData || !window.trendData.length) {
+        renderTrendError();
+        return;
+      }
+
+      // echarts 按需加载；老页面头仍直引 echarts.min.js 时 ensureECharts 缺席，
+      // 此时 window.echarts 已就位直接放行，两头都断才落错误视图
+      try { await window.ensureECharts?.(); } catch (_) {}
+      if (!window.echarts) {
         renderTrendError();
         return;
       }
@@ -861,14 +867,6 @@
     function updateTrendChartTypeButtons() {
       document.querySelectorAll('.trend-chart-type-btn').forEach(button => {
         const active = button.dataset.chartType === window.currentTrendChartType;
-        button.classList.toggle('active', active);
-        button.setAttribute('aria-pressed', active ? 'true' : 'false');
-      });
-    }
-
-    function updateTrendTypeButtons() {
-      document.querySelectorAll('#trend-type-group .toggle-btn').forEach(button => {
-        const active = (button.getAttribute('data-type') || 'first_byte') === window.currentTrendType;
         button.classList.toggle('active', active);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
       });
@@ -1417,13 +1415,6 @@
       });
     }
 
-    // 切换组被工具栏挤出内滚动时挂渐隐提示；宽度够时无类不遮
-    function updateToolbarScrollHint() {
-      const group = document.getElementById('trend-type-group');
-      if (!group) return;
-      group.classList.toggle('is-scrollable', group.scrollWidth > group.clientWidth + 1);
-    }
-
     function currentTrendRefreshSec() {
       try {
         const raw = localStorage.getItem(TREND_REFRESH_KEY);
@@ -1491,12 +1482,10 @@
 
       // 修复：全局注册resize监听器（仅一次，避免内存泄漏）
       window.addEventListener('resize', () => {
-        updateToolbarScrollHint();
         if (window.chartInstance) {
           window.chartInstance.resize();
         }
       });
-      updateToolbarScrollHint();
 
       window.addEventListener('ccload:themechange', () => {
         if (window.chartInstance && window.trendData && window.trendData.length) {
@@ -1520,16 +1509,15 @@
         setTrendChartType(button.dataset.chartType);
       });
 
-      // 趋势类型切换
-      const trendTypeGroup = document.getElementById('trend-type-group');
-      trendTypeGroup.addEventListener('click', (e) => {
-        const t = e.target.closest('.toggle-btn');
-        if (!t) return;
-        window.currentTrendType = t.getAttribute('data-type') || 'first_byte';
-        updateTrendTypeButtons();
-        persistState();
-        renderChart();
-      });
+      // 指标切换（下拉，searchable-select 已增强；回填在 applyRangeUI）
+      const trendTypeSelect = document.getElementById('f_trend_type');
+      if (trendTypeSelect) {
+        trendTypeSelect.addEventListener('change', (e) => {
+          window.currentTrendType = e.target.value || 'first_byte';
+          persistState();
+          renderChart();
+        });
+      }
 
       // 模型选择器
       const modelSelect = document.getElementById('f_model');
@@ -1662,8 +1650,13 @@
         onChange: handleTrendRangeChange
       });
 
-      // 应用趋势类型UI
-      updateTrendTypeButtons();
+      // 指标下拉回填恢复值；change 事件让 searchable-select 同步显示
+      // （此刻 bindToggles 还没挂监听，dispatch 不会触发 persist/render）
+      const trendTypeSelect = document.getElementById('f_trend_type');
+      if (trendTypeSelect) {
+        trendTypeSelect.value = window.currentTrendType;
+        trendTypeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     }
 
     window.i18n?.onLocaleChange?.(() => {

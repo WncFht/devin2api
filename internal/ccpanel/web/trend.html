@@ -12,24 +12,19 @@
   <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
   <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
   <link rel="stylesheet" href="/web/assets/css/stats.css?v=__VERSION__">
-  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/echarts.min.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/lazy-echarts.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/template-engine.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/date-range-selector.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/filter-state.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/filter-query.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/page-filters.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/modal.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-api.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-format.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-filters.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-notify.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-topbar.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-combobox.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/ui-autorefresh.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/ui-codeview.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/trend.js?v=__VERSION__"></script>
 </head>
@@ -44,43 +39,40 @@
         <!-- 趋势图表 -->
         <section class="mb-8 trend-chart-section">
           <div class="card trend-chart-card">
-            <!-- 控件与图例：单行排布，窄屏时趋势类型组内部横滚 -->
+            <!-- 控件与图例：单行排布 -->
             <div class="trend-chart-toolbar mb-6">
-                <!-- 趋势类型切换 -->
+                <!-- 指标切换：9 个指标按量纲排序（请求/延迟/用量），收成一个下拉 -->
+                <label class="trend-refresh-control trend-metric-control" for="f_trend_type">
+                  <span class="trend-refresh-label" data-i18n="trend.metricType">指标类型</span>
+                  <select id="f_trend_type" class="filter-select trend-refresh-select trend-metric-select">
+                    <option value="count" data-i18n="trend.typeCount">次数</option>
+                    <option value="rpm" data-i18n="trend.typeRpm">RPM</option>
+                    <option value="error_rate" data-i18n="trend.typeErrorRate">错误率</option>
+                    <option value="first_byte" data-i18n="trend.typeFirstByte" selected>首字响应</option>
+                    <option value="duration" data-i18n="trend.typeDuration">耗时</option>
+                    <option value="tokens" data-i18n="trend.typeTokens">Token</option>
+                    <option value="tps" data-i18n="trend.typeTps">TPS</option>
+                    <option value="cost" data-i18n="trend.typeCost">费用</option>
+                    <option value="cache_hit" data-i18n="trend.typeCacheHit">缓存命中</option>
+                  </select>
+                </label>
+                <!-- 图表样式切换 -->
                 <div
-                  class="toggle-group"
-                  id="trend-type-group"
-                  role="group"
-                  data-i18n-aria-label="trend.metricType"
-                  aria-label="指标类型"
-                >
-                  <button class="toggle-btn" type="button" data-type="count" aria-pressed="false" data-i18n="trend.typeCount">次数</button>
-                  <button class="toggle-btn" type="button" data-type="rpm" aria-pressed="false" data-i18n="trend.typeRpm">RPM</button>
-                  <button class="toggle-btn" type="button" data-type="tps" aria-pressed="false" data-i18n="trend.typeTps">TPS</button>
-                  <button class="toggle-btn" type="button" data-type="error_rate" aria-pressed="false" data-i18n="trend.typeErrorRate">错误率</button>
-                  <button class="toggle-btn active" type="button" data-type="first_byte" aria-pressed="true" data-i18n="trend.typeFirstByte">首字响应</button>
-                  <button class="toggle-btn" type="button" data-type="duration" aria-pressed="false" data-i18n="trend.typeDuration">耗时</button>
-                  <button class="toggle-btn" type="button" data-type="tokens" aria-pressed="false" data-i18n="trend.typeTokens">Token</button>
-                  <button class="toggle-btn" type="button" data-type="cost" aria-pressed="false" data-i18n="trend.typeCost">费用</button>
-                  <button class="toggle-btn" type="button" data-type="cache_hit" aria-pressed="false" data-i18n="trend.typeCacheHit">缓存</button>
-                </div>
-                <!-- 图表样式切换：与趋势类型同一控件语言 -->
-                <div
-                  class="toggle-group trend-chart-type-toggle"
+                  class="seg trend-chart-type-toggle"
                   id="trend-chart-type-group"
                   role="group"
                   data-i18n-aria-label="trend.chartType"
                   aria-label="图表类型"
                 >
                   <button
-                    class="toggle-btn trend-chart-type-btn active"
+                    class="seg-btn trend-chart-type-btn active"
                     type="button"
                     data-chart-type="line"
                     aria-pressed="true"
                     data-i18n="trend.lineChart"
                   >折线图</button>
                   <button
-                    class="toggle-btn trend-chart-type-btn"
+                    class="seg-btn trend-chart-type-btn"
                     type="button"
                     data-chart-type="bar"
                     aria-pressed="false"
@@ -144,11 +136,11 @@
                 <div data-i18n="trend.loading">正在加载趋势数据...</div>
               </div>
               <div class="chart-error hidden" id="chart-error">
-                <svg class="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg class="w-12 h-12 state-icon--error" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.864-.833-2.634 0L4.18 16.5c-.77.833.192 2.5 1.732 2.5z"/>
                 </svg>
-                <div class="error-title" data-i18n="trend.loadFailed">加载失败</div>
-                <div class="error-message" data-i18n="trend.checkNetwork">请检查网络连接或重试</div>
+                <div class="state-title state-title--error" data-i18n="trend.loadFailed">加载失败</div>
+                <div class="state-desc" data-i18n="trend.checkNetwork">请检查网络连接或重试</div>
               </div>
               <!-- ECharts 容器 -->
               <div id="chart" class="w-full h-full hidden"></div>

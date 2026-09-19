@@ -6,9 +6,12 @@
 (function () {
   const t = window.t;
   let rows = [];
-  let filterText = '';
-  let filterMode = 'all';
-  const activeTags = new Set();
+  // 全部筛选态收口在一个对象：DOM 是它的投影，FilterState 负责持久化 + URL。
+  // tags 存 Set，进 FilterState/URL 时序列化成逗号串。
+  const filters = {
+    q: '', status: 'all', provider: '', api: '', tier: '', pricing: '',
+    sort: 'default', tags: new Set()
+  };
   let currentPage = 1;
   let pageSize = 20;
   let totalPages = 1;
@@ -28,6 +31,124 @@
   // 档级徽章走冷色递升阶（浅蓝→蓝→紫），不用告警色的红/琥珀
   const TIER_BADGE = { free: '#10b981', low: '#60a5fa', medium: '#3b82f6', high: '#8b5cf6' };
 
+  // 筛选字段注册表：includeInQuery 默认实现只在值非空时写 URL——status/sort
+  // 的默认值非空，须显式排除才不把 'all'/'default' 写进链接；本页不做请求
+  // 参数投影，全部 includeInRequest=false
+  const MODELS_FILTER_KEY = 'models.filters';
+  const MODELS_FILTER_FIELDS = [
+    { key: 'q', queryKeys: ['q'], defaultValue: '', includeInRequest: () => false },
+    {
+      key: 'status', queryKeys: ['status'], defaultValue: 'all',
+      includeInQuery: (v) => Boolean(v) && v !== 'all', includeInRequest: () => false
+    },
+    { key: 'provider', queryKeys: ['provider'], defaultValue: '', includeInRequest: () => false },
+    { key: 'api', queryKeys: ['api'], defaultValue: '', includeInRequest: () => false },
+    { key: 'tier', queryKeys: ['tier'], defaultValue: '', includeInRequest: () => false },
+    { key: 'pricing', queryKeys: ['pricing'], defaultValue: '', includeInRequest: () => false },
+    { key: 'tags', queryKeys: ['tags'], defaultValue: '', includeInRequest: () => false },
+    {
+      key: 'sort', queryKeys: ['sort'], defaultValue: 'default',
+      includeInQuery: (v) => Boolean(v) && v !== 'default', includeInRequest: () => false
+    }
+  ];
+
+  const MODELS_STATUS_VALUES = ['all', 'disabled', 'redirected', 'override'];
+  // 下拉 id → filters 键：apply-models-filter 委托按 el.id 寻址
+  const FILTER_SELECT_KEYS = {
+    'f-provider': 'provider',
+    'f-api': 'api',
+    'f-tier': 'tier',
+    'f-pricing': 'pricing'
+  };
+
+  function getModelsFilters() {
+    return {
+      q: filters.q,
+      status: filters.status,
+      provider: filters.provider,
+      api: filters.api,
+      tier: filters.tier,
+      pricing: filters.pricing,
+      tags: [...filters.tags].sort().join(','),
+      sort: filters.sort
+    };
+  }
+
+  function persistState() {
+    try {
+      window.persistFilterState({
+        key: MODELS_FILTER_KEY,
+        values: getModelsFilters(),
+        pathname: location.pathname,
+        fields: MODELS_FILTER_FIELDS,
+        historyMethod: 'replaceState'
+      });
+    } catch (_) { /* ignore */ }
+  }
+
+  // URL 参数优先；整串为空才吃 localStorage 存档（FilterState.restore 语义）
+  function restoreState() {
+    if (!window.FilterState) return;
+    const restored = window.FilterState.restore({
+      search: location.search,
+      savedFilters: window.FilterState.load(MODELS_FILTER_KEY),
+      fields: MODELS_FILTER_FIELDS
+    });
+    filters.q = String(restored.q || '');
+    filters.status = MODELS_STATUS_VALUES.includes(restored.status) ? restored.status : 'all';
+    filters.provider = String(restored.provider || '');
+    filters.api = String(restored.api || '');
+    filters.tier = ['', 'free', 'low', 'medium', 'high'].includes(restored.tier) ? restored.tier : '';
+    filters.pricing = String(restored.pricing || '');
+    String(restored.tags || '').split(',').forEach((tag) => {
+      if (tag) filters.tags.add(tag);
+    });
+    const sortSel = document.getElementById('f-sort');
+    filters.sort = sortSel && [...sortSel.options].some((o) => o.value === restored.sort)
+      ? restored.sort : 'default';
+  }
+
+  function syncStatusPills() {
+    document.querySelectorAll('#models-filter-pills .seg-btn').forEach((btn) => {
+      const active = btn.dataset.status === filters.status;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    });
+  }
+
+  // filters → DOM：恢复后把控件摆到状态值；provider/api/pricing 的 option
+  // 要等 loadModels 回填目录数据后才有，走 syncDynamicFilterSelects 二次同步
+  function applyFiltersToDOM() {
+    const search = document.getElementById('models-filter');
+    if (search) search.value = filters.q;
+    syncStatusPills();
+    const chips = [...document.querySelectorAll('#models-tag-chips .tag-chip')];
+    const validTags = new Set(chips.map((c) => c.dataset.tag));
+    [...filters.tags].forEach((tag) => {
+      if (!validTags.has(tag)) filters.tags.delete(tag);
+    });
+    chips.forEach((chip) => {
+      const on = filters.tags.has(chip.dataset.tag);
+      chip.classList.toggle('active', on);
+      chip.setAttribute('aria-pressed', String(on));
+    });
+    const tierSel = document.getElementById('f-tier');
+    if (tierSel) tierSel.value = filters.tier;
+    const sortSel = document.getElementById('f-sort');
+    if (sortSel) sortSel.value = filters.sort;
+  }
+
+  // provider/api/pricing 的 option 由目录数据生成：恢复值不在选项集里时
+  // 清回 ''，保持 filters 与可见控件一致（数据刷新后同理）
+  function syncDynamicFilterSelects() {
+    [['f-provider', 'provider'], ['f-api', 'api'], ['f-pricing', 'pricing']].forEach(([id, key]) => {
+      const sel = document.getElementById(id);
+      if (!sel) return;
+      sel.value = [...sel.options].some((o) => o.value === filters[key]) ? filters[key] : '';
+      filters[key] = sel.value;
+    });
+  }
+
   // 行按钮/弹窗/分页统一走共享委托注册表；dataset.model → 行数据的派发用 rowAction 收敛
   const rowAction = (fn) => (el) => {
     const row = rowOf(el.dataset.model);
@@ -46,16 +167,23 @@
           'close-redirect-modal': () => closeRedirectModal(),
           'clear-redirect': () => applyRedirect(''),
           'apply-redirect': (el) => applyRedirect(el.dataset.model),
+          'set-models-status': (el) => {
+            const next = el.dataset.status;
+            if (!MODELS_STATUS_VALUES.includes(next) || next === filters.status) return;
+            filters.status = next;
+            syncStatusPills();
+            currentPage = 1;
+            persistState();
+            render();
+          },
           'toggle-tag-chip': (el) => {
             const tag = el.dataset.tag;
-            if (activeTags.has(tag)) {
-              activeTags.delete(tag);
-              el.classList.remove('active');
-            } else {
-              activeTags.add(tag);
-              el.classList.add('active');
-            }
+            const on = !filters.tags.has(tag);
+            if (on) filters.tags.add(tag); else filters.tags.delete(tag);
+            el.classList.toggle('active', on);
+            el.setAttribute('aria-pressed', String(on));
             currentPage = 1;
+            persistState();
             render();
           },
           'first-models-page': () => { currentPage = 1; render(); },
@@ -74,10 +202,17 @@
           'open-redirect-modal': rowAction(openRedirectModal)
         },
         change: {
-          'apply-models-filter': () => { currentPage = 1; render(); },
-          'change-models-sort': (el) => {
-            try { localStorage.setItem('models.sort', el.value); } catch (_) { /* ignore */ }
+          'apply-models-filter': (el) => {
+            const key = FILTER_SELECT_KEYS[el.id];
+            if (key) filters[key] = el.value;
             currentPage = 1;
+            persistState();
+            render();
+          },
+          'change-models-sort': (el) => {
+            filters.sort = el.value || 'default';
+            currentPage = 1;
+            persistState();
             render();
           },
           'change-models-page-size': (el) => {
@@ -89,19 +224,17 @@
         },
         input: {
           'filter-models-text': (el) => {
-            filterText = el.value.trim().toLowerCase();
+            filters.q = el.value.trim();
             currentPage = 1;
+            persistState();
             render();
           },
           'filter-redirect-models': () => renderRedirectList()
         }
       });
 
-      window.initTimeRangeSelector((filter) => {
-        filterMode = filter;
-        currentPage = 1;
-        render();
-      }, document.getElementById('models-filter-pills'));
+      restoreState();
+      applyFiltersToDOM();
 
       document.getElementById('models_page_size').value = String(pageSize);
       document.getElementById('models_jump_page').addEventListener('keydown', (e) => {
@@ -123,10 +256,6 @@
         const first = document.querySelector('#redirect-model-list .redirect-item');
         if (first) applyRedirect(first.dataset.model);
       });
-      const savedSort = localStorage.getItem('models.sort');
-      if (savedSort && [...document.getElementById('f-sort').options].some((o) => o.value === savedSort)) {
-        document.getElementById('f-sort').value = savedSort;
-      }
       if (window.i18n && typeof window.i18n.onLocaleChange === 'function') {
         window.i18n.onLocaleChange(() => { render(); });
       }
@@ -162,6 +291,7 @@
     fillSelect('f-provider', providers);
     fillSelect('f-api', apis);
     fillSelect('f-pricing', pricings);
+    syncDynamicFilterSelects();
   }
 
   function fillSelect(id, values) {
@@ -270,7 +400,7 @@
 
   function matchTags(r) {
     const c = r.catalog || {};
-    for (const tag of activeTags) {
+    for (const tag of filters.tags) {
       if (tag === 'free' && c.cost_tier !== 'free') return false;
       if (tag === 'promo' && !(c.promo && c.promo.active)) return false;
       if (tag === 'img' && !c.supports_images) return false;
@@ -289,33 +419,28 @@
   }
 
   function visibleRows() {
-    const provider = document.getElementById('f-provider').value;
-    const api = document.getElementById('f-api').value;
-    const tier = document.getElementById('f-tier').value;
-    const pricing = document.getElementById('f-pricing').value;
-    const sort = document.getElementById('f-sort').value;
-
+    const q = filters.q.toLowerCase();
     const list = rows.filter((r) => {
       const c = r.catalog;
-      if (provider && (!c || c.provider !== provider)) return false;
-      if (api && (!c || c.api_provider !== api)) return false;
-      if (tier && (!c || c.cost_tier !== tier)) return false;
-      if (pricing && (!c || c.pricing_type !== pricing)) return false;
+      if (filters.provider && (!c || c.provider !== filters.provider)) return false;
+      if (filters.api && (!c || c.api_provider !== filters.api)) return false;
+      if (filters.tier && (!c || c.cost_tier !== filters.tier)) return false;
+      if (filters.pricing && (!c || c.pricing_type !== filters.pricing)) return false;
       if (!matchTags(r)) return false;
-      if (filterText) {
+      if (q) {
         const hay = [r.model, c && c.label, c && c.description, c && c.family, c && c.provider, c && c.api_provider]
           .filter(Boolean).join(' ').toLowerCase();
-        if (!hay.includes(filterText)) return false;
+        if (!hay.includes(q)) return false;
       }
-      if (filterMode === 'disabled') return !r.enabled;
-      if (filterMode === 'redirected') return isRedirected(r);
-      if (filterMode === 'override') return !!r.has_override;
+      if (filters.status === 'disabled') return !r.enabled;
+      if (filters.status === 'redirected') return isRedirected(r);
+      if (filters.status === 'override') return !!r.has_override;
       return true;
     });
 
     const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
     list.sort((a, b) => {
-      switch (sort) {
+      switch (filters.sort) {
         case 'mult_asc': return (multOf(a) ?? 1e9) - (multOf(b) ?? 1e9);
         case 'mult_desc': return (multOf(b) ?? -1) - (multOf(a) ?? -1);
         case 'in_asc': return num(a.catalog && a.catalog.price_input, 1e9) - num(b.catalog && b.catalog.price_input, 1e9);

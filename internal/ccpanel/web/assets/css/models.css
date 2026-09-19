@@ -47,8 +47,8 @@
 .custom-rules-footer {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  margin-top: 12px;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
 }
 
 @media (max-width: 768px) {
@@ -129,11 +129,11 @@
 .tag-chip-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .tag-chip {
-  padding: 4px 13px;
+  padding: var(--space-1) var(--space-3);
   border: none;
   border-radius: var(--radius-full);
   background: var(--neutral-100);
@@ -163,8 +163,8 @@
 .model-badge {
   --badge-color: var(--neutral-500);
   display: inline-block;
-  margin: 0 4px 2px 0;
-  padding: 1px 8px;
+  margin: 0 var(--space-1) 2px 0;
+  padding: 1px var(--space-2);
   border-radius: var(--radius-full);
   font-size: var(--text-2xs);
   font-weight: 500;
@@ -211,9 +211,9 @@
 .resolved-cell {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1);
   margin: -4px -8px;
-  padding: 4px 8px;
+  padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-base);
 }
 
@@ -259,7 +259,7 @@
 .redirect-item {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: var(--space-2);
   width: 100%;
   padding: 7px 10px;
   border: none;
@@ -311,7 +311,7 @@
 }
 
 .model-sub {
-  font-family: monospace;
+  font-family: var(--font-family-mono);
   font-size: var(--text-2xs);
   color: var(--color-text-secondary);
   overflow-wrap: anywhere;
@@ -319,15 +319,15 @@
 
 .model-override-dot {
   color: var(--warning-400);
-  font-size: 9px;
-  margin-left: 6px;
+  font-size: var(--text-2xs);
+  margin-left: var(--space-1);
   vertical-align: middle;
 }
 
 .model-src-badge {
   display: inline-block;
-  padding: 1px 8px;
-  margin-right: 6px;
+  padding: 1px var(--space-2);
+  margin-right: var(--space-1);
   border-radius: var(--radius-sm);
   font-size: var(--text-2xs);
   font-weight: 500;
@@ -340,9 +340,9 @@
 }
 
 .model-actions .btn {
-  padding: 4px 10px;
+  padding: var(--space-1) var(--space-2);
 }
 
 .model-actions .btn + .btn {
-  margin-left: 6px;
+  margin-left: var(--space-1);
 }

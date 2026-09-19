@@ -393,9 +393,7 @@
         // 使用后端返回的 RPM 数据（峰值/平均/最近）
         const rpmHtml = formatEntryRpm(entry, isToday);
 
-        // 根据成功率设置颜色类
-        const successRateClass = getSuccessRateClass(successRate);
-        const successDisplay = buildSuccessDisplay(successCountText, successRateText, successRateClass);
+        const successDisplay = buildSuccessDisplay(successCountText, successRateText, successRate);
 
         const modelDisplay = buildStatsModelDisplay(entry);
 
@@ -516,7 +514,7 @@
       const totalSuccessDisplay = buildSuccessDisplay(
         formatNumber(totalSuccess),
         totalSuccessRate,
-        getSuccessRateClass(totalSuccessRateVal)
+        totalSuccessRateVal
       );
 
       // 使用全局rpm_stats格式化RPM
@@ -571,19 +569,13 @@
       return text.endsWith('.0%') ? text.slice(0, -3) + '%' : text;
     }
 
-    function getSuccessRateClass(successRate) {
-      let successRateClass = 'success-rate';
-      if (successRate >= 95) successRateClass += ' high';
-      else if (successRate < 80) successRateClass += ' low';
-      return successRateClass;
-    }
-
-    function buildSuccessDisplay(successCountText, successRateText, successRateClass) {
+    function buildSuccessDisplay(successCountText, successRateText, successRate) {
       if (!successRateText) {
         return `<span class="success-count">${successCountText}</span>`;
       }
 
-      return `<span class="stats-success-inline"><span class="success-count">${successCountText}</span><span class="stats-success-separator">/</span><span class="${successRateClass}">${successRateText}</span></span>`;
+      const rateClass = `tone-${window.rateTone(successRate)}`;
+      return `<span class="stats-success-inline"><span class="success-count">${successCountText}</span><span class="stats-success-separator">/</span><span class="${rateClass}">${successRateText}</span></span>`;
     }
 
     function applyFilter() {
@@ -972,7 +964,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       const viewToggleGroup = document.getElementById('view-toggle-group');
       if (viewToggleGroup && !viewToggleGroup.dataset.bound) {
         viewToggleGroup.addEventListener('click', (e) => {
-          const viewBtn = e.target.closest('.view-toggle-btn[data-view]');
+          const viewBtn = e.target.closest('.seg-btn[data-view]');
           if (!viewBtn) return;
 
           switchView(viewBtn.dataset.view);
@@ -1367,8 +1359,10 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       } catch (_) {}
 
       // 更新按钮状态
-      document.querySelectorAll('.view-toggle-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.view === view);
+      document.querySelectorAll('#view-toggle-group .seg-btn').forEach(btn => {
+        const active = btn.dataset.view === view;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
       });
 
       // 切换显示
@@ -1399,13 +1393,21 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       } catch (_) {}
     }
 
-    // 渲染所有饼图
-    function renderCharts() {
+    // 渲染所有分布图：echarts 按需加载，首次进图表视图才取库；
+    // ensureECharts 缺席（旧 head 仍直引 echarts.min.js）时看 window.echarts 兜底
+    async function renderCharts() {
+      try {
+        await window.ensureECharts?.();
+      } catch (_) {
+        return; // 库加载失败保持现状，下一次数据刷新/切图重试
+      }
+      if (!window.echarts) return;
+
       if (!statsData || !statsData.stats || statsData.stats.length === 0) {
-        // 空结果也要显式清图——否则切到图表视图看到上一次加载的残留饼图
-        renderPieChart('chart-model-calls', {}, '');
-        renderPieChart('chart-model-tokens', {}, '');
-        renderPieChart('chart-model-cost', {}, '');
+        // 空结果也要显式清图——否则切到图表视图看到上一次加载的残留图
+        renderBarChart('chart-model-calls', {}, '');
+        renderBarChart('chart-model-tokens', {}, '');
+        renderBarChart('chart-model-cost', {}, '');
         return;
       }
 
@@ -1439,15 +1441,16 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         }
       }
 
-      // 渲染3个模型饼图
+      // 渲染3个模型分布图
       const unitTimes = t('stats.unitTimes');
-      renderPieChart('chart-model-calls', modelCallsMap, unitTimes);
-      renderPieChart('chart-model-tokens', modelTokensMap, '');
-      renderPieChart('chart-model-cost', modelCostMap, '$');
+      renderBarChart('chart-model-calls', modelCallsMap, unitTimes);
+      renderBarChart('chart-model-tokens', modelTokensMap, '');
+      renderBarChart('chart-model-cost', modelCostMap, '$');
     }
 
-    // 渲染单个饼图
-    function renderPieChart(containerId, dataMap, unit) {
+    // 渲染单个横向条形图：模型按值降序，排名+量值+份额同读，
+    // 比饼图在多模型（>5）下保持可读
+    function renderBarChart(containerId, dataMap, unit) {
       const container = document.getElementById(containerId);
       if (!container) return;
 
@@ -1470,7 +1473,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         })
         .sort((a, b) => b.value - a.value);
 
-      // 如果没有数据，清空旧 series 再显示空状态（merge 模式不下发 series 会残留）
+      // 没有数据：清掉 series 与坐标轴再显示空状态
       if (data.length === 0) {
         chart.setOption({
           title: {
@@ -1482,8 +1485,10 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
               fontSize: 14
             }
           },
+          xAxis: { show: false },
+          yAxis: { show: false },
           series: []
-        });
+        }, true);
         return;
       }
 
@@ -1494,85 +1499,81 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         '#14b8a6', '#a855f7', '#eab308', '#22c55e', '#0ea5e9'
       ];
 
-      // 计算总值用于百分比
+      // 总值用于份额百分比
       const total = data.reduce((sum, item) => sum + item.value, 0);
 
+      const formatBarValue = (value, item) => {
+        if (unit === '$') {
+          const std = item && typeof item.standard === 'number' ? item.standard : value;
+          return formatCostPair(std, value);
+        }
+        if (value >= 1000000) return (value / 1000000).toFixed(2) + 'M';
+        if (value >= 1000) return (value / 1000).toFixed(2) + 'K';
+        return value.toLocaleString();
+      };
+      const formatAxisValue = (value) => {
+        if (unit === '$') return formatCost(value);
+        if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M';
+        if (value >= 1000) return (value / 1000).toFixed(1) + 'K';
+        return String(value);
+      };
+
       const option = {
-        title: { text: '' }, // 清掉空态留下的居中标题（merge 模式）
+        title: { text: '' }, // 清掉空态留下的居中标题（notMerge）
         tooltip: {
           trigger: 'item',
           backgroundColor: chartTheme.tooltipBg,
           borderColor: chartTheme.tooltipBorder,
           textStyle: { color: chartTheme.tooltipText, fontSize: 12 },
           formatter: function(params) {
-            const value = params.value;
-            let formattedValue;
-            // 成本特殊处理
-            if (unit === '$') {
-              const std = params.data && typeof params.data.standard === 'number' ? params.data.standard : value;
-              formattedValue = formatCostPair(std, value);
-              return `${escapeHtml(params.name)}<br/>${formattedValue} (${params.percent}%)`;
-            }
-            // 原有逻辑：大数值缩写
-            if (value >= 1000000) {
-              formattedValue = (value / 1000000).toFixed(2) + 'M';
-            } else if (value >= 1000) {
-              formattedValue = (value / 1000).toFixed(2) + 'K';
-            } else {
-              formattedValue = value.toLocaleString();
-            }
-            return `${escapeHtml(params.name)}<br/>${formattedValue}${unit} (${params.percent}%)`;
+            const pct = total > 0 ? ((params.value / total) * 100).toFixed(1) : '0.0';
+            return `${escapeHtml(params.name)}<br/>${formatBarValue(params.value, params.data)}${unit === '$' ? '' : unit} (${pct}%)`;
           }
         },
-        legend: {
-          type: 'scroll',
-          orient: 'vertical',
-          right: 10,
-          top: 20,
-          bottom: 20,
-          textStyle: { fontSize: 11, color: chartTheme.mutedText },
-          pageIconColor: chartTheme.mutedText,
-          pageIconInactiveColor: chartTheme.axisLine,
-          pageTextStyle: { color: chartTheme.mutedText },
-          formatter: function(name) {
-            const item = data.find(d => d.name === name);
-            if (item && total > 0) {
-              const percent = ((item.value / total) * 100).toFixed(1);
-              return `${name} (${percent}%)`;
-            }
-            return name;
+        grid: { left: 8, right: 64, top: 8, bottom: 8, containLabel: true },
+        xAxis: {
+          type: 'value',
+          axisLabel: {
+            color: chartTheme.mutedText,
+            fontSize: 11,
+            formatter: formatAxisValue
+          },
+          splitLine: {
+            lineStyle: { color: chartTheme.axisLine, type: 'dashed' }
           }
         },
-        color: colors,
+        yAxis: {
+          type: 'category',
+          inverse: true,
+          data: data.map((item) => item.name),
+          axisLabel: {
+            color: chartTheme.strongText,
+            fontSize: 11,
+            width: 110,
+            overflow: 'truncate'
+          },
+          axisLine: { lineStyle: { color: chartTheme.axisLine } },
+          axisTick: { show: false }
+        },
         series: [{
-          type: 'pie',
-          radius: ['40%', '70%'],
-          center: ['35%', '50%'],
-          avoidLabelOverlap: true,
-          itemStyle: {
-            borderRadius: 4,
-            borderColor: chartTheme.surface,
-            borderWidth: 2
-          },
-          label: {
-            show: false
-          },
-          emphasis: {
-            label: {
-              show: true,
-              fontSize: 12,
-              fontWeight: 'bold',
-              formatter: function(params) {
-                return params.percent.toFixed(1) + '%';
-              }
-            },
+          type: 'bar',
+          barMaxWidth: 16,
+          data: data.map((item, index) => ({
+            name: item.name,
+            value: item.value,
+            standard: item.standard,
             itemStyle: {
-              shadowBlur: 10,
-              shadowOffsetX: 0,
-              shadowColor: 'rgba(0, 0, 0, 0.3)'
+              color: colors[index % colors.length],
+              borderRadius: [0, 4, 4, 0]
             }
-          },
-          data: data
+          })),
+          label: {
+            show: true,
+            position: 'right',
+            color: chartTheme.mutedText,
+            fontSize: 11,
+            formatter: (params) => `${formatBarValue(params.value, params.data)}${unit === '$' ? '' : unit}`
+          }
         }]
       };
 

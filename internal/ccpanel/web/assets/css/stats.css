@@ -1,56 +1,6 @@
 /* ===== 以下来自 styles.css：stats 页专属规则 ===== */
 
-.view-toggle-group {
-  display: inline-flex;
-  gap: 2px;
-  background: var(--surface-bg);
-  padding: 2px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--surface-border);
-}
-
-.view-toggle-btn {
-  padding: 7px 14px;
-  border-radius: var(--radius-base);
-  color: var(--neutral-700);
-  font-family: inherit;
-  font-weight: 600;
-  font-size: var(--text-13);
-  line-height: 1;
-  cursor: pointer;
-  user-select: none;
-  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-  border: none;
-  background: transparent;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 32px;
-  white-space: nowrap;
-}
-
-.view-toggle-btn:hover {
-  color: var(--neutral-900);
-  background: var(--surface-hover);
-}
-
-.view-toggle-btn.active {
-  background: var(--surface-bg-strong);
-  color: var(--primary-600);
-  font-weight: 650;
-  box-shadow: var(--shadow-lift);
-}
-
 @media (max-width: 768px) {
-.view-toggle-group {
-    max-width: 100%;
-    overflow-x: auto;
-    white-space: nowrap;
-  }
-.view-toggle-group::-webkit-scrollbar {
-    display: none;
-  }
 .filter-controls > .stats-filter-summary-row {
     grid-column: 1 / -1;
   }
@@ -390,7 +340,7 @@ a.model-tag.model-link:hover {
 .stats-detail-sort-hint {
     margin-left: 0 !important;
   }
-.stats-detail-heading .view-toggle-group {
+.stats-detail-heading .seg {
     align-self: flex-start;
   }
 .stats-table .stats-col-model {
@@ -470,13 +420,13 @@ a.model-tag.model-link:hover {
   }
 }
 
-/* view-toggle 差异只剩：按钮带图标需要内距，图标尺寸固定 */
+/* 视图切换 seg 按钮带图标：内距与图标尺寸补齐规范控件 */
 
-.view-toggle-btn {
+#view-toggle-group .seg-btn {
   gap: 6px;
 }
 
-.view-toggle-btn svg {
+#view-toggle-group .seg-btn svg {
   width: 16px;
   height: 16px;
 }
@@ -509,9 +459,9 @@ a.model-tag.model-link:hover {
   text-align: center;
 }
 
-.pie-chart-container {
+.stats-chart-plot {
   width: 100%;
-  height: 280px;
+  height: 320px;
 }
 
 .health-indicator {
@@ -577,61 +527,7 @@ a.model-tag.model-link:hover {
 
 /* ===== 以下来自 styles.css：trend 页专属规则 ===== */
 
-/* 切换按钮组（趋势页复用） - Apple UI 风格 (可用性优先) */
-
-/* 分段控件：toggle-group / time-range-selector / view-toggle-group 同一控件语言 */
-
-.toggle-group {
-  display: inline-flex;
-  gap: 2px;
-  background: var(--surface-bg);
-  padding: 2px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--surface-border);
-}
-
-.toggle-btn {
-  padding: 7px 14px;
-  border-radius: var(--radius-base);
-  color: var(--neutral-700);
-  font-family: inherit;
-  font-weight: 600;
-  font-size: var(--text-13);
-  line-height: 1;
-  cursor: pointer;
-  user-select: none;
-  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-  border: none;
-  background: transparent;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 32px;
-  white-space: nowrap;
-}
-
-.toggle-btn:hover {
-  color: var(--neutral-900);
-  background: var(--surface-hover);
-}
-
-.toggle-btn.active {
-  background: var(--surface-bg-strong);
-  color: var(--primary-600);
-  font-weight: 650;
-  box-shadow: var(--shadow-lift);
-}
-
 @media (max-width: 768px) {
-.toggle-group {
-    max-width: 100%;
-    overflow-x: auto;
-    white-space: nowrap;
-  }
-.toggle-group::-webkit-scrollbar {
-    display: none;
-  }
 .channel-filter-container {
     width: 100%;
   }
@@ -696,23 +592,6 @@ body.trend-page .chart-container {
   min-height: 260px;
 }
 
-.trend-chart-type-toggle {
-  display: inline-flex;
-  gap: var(--space-1);
-}
-
-.trend-chart-type-btn {
-  min-height: 32px;
-  transition-property: color, background-color, border-color, box-shadow;
-}
-
-.trend-chart-type-btn.active {
-  color: var(--primary-600);
-  border-color: var(--primary-500);
-  background: color-mix(in srgb, var(--primary-500) 12%, transparent);
-  box-shadow: none;
-}
-
 .chart-loading,
 .chart-error {
   display: flex;
@@ -728,14 +607,8 @@ body.trend-page .chart-container {
   color: var(--neutral-600);
 }
 
-.error-title {
-  color: var(--error-400);
-  font-weight: var(--font-medium);
-  margin: var(--space-2) 0 var(--space-1) 0;
-}
-
-.error-message {
-  font-size: var(--text-sm);
+.chart-error svg {
+  margin-bottom: var(--space-2);
 }
 
 /* ===== 渠道筛选器样式 ===== */
@@ -913,8 +786,8 @@ body.trend-page .chart-container {
 }
 
 /* ===== 趋势页工具栏：单行排布 =====
-   左起：趋势类型切换组（空间不足时组内横滚）→ 图表类型 → 模型筛选；
-   右端：自动刷新 + 数据粒度/保温状态信息片。 */
+   左起：指标下拉 → 图表类型 seg → 模型筛选；
+   右端：自动刷新 + 数据粒度控件。 */
 .trend-chart-toolbar {
   display: flex;
   align-items: center;
@@ -924,31 +797,20 @@ body.trend-page .chart-container {
   flex-wrap: nowrap;
 }
 
-.trend-chart-toolbar .toggle-group {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.trend-chart-toolbar .toggle-group::-webkit-scrollbar {
-  display: none;
-}
-
-/* 组内被裁时右缘渐隐，提示可横滚（JS 按 scrollWidth>clientWidth 挂类） */
-.trend-chart-toolbar .toggle-group.is-scrollable {
-  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
-  mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
-}
-
-.trend-chart-toolbar .toggle-btn {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
 .trend-chart-toolbar .trend-chart-type-toggle,
 .trend-chart-toolbar .channel-filter-container {
   flex: 0 0 auto;
+}
+
+/* 指标下拉是左组成员，不吃刷新控件的 auto 右推 */
+.trend-chart-toolbar .trend-metric-control {
+  margin-left: 0;
+}
+
+.trend-metric-control .searchable-select-input,
+.trend-metric-select {
+  width: 9.5em;
+  min-width: 9.5em;
 }
 
 /* 刷新控件与信息片整组靠右；粒度控件同属右组，不再吃 auto margin */
@@ -1025,20 +887,11 @@ body.trend-page .chart-container {
   }
 }
 
-/* 窄屏：指标类型组独占一行横滚（8 项最长），图表类型组与其余控件自然换行 */
+/* 窄屏：指标下拉与其余控件自然换行 */
 @media (max-width: 768px) {
   .trend-chart-toolbar {
     flex-wrap: wrap;
     row-gap: 10px;
-  }
-
-  .trend-chart-toolbar #trend-type-group {
-    order: -1;
-    flex: 1 1 100%;
-    max-width: 100%;
-    padding-bottom: 2px;
-    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
-    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
   }
 
   /* 卡片默认可视区两格一行，左右相邻的 label-value 混读
