@@ -52,6 +52,11 @@ type responseDecoder struct {
 	finished bool
 	// hasStopReason 表示 Devin 已经显式返回停止原因。
 	hasStopReason bool
+	// sawFinalAnswer 表示帧上出现过 phase=final_answer——astra/sol
+	// 家族以「final_answer 帧 + 空 EndStream」收尾而不发 stop_reason，
+	// 该标记即上游的「答案已完整交付」信号（issue #10 抓包实证），
+	// 在 stopReason 缺席时等价承担完成语义。
+	sawFinalAnswer bool
 	// stopReason 保存 Devin 声明的最终停止原因，等待上游 EOF 后用于完成响应。
 	stopReason llm.StopReason
 	// stopPatterns 是客户端请求的停止序列。上游 stopPatterns 实测不生效
@@ -222,6 +227,9 @@ func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageRespon
 		events = decoder.endText(events)
 		events = decoder.decodeTool(events, delta)
 	}
+	if response.GetPhase() == "final_answer" {
+		decoder.sawFinalAnswer = true
+	}
 	if reason := response.GetStopReason(); reason != devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_UNSPECIFIED {
 		decoder.hasStopReason = true
 		decoder.stopReason = mapStopReason(reason)
@@ -315,8 +323,13 @@ func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 		// usage → responseDimensionGroups）。干净 EOF 却没有停止原因说明
 		// 流在应用层被截断；此处合成 Stop 会把截断伪装成 end_turn，
 		// 下游 agent 会把半完成的任务当作完成（实测复现：Codex 在宣告
-		// 继续调用工具后直接 task_complete）。
-		return decoder.fail(errors.New("devin stream ended without stop reason"))
+		// 继续调用工具后直接 task_complete）。astra/sol 家族例外——
+		// 它们以 phase=final_answer 帧声明答案完整、不发 stopReason，
+		// final_answer 即上游自己的完成标记，按 Stop 收口。
+		if !decoder.sawFinalAnswer {
+			return decoder.fail(errors.New("devin stream ended without stop reason"))
+		}
+		reason = llm.StopReasonStop
 	}
 	if reason == llm.StopReasonError {
 		if decoder.providerRefusal {

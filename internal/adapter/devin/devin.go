@@ -1991,9 +1991,10 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			// 补记进原始日志留证，然后按传输错误收尾。
 			stream.cancel()
 			stream.drainFrames()
-			if stream.decoder.hasStopReason {
+			if stream.decoder.hasStopReason || stream.decoder.sawFinalAnswer {
 				// 语义内容已齐、只是传输尾帧没到（上游不关 body 时
 				// connect-go 的排空会一直等）——按正常 EOF 收尾。
+				// sawFinalAnswer 同义：astra/sol 家族不发 stopReason。
 				slog.Warn("upstream held connection after stop reason; finishing after tail grace")
 				events := stream.release(stream.decoder.finish(nil))
 				if stream.handleServerCalls(ctx, &events) {
@@ -2136,7 +2137,9 @@ func (stream *responseStream) swap(frames <-chan upstreamFrame, cancel context.C
 // stopReason 或被本地停止序列截断的流（语义内容已齐，续传会在
 // 停止标记之后再长出一块内容）。
 func (stream *responseStream) tryResume(cause error) bool {
-	sealed := stream.decoder.hasStopReason || stream.decoder.stoppedByPattern
+	// sawFinalAnswer 与 stopReason 同属「内容已完整」封印：astra/sol
+	// 家族靠 phase 收尾，续传同样会在答案之后长出一块。
+	sealed := stream.decoder.hasStopReason || stream.decoder.stoppedByPattern || stream.decoder.sawFinalAnswer
 	if stream.extend == nil ||
 		!stream.retry.resumable(stream.producedEvents.Load(), sealed, len(stream.decoder.tools) > 0) {
 		return false
@@ -2234,6 +2237,7 @@ func (stream *responseStream) recordUpstreamFailure(cause error) {
 		"produced_events":    stream.producedEvents.Load(),
 		"tools_in_flight":    len(stream.decoder.tools),
 		"has_stop_reason":    stream.decoder.hasStopReason,
+		"saw_final_answer":   stream.decoder.sawFinalAnswer,
 		"stopped_by_pattern": stream.decoder.stoppedByPattern,
 		"resume_attempts":    stream.retry.resumes,
 	})
