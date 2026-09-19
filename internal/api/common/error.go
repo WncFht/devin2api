@@ -198,7 +198,13 @@ func streamError(event llm.ResponseEvent, fallbackMessage string, openAI bool) (
 	if openAI {
 		errorType, openAIParam = OpenAIErrorType(failure), true
 	}
-	return BuildErrorPayload(message, failure, errorType, event.Error.DebugRef, openAIParam), HTTPStatus(failure)
+	// event.Error 按契约恒非 nil（全部产点赋值 + Validate 强约束），
+	// 但这条路径在 SSE 错误出口上——违约事件的代价不该是流中 panic。
+	debugRef := ""
+	if event.Error != nil {
+		debugRef = event.Error.DebugRef
+	}
+	return BuildErrorPayload(message, failure, errorType, debugRef, openAIParam), HTTPStatus(failure)
 }
 
 // BuildErrorPayload 组装协议错误对象的 error 字段：message/type/code 三键、

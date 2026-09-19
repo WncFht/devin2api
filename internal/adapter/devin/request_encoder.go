@@ -46,7 +46,10 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	// 上游轨迹标识按会话复用：同一会话的连续请求共享稳定 trajectory/cascade
 	// ID。实测（2026-09-16 保温实验）：同内容换 SessionKey 派生 ID 后
 	// cache_read=0，ID 参与缓存键或路由——稳定派生是命中前提。
-	trajectoryID, cascadeID := deriveSessionIDs(request)
+	// 三个派生量共用一份种子哈希：trajectory/cascade/亲和键同种子是
+	// 契约（SessionAffinityKey 注释），seed 构造要走 tools 哈希，只算一遍。
+	sessionSum := sha256.Sum256(sessionSeed(request))
+	trajectoryID, cascadeID := uuidFromBytes(sessionSum[:16]), uuidFromBytes(sessionSum[16:32])
 	executionID := randid.UUID()
 	name, version, os := config.ClientIdentity()
 	metadata := upstream.BuildMetadata(binding.Token, name, version, os, 366)
@@ -111,7 +114,7 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 		// schema 新增 #27）：填会话亲和键——与 trajectory/cascade 同种子
 		// 派生，缓存命名空间与会话轨迹命名空间对齐，且 opaque 不暴露
 		// 客户端原始 SessionKey。
-		PromptCacheKey: proto.String(SessionAffinityKey(request)),
+		PromptCacheKey: proto.String(hex.EncodeToString(sessionSum[:16])),
 	}
 	// 上游实测：option_name 合法值为 none/auto/required；Anthropic 的 "any"
 	// 在本层已归一为 required。auto 不发送，与上游缺省行为一致。
@@ -439,15 +442,23 @@ var assistantSource = devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeium
 // 丢弃的重复声明数。
 func dedupToolNames(tools []llm.ToolDefinition) ([]llm.ToolDefinition, int) {
 	seen := make(map[string]struct{}, len(tools))
-	kept := make([]llm.ToolDefinition, 0, len(tools))
-	for _, tool := range tools {
+	// 零重复是主流形态：kept 惰性到首个重复出现才分配，多数请求
+	// 全程只付一个 seen map，不拷整份工具表。
+	var kept []llm.ToolDefinition
+	for index, tool := range tools {
 		if _, ok := seen[tool.Name]; ok {
+			if kept == nil {
+				kept = make([]llm.ToolDefinition, 0, len(tools)-1)
+				kept = append(kept, tools[:index]...)
+			}
 			continue
 		}
 		seen[tool.Name] = struct{}{}
-		kept = append(kept, tool)
+		if kept != nil {
+			kept = append(kept, tool)
+		}
 	}
-	if len(kept) == len(tools) {
+	if kept == nil {
 		return tools, 0
 	}
 	return kept, len(tools) - len(kept)
@@ -467,6 +478,18 @@ func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt)
 	}
 	isResultPrompt := func(p *devinproto.ExaChatPb_ChatMessagePrompt) bool {
 		return p.GetSource() == toolSource
+	}
+	// 无 result 消息时配对无事可做（多数轮次如此）：一次线性预扫换
+	// 掉 byID/assigned/paired/out/countMoved 五份分配的确定性省法。
+	hasResults := false
+	for _, prompt := range prompts {
+		if isResultPrompt(prompt) {
+			hasResults = true
+			break
+		}
+	}
+	if !hasResults {
+		return prompts, 0
 	}
 	// byID 按到达序排队每个 call id 的全部结果。
 	byID := make(map[string][]*devinproto.ExaChatPb_ChatMessagePrompt)

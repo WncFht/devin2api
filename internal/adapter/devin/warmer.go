@@ -99,7 +99,17 @@ func (w *connWarmer) warmPool(n int) {
 			w.warmOnce()
 		}()
 	}
-	wg.Wait()
+	// Close 的语义是不再发起新一轮，在途 warmOnce 随自己 15s 的 ctx
+	// 收尾——stop 到了就不必再等本轮 wg，否则关停平白多卡一拍。
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-w.stop:
+	}
 }
 
 // warmOnce 打一发 GET 让连接落进 idle 池；读空 body 是复用的前提。

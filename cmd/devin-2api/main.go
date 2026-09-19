@@ -358,6 +358,10 @@ func main() {
 			for _, row := range rows {
 				tokenSeeds = append(tokenSeeds, row.Token)
 			}
+		} else {
+			// 面板侧凭据失去脱敏登记——调试 payload 里这些 token 可能
+			// 以明文露面。静默吞掉会让降级无迹可查，按惯例留 WARN。
+			slog.Warn("debuglog: upstream account token seeds unavailable, panel credentials will not be masked", "error", err)
 		}
 		ccPanel.NoteUpstreamTokens(tokenSeeds...)
 	}

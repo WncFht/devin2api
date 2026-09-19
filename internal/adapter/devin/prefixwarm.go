@@ -596,6 +596,14 @@ func (w *cacheWarmer) sweep() {
 	})
 	w.mu.Unlock()
 	for _, entry := range due {
+		// Close 不设 drained——非排空关停（摘 lane、boot 失败退出）靠
+		// 这里查 stop 让 sweep 及时收场，否则 due 积压会串行把每条
+		// 60s ping 打满才放 run 退，停掉的 lane 还白烧上游配额。
+		select {
+		case <-w.stop:
+			return
+		default:
+		}
 		w.pingEntry(entry)
 	}
 }

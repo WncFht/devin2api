@@ -1313,8 +1313,15 @@ func detachedRequestKey(request llm.RequestMessages, model string) string {
 	projection := debuglog.RequestMessagesProjection(request)
 	delete(projection, "dropped_items")
 	projection["model"] = model
-	for _, message := range projection["messages"].([]any) {
-		delete(message.(map[string]any), "timestamp_ms")
+	// messages 形状断言必须 comma-ok：投影是观测面而非类型契约，
+	// 改形（类型化切片/换投影结构）时宁可让 timestamp_ms 残留进键
+	// 退化挂接命中，也不能在每条请求的算键路径上 panic。
+	if messages, ok := projection["messages"].([]any); ok {
+		for _, message := range messages {
+			if item, ok := message.(map[string]any); ok {
+				delete(item, "timestamp_ms")
+			}
+		}
 	}
 	tools := make([]any, 0, len(request.Tools))
 	for _, tool := range request.Tools {
