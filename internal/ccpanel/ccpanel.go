@@ -93,8 +93,14 @@ type Handler struct {
 	// 随新点一并重放；容量封顶 quotaPersistRetryCap，溢出丢最老点
 	// 并告警。(account,at) 唯一索引 + INSERT OR IGNORE 使重放幂等——
 	// 缓冲是写争用期的安全带而非持久队列。
-	quotaPendingMu      sync.Mutex
-	pendingQuotaSamples []*store.QuotaSample
+	// quotaPersistFailures/Dropped/Replayed 是同锁内的落库健康账，
+	// 投到 runtime-metrics 的 quota 组——样本写失败此前只有 stderr
+	// WARN，写争用期丢点没有这组计数完全不可见。
+	quotaPendingMu       sync.Mutex
+	pendingQuotaSamples  []*store.QuotaSample
+	quotaPersistFailures int
+	quotaPersistDropped  int
+	quotaPersistReplayed int
 
 	// debug 是请求目录的读取入口（logs 表行查询走 store）。
 	debug *debuglog.Manager

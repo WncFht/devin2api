@@ -250,23 +250,58 @@ func (h *Handler) persistQuotaSample(ctx context.Context, point *store.QuotaSamp
 	for i, r := range rows {
 		if err := h.store.InsertQuotaSample(ctx, r); err != nil {
 			slog.Warn("quota sample persist failed", "account", r.Account, "error", err)
+			h.noteQuotaReplayed(min(i, len(pending)))
 			h.stashQuotaSamples(rows[i:])
 			return
 		}
 	}
+	h.noteQuotaReplayed(len(pending))
 }
 
 // stashQuotaSamples 把未落库的配额点挂回重放缓冲；超出深度的最老点
-// 丢弃并告警——缓冲是争用期安全带，永久丢失要留痕迹。
+// 丢弃并告警——缓冲是争用期安全带，永久丢失要留痕迹。写尝试失败
+// 按批计一次 persistFailures（与 stderr 告警一一对应：首个失败即
+// 停手，同批余点未尝试不计失败），溢出丢弃按点计 persistDropped。
 func (h *Handler) stashQuotaSamples(rows []*store.QuotaSample) {
 	h.quotaPendingMu.Lock()
 	defer h.quotaPendingMu.Unlock()
+	h.quotaPersistFailures++
 	h.pendingQuotaSamples = append(h.pendingQuotaSamples, rows...)
 	for len(h.pendingQuotaSamples) > quotaPersistRetryCap {
 		dropped := h.pendingQuotaSamples[0]
 		h.pendingQuotaSamples = h.pendingQuotaSamples[1:]
+		h.quotaPersistDropped++
 		slog.Warn("quota sample persist buffer full: dropping oldest sample",
 			"account", dropped.Account, "at", dropped.At)
+	}
+}
+
+// noteQuotaReplayed 记账本轮落库中救回的挂账点数：失败下标之前的
+// pending 前缀与全量成功两种情形都经它计 persistReplayed；INSERT OR
+// IGNORE 的幂等命中同样算救回（点已在库即救援成立）。n=0 快进返回，
+// 省一次锁。
+func (h *Handler) noteQuotaReplayed(n int) {
+	if n == 0 {
+		return
+	}
+	h.quotaPendingMu.Lock()
+	h.quotaPersistReplayed += n
+	h.quotaPendingMu.Unlock()
+}
+
+// quotaPersistStats 返回配额样本落库健康账快照，投 runtime-metrics 的
+// quota 组。计数口径与 gate 组 persist_* 对齐：persist_failures 按写
+// 尝试计（首个失败即停手、剩余整段挂回——一批至多记一次失败），
+// persist_dropped/persist_replayed 按点计；pending_samples 是重放
+// 缓冲当前深度，回答「此刻还有没有未落库的欠账」。
+func (h *Handler) quotaPersistStats() map[string]any {
+	h.quotaPendingMu.Lock()
+	defer h.quotaPendingMu.Unlock()
+	return map[string]any{
+		"persist_failures": h.quotaPersistFailures,
+		"persist_dropped":  h.quotaPersistDropped,
+		"persist_replayed": h.quotaPersistReplayed,
+		"pending_samples":  len(h.pendingQuotaSamples),
 	}
 }
 

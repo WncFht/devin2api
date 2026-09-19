@@ -374,6 +374,10 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 	if h.detachedStats != nil {
 		data["detached"] = h.detachedStats()
 	}
+	// quota 组投配额样本落库健康账（写失败/缓冲丢弃/重放救回与缓冲
+	// 当前深度）——采样写失败此前只有 stderr WARN，写争用期丢点在
+	// 这里才可见。
+	data["quota"] = h.quotaPersistStats()
 	// accounts 组是号池逐账号视图：每号的闸门/保温/脱钩缓存/池侧
 	// 状态各自透出——顶层 gate/warm 仍是首 lane 快照（前端后兼容，
 	// 闩态/分位数不可聚合），detached 已是全 lane 聚合；逐号排障

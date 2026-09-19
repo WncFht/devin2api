@@ -251,7 +251,8 @@ func TestQuotaSampleGraceAndTopUpFields(t *testing.T) {
 // TestQuotaSamplePersistRetry 验证配额点写失败挂进重放缓冲随下次落库
 // 重放：关闭库让每次 INSERT 必败，六次落点各产一笔挂账，缓冲深度
 // quotaPersistRetryCap=4 溢出后丢最老两点——守恒：推入 = 在缓 + 丢弃。
-// 库重开后一次落库把缓冲四点与新点共五行写回，曲线无断档。
+// 库重开后一次落库把缓冲四点与新点共五行写回，曲线无断档。落库健康账
+// 同步校验：六次写尝试失败、两个溢出丢弃点、四个挂账点经末轮重放救回。
 func TestQuotaSamplePersistRetry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	st, err := store.Open(path)
@@ -272,6 +273,11 @@ func TestQuotaSamplePersistRetry(t *testing.T) {
 		t.Fatalf("pending = %d oldest at = %d, want %d rows from at=%d",
 			pending, oldest, quotaPersistRetryCap, 1700000000+2*300)
 	}
+	if stats := h.quotaPersistStats(); stats["persist_failures"] != 6 ||
+		stats["persist_dropped"] != 2 || stats["persist_replayed"] != 0 ||
+		stats["pending_samples"] != quotaPersistRetryCap {
+		t.Fatalf("persist stats after failures = %+v", stats)
+	}
 
 	st2, err := store.Open(path)
 	if err != nil {
@@ -287,6 +293,9 @@ func TestQuotaSamplePersistRetry(t *testing.T) {
 	}
 	if len(rows) != 5 || rows[0].At != 1700000000+2*300 || rows[4].At != 1700000000+6*300 {
 		t.Fatalf("replayed samples = %+v, want 5 rows from at=%d", rows, 1700000000+2*300)
+	}
+	if stats := h.quotaPersistStats(); stats["persist_replayed"] != 4 || stats["pending_samples"] != 0 {
+		t.Fatalf("persist stats after replay = %+v", stats)
 	}
 }
 

@@ -56,6 +56,8 @@ devin-2api 对「流量、配额、换号、存储」的测量分散在若干持
 
 后台协程每 `debug.quota_interval_minutes`（默认 5 分钟）对每 account 打一条快照；`(account, at)` 唯一索引兜底导入重跑去重；全局 20,000 行帽，超帽截到最新。关键字段：`daily_remaining`/`weekly_remaining` 可空 REAL——`NULL` 是「上游没报」，`0` 是真到 0，二者必须区分；`daily_reset_at`/`weekly_reset_at` 重置点；`prompt/flow/flex_credits` 与对应 `used_*`；`acu_consumed`/`acu_limit`；`grace_period_*`、`top_up_*`；`overage_balance_micros`（迁移 0007 起）。配额字段是 int32 百分比向下取整，反推计费只能吃翻转点——方法与日/周额度大小见 `quota-billing.md`。`/admin/quota` 直接给日/周曲线与按燃烧速率外推的耗尽时刻，不必手算。
 
+写路径同步落库（在采样协程/手动刷新的调用 ctx 内）：批内首个 INSERT 失败即停手，未写点挂进全局深度 4 的重放缓冲随下一次落库重放（同一唯一索引使重放幂等），溢出丢最老点。落库健康账透在 `/admin/runtime-metrics` 的 `quota` 段：`persist_failures` 记失败批次数（与 stderr `quota sample persist failed` WARN 一一对应），`persist_dropped` 记缓冲溢出被永久丢弃的点数，`persist_replayed` 记挂账点经后续落库救回的点数，`pending_samples` 是缓冲当前深度。缓冲按全局一份计（不分 lane）——采样协程只有一个，挂账点自带 account 列。
+
 ## lane_attempt_causes：被放弃 lane 尝试的日账
 
 主键 `(day, lane, cause)`，`n` 为当日该 lane 该成因计数。写方是 `logs` 行同事务对 `meta.json` `upstream_attempts` 的展开——payload 目录淘汰后「为什么换号」只剩这里的口径。cause 词表：`local_gate[:reason]` 本地闸门快败的幻影换号（零上游发送）、connect code（`deadline_exceeded`/`unavailable` 等）真实 failover 发送、`nocode` 无 code 传输断裂。读侧 `/admin/usage` 快照 `attempt_causes` 段直读 31 天窗口；保留期同 `logs` 行（90 天按龄删）。表自迁移 0008 起累计，之前的历史不可回填——部署前的换号归因只能回 `meta.json` 时代。
