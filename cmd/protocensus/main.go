@@ -155,14 +155,21 @@ func cmdCensus(args []string) error {
 	// 不起 cleaner，写路径全部旁路。
 	manager := debuglog.NewManager("", debuglog.RetentionPolicy{}, st)
 	req, resp := newCensus(), newCensus()
-	var frames int
+	var frames, skippedReq, skippedResp int
 	for _, dir := range dirs {
 		req.currentDir, resp.currentDir = dir, dir
 		// 首个请求与 attemptN 重试分片都进普查——重试写给上游的 wire
 		// 形态不同（如换 model/追加 continue），漏掉会低估字段覆盖。
-		if requestStages, err := manager.DevinRequestStages(ctx, dir); err == nil {
+		if requestStages, err := manager.DevinRequestStages(ctx, dir); err != nil {
+			skippedReq++
+		} else {
 			for _, stage := range requestStages {
-				if raw, _, ok, err := st.DebugFile(ctx, dir, stage, 0); err == nil && ok {
+				raw, _, ok, err := st.DebugFile(ctx, dir, stage, 0)
+				if err != nil {
+					skippedReq++
+					continue
+				}
+				if ok {
 					var obj map[string]any
 					if json.Unmarshal(raw, &obj) == nil {
 						req.walk(requestDesc(obj, reqMD, searchReqMD), obj)
@@ -170,7 +177,10 @@ func cmdCensus(args []string) error {
 				}
 			}
 		}
-		if raw, _, ok, err := st.DebugFile(ctx, dir, debuglog.StageDevinResponse, 0); err == nil && ok {
+		raw, _, ok, err := st.DebugFile(ctx, dir, debuglog.StageDevinResponse, 0)
+		if err != nil {
+			skippedResp++
+		} else if ok {
 			sc := bufio.NewScanner(bytes.NewReader(raw))
 			sc.Buffer(make([]byte, 4<<20), 4<<20)
 			for sc.Scan() {
@@ -198,6 +208,11 @@ func cmdCensus(args []string) error {
 				fmt.Fprintf(os.Stderr, "warn: scan %s/%s: %v\n", dir, debuglog.StageDevinResponse, err)
 			}
 		}
+	}
+	// 读失败的目录不能静默略过：普查结论的覆盖率假设是「读到=全集」，
+	// 漏计要像截断一样显式报出来。
+	if skippedReq+skippedResp > 0 {
+		fmt.Fprintf(os.Stderr, "warn: %d request-stage and %d response reads failed; census under-counts those dirs\n", skippedReq, skippedResp)
 	}
 	return printReport(len(dirs), frames, req, resp)
 }

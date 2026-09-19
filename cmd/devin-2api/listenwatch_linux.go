@@ -24,7 +24,7 @@ const listenWatchInterval = time.Minute
 // legit 标记它是不是交接部署认可的合法持有者（判据见 describeHolder）。
 type listenHolder struct {
 	pid     int
-	uid     uint32
+	uid     int // -1 = Stat 未取到；0 值uint 会把读失败误报成 root
 	comm    string
 	cmdline string
 	addr    string // /proc/net/tcp{,6} 里该 socket 的 local_address 原文
@@ -174,7 +174,7 @@ func socketInodeOwners(procRoot string, inodes map[string]string) map[int]string
 // 对象。environ 只用于判据匹配，其内容（可能带密钥）不落任何日志。
 func describeHolder(procRoot string, pid int) (listenHolder, bool) {
 	base := filepath.Join(procRoot, strconv.Itoa(pid))
-	h := listenHolder{pid: pid, comm: "?"}
+	h := listenHolder{pid: pid, comm: "?", uid: -1}
 	comm, err := os.ReadFile(filepath.Join(base, "comm"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -188,7 +188,7 @@ func describeHolder(procRoot string, pid int) (listenHolder, bool) {
 	}
 	if info, err := os.Stat(base); err == nil {
 		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-			h.uid = stat.Uid
+			h.uid = int(stat.Uid)
 		}
 	}
 	if h.comm == "devin-2api" {
