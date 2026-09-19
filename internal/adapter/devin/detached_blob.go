@@ -119,6 +119,9 @@ type blobFailure struct {
 type blobEncoder struct {
 	blocks   []json.RawMessage
 	blockIDs map[string]int
+	// marshals 记块 marshal 次数——续用命中成本界（随块变更数而非
+	// 事件数增长）的可观测面，测试断言用。
+	marshals int
 	// prevContent/prevIdx 是上一个编码事件 Partial.Content 的源块值与
 	// 块表下标：逐位置 DeepEqual 命中即续用下标，只在块值真变时付
 	// marshal（Delta 洪流里在产块恒小、成形块恒同值，成本压回线性）。
@@ -191,7 +194,7 @@ func (enc *blobEncoder) partial(message *llm.AssistantMessage) (*blobMessage, er
 		idx[i] = id
 	}
 	enc.prevContent, enc.prevIdx = message.Content, idx
-	out, err := enc.message(message)
+	out, err := enc.messageBase(message)
 	if err != nil {
 		return nil, err
 	}
@@ -199,9 +202,26 @@ func (enc *blobEncoder) partial(message *llm.AssistantMessage) (*blobMessage, er
 	return out, nil
 }
 
-// message 编码消息标量面：Content 直进块表（终态消息无续用对象），
-// Failure 换影子。调用方覆盖 Content 时本函数产物作基板。
+// message 编码一次性终态消息：标量基板加 Content 逐块进表——终态
+// 无续用对象，逐块直进是正确成本。
 func (enc *blobEncoder) message(message *llm.AssistantMessage) (*blobMessage, error) {
+	out, err := enc.messageBase(message)
+	if err != nil || out == nil {
+		return out, err
+	}
+	for _, block := range message.Content {
+		id, err := enc.blockIndex(block)
+		if err != nil {
+			return nil, err
+		}
+		out.Content = append(out.Content, id)
+	}
+	return out, nil
+}
+
+// messageBase 编码消息标量面与 Failure 影子，Content 留给调用方：
+// partial 以续用下标回填，终态消息由 message 逐块进表。
+func (enc *blobEncoder) messageBase(message *llm.AssistantMessage) (*blobMessage, error) {
 	if message == nil {
 		return nil, nil
 	}
@@ -220,13 +240,6 @@ func (enc *blobEncoder) message(message *llm.AssistantMessage) (*blobMessage, er
 		ErrorMessage:      message.ErrorMessage,
 		DebugRef:          message.DebugRef,
 		TimestampMS:       message.TimestampMS,
-	}
-	for _, block := range message.Content {
-		id, err := enc.blockIndex(block)
-		if err != nil {
-			return nil, err
-		}
-		out.Content = append(out.Content, id)
 	}
 	if f := message.Failure; f != nil {
 		out.Failure = &blobFailure{
@@ -260,6 +273,7 @@ func (enc *blobEncoder) blockIndex(block llm.Content) (int, error) {
 	default:
 		return 0, fmt.Errorf("detached blob: unknown content block %T", block)
 	}
+	enc.marshals++
 	data, err := json.Marshal(tagged)
 	if err != nil {
 		return 0, err

@@ -164,6 +164,32 @@ func TestDetachedBlobCodecSynthesized(t *testing.T) {
 	}
 }
 
+// TestDetachedBlobCarrySkipsMarshal 钉住逐位置续用的成本界：Delta 洪流
+// 里成形块逐事件命中续用下标、只在块值真变时付 marshal——100 事件
+// 带恒同 thinking + 逐事件增长的 text，marshal 总数 = 成形块 1 +
+// 在产块 100 个真变值，不是事件数×块体的平方开销。
+func TestDetachedBlobCarrySkipsMarshal(t *testing.T) {
+	enc := &blobEncoder{blockIDs: make(map[string]int)}
+	thinking := llm.ThinkingContent{Thinking: "chain", ThinkingSignature: "sig"}
+	var text string
+	for i := 0; i < 100; i++ {
+		text += "x"
+		out, err := enc.event(llm.ResponseEvent{
+			Type: llm.ResponseEventTextDelta, ContentIndex: 1, Delta: "x",
+			Partial: &llm.AssistantMessage{Content: []llm.Content{thinking, llm.TextContent{Text: text}}},
+		})
+		if err != nil {
+			t.Fatalf("event %d: %v", i, err)
+		}
+		if len(out.Partial.Content) != 2 || out.Partial.Content[0] != 0 {
+			t.Fatalf("event %d: content idx = %v, want formed block carried at 0", i, out.Partial.Content)
+		}
+	}
+	if enc.marshals != 101 {
+		t.Fatalf("marshals = %d, want 101 (1 formed block + 100 in-flight deltas)", enc.marshals)
+	}
+}
+
 // TestDetachedBlobCodecCorrupt 钉住坏行的失败形态：乱码载荷与不支持的
 // 版本都必须显式报错——播种侧据此计 blobDrops 跳过，绝不静默灌册。
 func TestDetachedBlobCodecCorrupt(t *testing.T) {
