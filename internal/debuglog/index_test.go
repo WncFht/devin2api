@@ -3,8 +3,11 @@
 package debuglog
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -168,6 +171,63 @@ func TestUnclaimedCompletionRow(t *testing.T) {
 	}
 	if len(probeRows) != 1 || probeRows[0].Dir != "" {
 		t.Fatalf("manual_test rows = %+v", probeRows)
+	}
+}
+
+// TestRejectedInsertFailureCounted 验证 rejected 留存行写库失败的残迹口径：
+// 同步直写失败时不落行，rejected_insert_failed 计数与 stderr WARN 同点各记
+// 一笔——该拒绝在 logs 表缺席后，计数是「有拒绝证据没留下来」的唯一可查信号。
+func TestRejectedInsertFailureCounted(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	manager := NewManager(t.TempDir(), RetentionPolicy{}, st)
+	defer manager.Close()
+
+	meta := RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic",
+		ClientIP: "10.0.0.2", KeyHash: "kh2", ClientRequestID: "crid-2"}
+	manager.NoteReject(meta, 401, "missing_api_key")
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{LogSource: "rejected"})
+	if err != nil {
+		t.Fatalf("SearchLogs: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Dir != "" || rows[0].Result != "rejected" ||
+		rows[0].ErrorStage != ErrStagePrePipeline {
+		t.Fatalf("rejected rows = %+v, want single dirless rejected row", rows)
+	}
+	if got := manager.Stats()["rejected_insert_failed"]; got != uint64(0) {
+		t.Fatalf("rejected_insert_failed = %v after successful insert, want 0", got)
+	}
+
+	// 关库后直写即刻失败：这次拒绝只剩计数与 WARN 两处残迹，行不落库。
+	var warnBuf bytes.Buffer
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&warnBuf, nil)))
+	defer slog.SetDefault(defaultLogger)
+	_ = st.Close()
+	manager.NoteReject(meta, 401, "missing_api_key")
+	if got := manager.Stats()["rejected_insert_failed"]; got != uint64(1) {
+		t.Fatalf("rejected_insert_failed = %v, want 1", got)
+	}
+	if !strings.Contains(warnBuf.String(), "insert rejected log failed") {
+		t.Fatalf("WARN fallback missing, got %q", warnBuf.String())
+	}
+
+	// 重开库确认失败那次没留行——拒绝在 logs 表的真实缺席。
+	reopened, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	rows, _, err = reopened.SearchLogs(context.Background(), store.LogQuery{LogSource: "rejected"})
+	if err != nil {
+		t.Fatalf("SearchLogs after reopen: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rejected rows after failed insert = %d, want still 1", len(rows))
 	}
 }
 

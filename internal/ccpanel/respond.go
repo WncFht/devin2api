@@ -29,6 +29,21 @@ func respondOK(w http.ResponseWriter, data any) {
 	writeEnvelope(w, http.StatusOK, apiResponse{Success: true, Data: data})
 }
 
+// rejectsView 组装管线前拒绝视图：obs 侧的分原因计数与最近事件环，并入
+// debuglog 侧的 rejected 留存行写失败数——该行走同步直写绕开 sheddable
+// 队列，dropped_*/io_errors 口径盖不住它，insert_failed 是「拒绝证据没
+// 落库」这一损耗在面板侧的唯一透出。metrics 为 nil 时返回 nil（端点降级）。
+func (h *Handler) rejectsView() map[string]any {
+	if h.metrics == nil {
+		return nil
+	}
+	view := h.metrics.Rejects()
+	if stats := h.debug.Stats(); stats != nil {
+		view["insert_failed"] = stats["rejected_insert_failed"]
+	}
+	return view
+}
+
 func respondError(w http.ResponseWriter, code int, msg string) {
 	writeEnvelope(w, code, apiResponse{Success: false, Error: msg})
 }

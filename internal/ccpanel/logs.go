@@ -277,7 +277,7 @@ func (h *Handler) logQuery(r *http.Request) (store.LogQuery, bool) {
 func (h *Handler) respondLogEntries(w http.ResponseWriter, r *http.Request, entries []logEntry, count *int, hasMore bool) {
 	var rejects any
 	if h.metrics != nil && identityFrom(r).Role == "admin" {
-		rejects = h.metrics.Rejects()
+		rejects = h.rejectsView()
 	}
 	writeEnvelope(w, http.StatusOK, apiResponse{
 		Success: true, Data: entries, Count: count, HasMore: hasMore, Rejects: rejects,

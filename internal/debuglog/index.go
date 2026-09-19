@@ -133,9 +133,10 @@ func switchCauseKey(a AccountAttempt) string {
 // rejected，log_source=rejected 把它与服役流量分域——默认列表与全部
 // 聚合口径剔除，只为留存检索（此前拒绝的跨重启痕迹只剩 stderr.log，
 // 无 key/来源维度可查）。同步写而非走全局队列：拒绝发生在 recorder
-// 创建之前，无目录可排；拒绝低频，写库失败只记 ioErrors。ctx 用
-// reqStoreOpTimeout 而非 storeOpTimeout——写连接 stall 期间拒绝响应
-// 不能被拖住分钟级。
+// 创建之前，无目录可排；写库失败除 ioErrors 外另记
+// rejectedInsertFailed——直写行绕开 sheddable 口径，该计数与 stderr
+// WARN 同点是这次拒绝仅剩的结构化痕迹。ctx 用 reqStoreOpTimeout 而非
+// storeOpTimeout——写连接 stall 期间拒绝响应不能被拖住分钟级。
 func (manager *Manager) NoteReject(meta RequestMeta, status int, reason string) {
 	if manager == nil || manager.store == nil {
 		return
@@ -158,6 +159,7 @@ func (manager *Manager) NoteReject(meta RequestMeta, status int, reason string) 
 	defer cancel()
 	if _, err := manager.store.InsertLog(ctx, &row); err != nil {
 		manager.ioErrors.Add(1)
+		manager.rejectedInsertFailed.Add(1)
 		slog.Warn("debuglog: insert rejected log failed", "path", meta.Path, "error", err)
 	}
 }

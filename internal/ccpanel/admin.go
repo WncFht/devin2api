@@ -342,12 +342,12 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 		data["debuglog"] = stats
 	}
 	// rates/trend 是 Snapshot 原生键（RPM/QPS、60 分钟 10s 桶）；
-	// rejects 是管线前拒绝的分原因计数与最近事件环——它们不产生调试
-	// 目录，这里是唯一透出点。
+	// rejects 是管线前拒绝的分原因计数与最近事件环（不产生调试目录，
+	// 环是唯一实时面），rejectsView 另并入留存行写失败数 insert_failed。
 	if h.metrics != nil {
 		data["rates"] = snap["rates"]
 		data["trend"] = snap["trend_minutes"]
-		data["rejects"] = h.metrics.Rejects()
+		data["rejects"] = h.rejectsView()
 	}
 	// usage 组只投全局延迟分位数两行（ttfb/duration）；全量聚合视图
 	// 在 /admin/usage——轮询端点不背全桶排序的成本。

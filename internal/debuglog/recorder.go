@@ -236,6 +236,12 @@ type Manager struct {
 	lateWrites atomic.Uint64
 	// ioErrors 汇总日志行与阶段文件的写失败数——日志管道自身故障不静默。
 	ioErrors atomic.Uint64
+	// rejectedInsertFailed 单列 rejected 留存行的写库失败数：该行走
+	// NoteReject 同步直写、绕开全局队列与在飞预算，dropped_*/io_errors
+	// 等 sheddable 口径都不含它的语义（ioErrors 仍含，但混在全部写
+	// 失败里看不出拒绝证据丢失）——失败时 stderr WARN 是仅有痕迹，
+	// 此计数把损耗提成 Stats/rejects 组可查的信号。
+	rejectedInsertFailed atomic.Uint64
 	// deltaBaseBytes 是全进程已钉 delta 基座的字节量：每个在飞目录把
 	// 脱敏后 01 明文钉给同目录的 02/03-devin-request* 作 zstd dict，
 	// 超 deltaBaseCapBytes 时新目录放弃钉座（其 delta 候选回退独立
@@ -970,8 +976,11 @@ func (manager *Manager) Stats() map[string]any {
 		"pending_bytes_cap":     int64(pendingPayloadCapBytes),
 		"dropped_payload_bytes": manager.droppedPayloadBytes.Load(),
 		"io_errors":             manager.ioErrors.Load(),
-		"log_rows":              logRows,
-		"db_bytes":              dbBytes,
+		// rejected_insert_failed 是 rejected 留存行直写失败数——绕开
+		// 队列的行没有 dropped_* 可挂，单列计数是该损耗唯一透出。
+		"rejected_insert_failed": manager.rejectedInsertFailed.Load(),
+		"log_rows":               logRows,
+		"db_bytes":               dbBytes,
 		// wal_bytes 单列：db_bytes 与 payload 口径差的主要解释项——
 		// checkpoint 饥饿时 WAL 可远超主库文件，「WAL 顶爆 DBBytes」
 		// 应面板可见而非事后挖掘。payload_bytes 是 debug 两表库存

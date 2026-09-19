@@ -41,7 +41,7 @@ const (
 	// RejectInvalidAPIKey 是凭据不匹配的 401。
 	RejectInvalidAPIKey RejectReason = "invalid_api_key"
 	// RejectHTTPRead 是请求体读取失败（超时/断连）：完整请求从未到达，
-	// 与鉴权/并发拒绝同口径——不产生调试记录。
+	// 与鉴权/并发拒绝同口径——不产生调试目录，只留 rejected 行与环事件。
 	RejectHTTPRead RejectReason = "http_read"
 )
 
@@ -63,8 +63,8 @@ var rejectLabels = []RejectLabel{
 	{string(RejectHTTPRead), "读体失败"},
 }
 
-// RejectEvent 是一次管线前拒绝的采样：请求未读体即被拒，没有调试记录
-// 也没有 logs 行，这条记录是它的全部结构化痕迹。
+// RejectEvent 是一次管线前拒绝的采样：请求未读体即被拒，没有调试目录；
+// logs 留存行由 debuglog 侧同步直写（见 Reject），事件环是它的实时采样面。
 type RejectEvent struct {
 	At        int64  `json:"at"`
 	Reason    string `json:"reason"`
@@ -170,8 +170,10 @@ func (r *Request) Finish(status, responseBodyBytes int, result string) {
 }
 
 // Reject 计入一个在进入处理管线前被拒的请求。reason 分类落到计数与
-// 事件环上——这类请求刻意不产生调试记录与 logs 行（未鉴权/过载路径
-// 不做磁盘写），计数与事件环是它们唯一的结构化足迹。
+// 事件环上，是拒绝的实时面；同一拒绝另由 debuglog.NoteReject 同步直写
+// 一条 log_source=rejected 的 logs 留存行（跨重启可检索的足迹，默认
+// 视图剔除）——留存行绕开全局队列，其写库失败时这次拒绝只剩本计数与
+// stderr WARN，失败数经 rejects.insert_failed 透出。
 func (m *Metrics) Reject(reason RejectReason, ev RejectEvent) {
 	m.rejected.Add(1)
 	m.recordBucket(true)
@@ -241,8 +243,8 @@ func (m *Metrics) Snapshot() map[string]any {
 
 // Rejects 返回管线前拒绝的分原因计数与最近事件（新在前），供 stats 快照
 // 与 /admin/logs 复用同一份数据。
-// 计数是进程内存值，重启清零；跨重启的拒绝痕迹在 stderr.log 的
-// "request rejected" 行里（reason 字段与这里同源）。
+// 计数是进程内存值，重启清零；跨重启痕迹是 logs 表 log_source=rejected
+// 行与 stderr.log 的 "request rejected" 行（reason 字段与这里同源）。
 func (m *Metrics) Rejects() map[string]any {
 	m.rejectsMu.Lock()
 	byReason := make(map[string]uint64, len(m.rejectCounts))
