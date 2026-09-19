@@ -1460,7 +1460,7 @@ function renderLogs(data) {
           <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="white-space: nowrap;">${apiKeyDisplay}</td>
           <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay} ${probeDisplay}</td>
           <td class="logs-col-account${accountDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.account}" style="white-space: nowrap;">${accountDisplay}</td>
-          <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}"><span class="${statusClass}"${statusTitleAttr}>${statusCode}</span></td>
+          <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}"><span class="${statusClass}"${statusTitleAttr}>${escapeHtml(statusCode)}</span></td>
           <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="white-space: nowrap;">${responseTimingDisplay}</td>
           <td class="logs-col-speed${speedDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.speed}" style="white-space: nowrap;">${speedDisplay}</td>
           <td class="logs-col-input${inputTokensDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.input}" style="white-space: nowrap;">${inputTokensDisplay}</td>

@@ -1140,7 +1140,7 @@
               html += `
                 <div style="display: flex; align-items: center; gap: 8px; margin: 4px 0;">
                   <span style="display: inline-block; width: 10px; height: 10px; background: ${color}; border-radius: 50%;"></span>
-                  <span>${param.seriesName}: ${formatTrendValue(window.currentTrendType, value)}</span>
+                  <span>${escapeHtml(param.seriesName)}: ${formatTrendValue(window.currentTrendType, value)}</span>
                 </div>
               `;
             });

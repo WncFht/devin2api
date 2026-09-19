@@ -1569,7 +1569,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
             if (unit === '$') {
               const std = params.data && typeof params.data.standard === 'number' ? params.data.standard : value;
               formattedValue = formatCostPair(std, value);
-              return `${params.name}<br/>${formattedValue} (${params.percent}%)`;
+              return `${escapeHtml(params.name)}<br/>${formattedValue} (${params.percent}%)`;
             }
             // 原有逻辑：大数值缩写
             if (value >= 1000000) {
@@ -1579,7 +1579,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
             } else {
               formattedValue = value.toLocaleString();
             }
-            return `${params.name}<br/>${formattedValue}${unit} (${params.percent}%)`;
+            return `${escapeHtml(params.name)}<br/>${formattedValue}${unit} (${params.percent}%)`;
           }
         },
         legend: {
