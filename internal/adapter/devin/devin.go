@@ -754,17 +754,20 @@ func isUnauthenticated(err error) bool {
 	return errors.As(err, &connectErr) && connectErr.Code() == connect.CodeUnauthenticated
 }
 
-// ResolveModelAlias 把客户端模型名改写为上游 uid：精确命中 → 大小写
-// 折叠命中 → "*" 兜底键；全部未中时原样返回。aliases 来自 config 加载
-// 期归一化（键已 trim、链式已展开、大小写重复被拒），折叠兜底只做
-// 线性扫描——别名表规模小，且只在精确未命中时发生。导出供 cmd/probe
-// 与代理保持同一路径语义。
+// ResolveModelAlias 把客户端模型名改写为上游 uid：精确命中 → 折叠命中 →
+// "*" 兜底键；全部未中时原样返回。折叠比较对大小写不敏感且忽略
+// '-'/'_'/'.'，覆盖客户端拼写与目录 uid 的标点变体（'GLM-5-3-Flash'、
+// 'glm_5_3_flash' 同命中 'glm-5.3-flash' 键）——仅靠大小写折叠时这类
+// 变体逐字上行被上游拒。aliases 来自 config 加载期归一化（键已 trim、
+// 链式已展开、大小写重复被拒），折叠兜底只做线性扫描——别名表规模小，
+// 且只在精确未命中时发生。导出供 cmd/probe 与代理保持同一路径语义。
 func ResolveModelAlias(aliases map[string]string, model string) string {
 	if target, ok := aliases[model]; ok {
 		return target
 	}
+	folded := foldModelKey(model)
 	for name, target := range aliases {
-		if strings.EqualFold(name, model) {
+		if foldModelKey(name) == folded {
 			return target
 		}
 	}
@@ -772,6 +775,19 @@ func ResolveModelAlias(aliases map[string]string, model string) string {
 		return target
 	}
 	return model
+}
+
+// foldModelKey 归一化别名比较键：去 '-'/'.'/'_' 并小写。模型名是 ASCII
+// 集合，run 级 Map 足够。仅差标点的两个键会同时命中同一输入——胜者
+// 取决于 map 迭代序（配置侧不拒标点重复，同大小写重复）。
+func foldModelKey(s string) string {
+	return strings.ToLower(strings.Map(func(r rune) rune {
+		switch r {
+		case '-', '_', '.':
+			return -1
+		}
+		return r
+	}, s))
 }
 
 // Stream 将一份中间请求转换为 Devin RPC，并返回一份中间响应事件流。

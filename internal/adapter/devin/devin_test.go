@@ -2617,19 +2617,25 @@ func TestDecoderToEncoderReplayContract(t *testing.T) {
 	}
 }
 
-// TestResolveModelAlias 钉住别名匹配优先级：精确 > 大小写折叠 > "*" 兜底，
-// 全未命中原样返回。
+// TestResolveModelAlias 钉住别名匹配优先级：精确 > 折叠（大小写+标点
+// 不敏感）> "*" 兜底，全未命中原样返回。
 func TestResolveModelAlias(t *testing.T) {
 	aliases := map[string]string{
-		"swe-2": "swe-2-max",
-		"GLM":   "glm-5-2",
-		"*":     "fallback-uid",
+		"swe-2":         "swe-2-max",
+		"GLM":           "glm-5-2",
+		"glm-5.3-flash": "glm-5-3-flash-low",
+		"*":             "fallback-uid",
 	}
 	cases := []struct{ in, want string }{
-		{"swe-2", "swe-2-max"},    // 精确
-		{"glm", "glm-5-2"},        // 折叠命中 GLM
-		{"SWE-2", "swe-2-max"},    // 折叠命中（精确未中）
-		{"other", "fallback-uid"}, // "*" 兜底
+		{"swe-2", "swe-2-max"},                 // 精确
+		{"glm", "glm-5-2"},                     // 折叠命中 GLM
+		{"SWE-2", "swe-2-max"},                 // 折叠命中（精确未中）
+		{"glm-5.3-flash", "glm-5-3-flash-low"}, // 精确
+		{"GLM-5.3-Flash", "glm-5-3-flash-low"}, // 大小写折叠
+		{"GLM-5-3-Flash", "glm-5-3-flash-low"}, // 全连字符变体
+		{"glm_5_3_flash", "glm-5-3-flash-low"}, // 下划线变体
+		{"glm.5.3.flash", "glm-5-3-flash-low"}, // 全点变体
+		{"other", "fallback-uid"},              // "*" 兜底
 	}
 	for _, c := range cases {
 		if got := ResolveModelAlias(aliases, c.in); got != c.want {
