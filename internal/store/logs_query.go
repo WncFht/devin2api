@@ -760,6 +760,43 @@ func (s *Store) LogRecentRPM(ctx context.Context, sc LogScope) (float64, error) 
 	return float64(n), nil
 }
 
+// LogRecentRPMByModel 按生效模型分组返回最近 60 秒内完成的非 499
+// 请求数；kh 非空时只看该令牌的行。替代逐模型 LogRecentRPM 循环
+// 的一次 GROUP BY 扫描。
+func (s *Store) LogRecentRPMByModel(ctx context.Context, kh string) (map[string]float64, error) {
+	return s.logRecentRPMGroup(ctx, logEModelExpr, LogScope{KeyHash: kh})
+}
+
+// LogRecentRPMByKeyHash 按 key_hash 分组返回最近 60 秒内完成的非
+// 499 请求数——替代逐令牌 LogRecentRPM 循环的一次 GROUP BY 扫描。
+func (s *Store) LogRecentRPMByKeyHash(ctx context.Context) (map[string]float64, error) {
+	return s.logRecentRPMGroup(ctx, `key_hash`, LogScope{})
+}
+
+// logRecentRPMGroup 是 LogRecentRPM 的分组形态：同一过滤口径，
+// GROUP BY dimExpr 一次扫出全图。
+func (s *Store) logRecentRPMGroup(ctx context.Context, dimExpr string, sc LogScope) (map[string]float64, error) {
+	cut := time.Now().Unix() - 60
+	scopeWhere, scopeArgs := sc.where()
+	rows, err := s.ro.QueryContext(ctx,
+		`SELECT `+dimExpr+`, COUNT(*) FROM logs WHERE status_code != 499 AND time > ? AND `+logRecentEndExpr+` > ?`+scopeWhere+` GROUP BY `+dimExpr,
+		append([]any{(cut - 3600) * 1000, cut}, scopeArgs...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]float64)
+	for rows.Next() {
+		var dim string
+		var n int64
+		if err := rows.Scan(&dim, &n); err != nil {
+			return nil, err
+		}
+		out[dim] = float64(n)
+	}
+	return out, rows.Err()
+}
+
 // LogModelLast 是单生效模型的最近时刻快照：Req* 是最近非 499 行
 // （含真实自增 id），OK* 是最近 2xx 行——ccLoad last_request_*/
 // last_success_at 的投影源。
