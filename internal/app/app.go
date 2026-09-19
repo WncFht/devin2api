@@ -426,33 +426,28 @@ func writeJSONError(writer http.ResponseWriter, status int, message string, errT
 	})
 }
 
-func writeAuthError(writer http.ResponseWriter, message string) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(http.StatusUnauthorized)
-	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"error": map[string]any{"message": message, "type": "unauthenticated", "code": nil, "param": nil},
-	})
+// rejectBody 描述一次管线前拒绝要下发的错误体。retryAfter 控制
+// Retry-After: 1——并发溢出(429)是「本地过载」不是服务端故障，
+// 503 会让下游网关误判渠道故障并冷却；排空(503)则要求下游立即
+// 换路重试，Refused 连接与挂在半路的流都换成一个可行动的错误。
+type rejectBody struct {
+	status     int
+	message    string
+	errType    string
+	code       any
+	retryAfter bool
 }
 
-// writeRateLimitError 返回 429 + Retry-After：并发溢出是「本地过载」不是
-// 服务端故障，503 会让下游网关误判渠道故障并冷却。
-func writeRateLimitError(writer http.ResponseWriter, message string) {
+// writeRejectError 统一管线前拒绝的错误响应——四个写方只差
+// status/type/code/Retry-After。
+func writeRejectError(writer http.ResponseWriter, body rejectBody) {
 	writer.Header().Set("Content-Type", "application/json")
-	writer.Header().Set("Retry-After", "1")
-	writer.WriteHeader(http.StatusTooManyRequests)
+	if body.retryAfter {
+		writer.Header().Set("Retry-After", "1")
+	}
+	writer.WriteHeader(body.status)
 	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"error": map[string]any{"message": message, "type": "rate_limit_error", "code": "rate_limit_exceeded", "param": nil},
-	})
-}
-
-// writeDrainingError 在优雅退出排空期返回 503 + Retry-After：实例即将退出，
-// 下游应立即换路重试；Refused 连接与挂在半路的流都换成一个可行动的错误。
-func writeDrainingError(writer http.ResponseWriter) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.Header().Set("Retry-After", "1")
-	writer.WriteHeader(http.StatusServiceUnavailable)
-	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"error": map[string]any{"message": "server is draining for restart; retry the request", "type": "server_error", "code": "server_draining", "param": nil},
+		"error": map[string]any{"message": body.message, "type": body.errType, "code": body.code, "param": nil},
 	})
 }
 
@@ -621,9 +616,21 @@ func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 		if reason != "" {
 			application.noteReject(reason, request, status)
 			if reason == obs.RejectDraining {
-				writeDrainingError(writer)
+				writeRejectError(writer, rejectBody{
+					status:     http.StatusServiceUnavailable,
+					message:    "server is draining for restart; retry the request",
+					errType:    "server_error",
+					code:       "server_draining",
+					retryAfter: true,
+				})
 			} else {
-				writeRateLimitError(writer, "server is busy, please try again later")
+				writeRejectError(writer, rejectBody{
+					status:     http.StatusTooManyRequests,
+					message:    "server is busy, please try again later",
+					errType:    "rate_limit_error",
+					code:       "rate_limit_exceeded",
+					retryAfter: true,
+				})
 			}
 			release()
 			return
@@ -684,10 +691,18 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 		if _, ok := application.authenticate(provided); !ok {
 			if provided == "" {
 				application.noteReject(obs.RejectMissingAPIKey, request, http.StatusUnauthorized)
-				writeAuthError(writer, "Missing API key")
+				writeRejectError(writer, rejectBody{
+					status:  http.StatusUnauthorized,
+					message: "Missing API key",
+					errType: "unauthenticated",
+				})
 			} else {
 				application.noteReject(obs.RejectInvalidAPIKey, request, http.StatusUnauthorized)
-				writeAuthError(writer, "Invalid API key")
+				writeRejectError(writer, rejectBody{
+					status:  http.StatusUnauthorized,
+					message: "Invalid API key",
+					errType: "unauthenticated",
+				})
 			}
 			return
 		}

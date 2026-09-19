@@ -409,7 +409,13 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	// 不如让客户端立刻换路。
 	if application.draining.Load() {
 		application.noteReject(obs.RejectDraining, request, http.StatusServiceUnavailable)
-		writeDrainingError(writer)
+		writeRejectError(writer, rejectBody{
+			status:     http.StatusServiceUnavailable,
+			message:    "server is draining for restart; retry the request",
+			errType:    "server_error",
+			code:       "server_draining",
+			retryAfter: true,
+		})
 		return
 	}
 	// 连接级准入：与上游并发槽分开计量，空闲长连接不占并发额度。
@@ -418,14 +424,11 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		defer func() { <-application.wsConns }()
 	default:
 		application.noteReject(obs.RejectWSConnectionLimit, request, http.StatusTooManyRequests)
-		writer.Header().Set("Content-Type", "application/json")
-		writer.WriteHeader(http.StatusTooManyRequests)
-		_ = json.NewEncoder(writer).Encode(map[string]any{
-			"error": map[string]any{
-				"message": "websocket connection limit reached; close an existing connection or retry later",
-				"type":    "rate_limit_error",
-				"code":    "responses_websocket_connection_limit_exceeded",
-			},
+		writeRejectError(writer, rejectBody{
+			status:  http.StatusTooManyRequests,
+			message: "websocket connection limit reached; close an existing connection or retry later",
+			errType: "rate_limit_error",
+			code:    "responses_websocket_connection_limit_exceeded",
 		})
 		return
 	}
