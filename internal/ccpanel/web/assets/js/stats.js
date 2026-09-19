@@ -648,18 +648,11 @@
     }
 
     function initStatsModelCombobox(initialValue) {
-      statsModelCombobox = window.createSearchableCombobox({
+      statsModelCombobox = window.initFilterCombobox({
         inputId: 'f_model',
-        dropdownId: 'f_model_dropdown',
-        attachMode: true,
-        allowCustomInput: true,
-        commitEmptyAsFirst: true,
-        initialValue: initialValue || '',
-        initialLabel: initialValue || t('trend.allModels'),
-        getOptions: () => [
-          { value: '', label: t('trend.allModels') },
-          ...statsModelOptions.map(m => ({ value: m, label: m }))
-        ],
+        allLabel: t('trend.allModels'),
+        initialValue,
+        getOptions: () => statsModelOptions.map(m => ({ value: m, label: m })),
         onSelect: () => {
           window.persistFilterState({
             key: STATS_FILTER_KEY,
@@ -810,8 +803,7 @@
     function formatRpm(rpm) {
       if (rpm < 0.01) return '';
       const color = getRpmColor(rpm);
-      const text = rpm >= 1000 ? (rpm / 1000).toFixed(1) + 'K' : rpm >= 1 ? rpm.toFixed(1) : rpm.toFixed(2);
-      return `<span class="stats-rpm-value" style="--stats-rpm-color:${color};">${text}</span>`;
+      return `<span class="stats-rpm-value" style="--stats-rpm-color:${color};">${formatRpmValue(rpm)}</span>`;
     }
 
     // 格式化全局RPM（峰值/平均/最近），固定格式，0显示为-
@@ -1174,48 +1166,14 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       };
     }
 
-    // 与后端 resolveRange 同口径（周一为一周起点、非法 custom 回落 today），
-    // 返回 [since, until) unix 秒。
-    function statsRangeSecs() {
-      const now = Date.now();
-      const dayMs = 86400000;
-      const beginDay = ms => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
-      const beginWeek = ms => { const s = beginDay(ms); return s - ((new Date(s).getDay() + 6) % 7) * dayMs; };
-      const beginMonth = ms => { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), 1).getTime(); };
-      const today = () => [beginDay(now) / 1000, now / 1000];
-      const filters = getStatsFilters();
-      switch (filters.range || 'today') {
-        case 'yesterday': {
-          const s = beginDay(now - dayMs);
-          return [s / 1000, (s + dayMs) / 1000];
-        }
-        case 'day_before_yesterday': {
-          const s = beginDay(now - 2 * dayMs);
-          return [s / 1000, (s + dayMs) / 1000];
-        }
-        case 'this_week': return [beginWeek(now) / 1000, now / 1000];
-        case 'last_week': {
-          const s = beginWeek(now - 7 * dayMs);
-          return [s / 1000, (s + 7 * dayMs) / 1000];
-        }
-        case 'this_month': return [beginMonth(now) / 1000, now / 1000];
-        case 'last_month': {
-          const d = new Date(now);
-          return [new Date(d.getFullYear(), d.getMonth() - 1, 1).getTime() / 1000, beginMonth(now) / 1000];
-        }
-        case 'custom': {
-          const s = Number(filters.customStartTime);
-          const u = Number(filters.customEndTime);
-          return (s > 0 && u > s) ? [s / 1000, Math.min(u, now) / 1000] : today();
-        }
-        default: return today();
-      }
-    }
-
     // 范围切片：≤8 天用 10 分钟桶，更长窗口用日表；细粒度窗外零命中
     // 时回落日表（自定义范围可能整段落在 points 覆盖之前）。
     function usageRangeTotals(u) {
-      const [since, until] = statsRangeSecs();
+      const filters = getStatsFilters();
+      const [since, until] = window.resolveRangeSecs(filters.range, {
+        startMs: filters.customStartTime,
+        endMs: filters.customEndTime
+      });
       if (until - since <= 8 * 86400) {
         const t = sumUsageTotals(u.points.filter(p => p.at >= since && p.at < until));
         if (t.requests > 0) return t;

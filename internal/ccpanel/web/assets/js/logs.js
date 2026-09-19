@@ -1719,42 +1719,23 @@ function mergeLogsFilterOptions(entries) {
 }
 
 function initLogsModelCombobox(initialValue) {
-  if (typeof window.createSearchableCombobox !== 'function') return;
-  if (!document.getElementById('f_model')) return;
-  logsModelCombobox = window.createSearchableCombobox({
+  logsModelCombobox = window.initFilterCombobox({
     inputId: 'f_model',
-    dropdownId: 'f_model_dropdown',
-    attachMode: true,
-    initialValue: initialValue || '',
-    initialLabel: initialValue || t('trend.allModels'),
-    allowCustomInput: true,
-    commitEmptyAsFirst: true,
-    getOptions: () => [
-      { value: '', label: t('trend.allModels') },
-      ...(window.availableLogsModels || []).map(m => ({ value: m, label: m }))
-    ],
-    onSelect: () => {
-      applyFilter();
-    }
+    allLabel: t('trend.allModels'),
+    initialValue,
+    getOptions: () => (window.availableLogsModels || []).map(m => ({ value: m, label: m })),
+    onSelect: applyFilter
   });
 }
 
 function initLogsStatusCombobox(initialValue) {
-  if (typeof window.createSearchableCombobox !== 'function') return;
-  if (!document.getElementById('f_status')) return;
-  logsStatusCombobox = window.createSearchableCombobox({
+  logsStatusCombobox = window.initFilterCombobox({
     inputId: 'f_status',
-    dropdownId: 'f_status_dropdown',
-    attachMode: true,
-    initialValue: initialValue || '',
-    initialLabel: initialValue || t('logs.allStatusCodes'),
-    // 状态表达式（200 / 4xx / >=400 / !2xx / 逗号 OR）——自定义输入放行
-    allowCustomInput: true,
-    commitEmptyAsFirst: true,
+    allLabel: t('logs.allStatusCodes'),
+    initialValue,
     getOptions: () => {
       const seen = new Set(LOGS_STATUS_PRESETS);
       return [
-        { value: '', label: t('logs.allStatusCodes') },
         ...LOGS_STATUS_PRESETS.map(v => ({ value: v, label: v })),
         ...(window.availableLogsStatusCodes || [])
           .map(String)
@@ -1762,55 +1743,32 @@ function initLogsStatusCombobox(initialValue) {
           .map(code => ({ value: code, label: code }))
       ];
     },
-    onSelect: () => {
-      applyFilter();
-    }
+    onSelect: applyFilter
   });
 }
 
 // 失败阶段筛选：候选来自 ErrStage 枚举快照（LOGS_ERROR_STAGES），
 // allowCustomInput 让尚未进枚举的新阶段也能直接输入提交。
 function initLogsErrorStageCombobox(initialValue) {
-  if (typeof window.createSearchableCombobox !== 'function') return;
-  if (!document.getElementById('f_error_stage')) return;
-  logsErrorStageCombobox = window.createSearchableCombobox({
+  logsErrorStageCombobox = window.initFilterCombobox({
     inputId: 'f_error_stage',
-    dropdownId: 'f_error_stage_dropdown',
-    attachMode: true,
-    initialValue: initialValue || '',
+    allLabel: i18nText('logs.allErrorStages', '全部阶段'),
+    initialValue,
     initialLabel: initialValue
       ? logsErrorStageOptionLabel(initialValue)
       : i18nText('logs.allErrorStages', '全部阶段'),
-    allowCustomInput: true,
-    commitEmptyAsFirst: true,
-    getOptions: () => [
-      { value: '', label: i18nText('logs.allErrorStages', '全部阶段') },
-      ...LOGS_ERROR_STAGES.map(stage => ({ value: stage, label: logsErrorStageOptionLabel(stage) }))
-    ],
-    onSelect: () => {
-      applyFilter();
-    }
+    getOptions: () => LOGS_ERROR_STAGES.map(stage => ({ value: stage, label: logsErrorStageOptionLabel(stage) })),
+    onSelect: applyFilter
   });
 }
 
 function initLogsAccountCombobox(initialValue) {
-  if (typeof window.createSearchableCombobox !== 'function') return;
-  if (!document.getElementById('f_account')) return;
-  logsAccountCombobox = window.createSearchableCombobox({
+  logsAccountCombobox = window.initFilterCombobox({
     inputId: 'f_account',
-    dropdownId: 'f_account_dropdown',
-    attachMode: true,
-    initialValue: initialValue || '',
-    initialLabel: initialValue || t('logs.allAccounts'),
-    allowCustomInput: true,
-    commitEmptyAsFirst: true,
-    getOptions: () => [
-      { value: '', label: t('logs.allAccounts') },
-      ...(window.availableLogsAccounts || []).map(name => ({ value: name, label: name }))
-    ],
-    onSelect: () => {
-      applyFilter();
-    }
+    allLabel: t('logs.allAccounts'),
+    initialValue,
+    getOptions: () => (window.availableLogsAccounts || []).map(name => ({ value: name, label: name })),
+    onSelect: applyFilter
   });
 }
 
