@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/debuglog"
@@ -262,6 +263,10 @@ func (entry *detachedEntry) len() int {
 type detachedRegistry struct {
 	mu      sync.Mutex
 	entries map[string]*detachedEntry
+	// draining 由 Adapter.BeginDrain 置位（单调，不经 mu）：排空中的进程
+	// 即将退出，此时登记的脱钩条目永远等不到挂接方——泵白烧上游算力到
+	// 进程死。detachable() 读它拒收准入；置位后不再清零（排空不可逆）。
+	draining atomic.Bool
 	// 计数与事件环全在 mu 下读写：04 标记行只记 detach/attach 两个
 	// 登记时刻，泵终局、移除原因与孤儿浪费没有其它观测面——计数器
 	// 回答「缓存兑现了几次救援、烧了多少无人认领的上游算力」。

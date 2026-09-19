@@ -352,9 +352,11 @@ func (adapter *Adapter) Close() {
 
 // BeginDrain 实现 app 排空钩子（可选接口，App.BeginDrain 经断言调用）：
 // 排空起点即停发一切保温 ping——排空语义是不再制造新上游工作，保留表
-// 留作 stats 观测，条目自然到期退役。
+// 留作 stats 观测，条目自然到期退役。脱钩缓存同步闩门：此刻登记的条目
+// 随进程退出蒸发，挂接方永远来不了，拒收让断连流直接随客户端死掉。
 func (adapter *Adapter) BeginDrain() {
 	adapter.warm.BeginDrain()
+	adapter.detached.draining.Store(true)
 }
 
 // FlushPendingWindows 冲刷闸门窗口行重放缓冲（排空收尾的 best-effort
@@ -2261,11 +2263,13 @@ func (stream *responseStream) progressBound() time.Duration {
 	return stream.progressWindow()
 }
 
-// detachable 判定这条流客户端断开后是否值得脱钩续命：六个条件缺一
+// detachable 判定这条流客户端断开后是否值得脱钩续命：七个条件缺一
 // 不可——缓存挂接面注入（registry/detachKey/entry 非空，Adapter.Stream
 // 才有；测试裸流恒假）、未被主动中断（面板 abort/排空强掐与客户端
 // 断连同走 ctx.Done，但缓存只救断连：被掐死的流准入会续烧上游至
-// running TTL，同键重试还会重放尸体）、缓冲未截断（客户端还在场时
+// running TTL，同键重试还会重放尸体）、缓存未闩门（排空中的进程即将
+// 退出，登记的条目随进程死蒸发，挂接方永远来不了——续烧的上游算力
+// 纯浪费，断连流直接随客户端死掉）、缓冲未截断（客户端还在场时
 // 缓冲就越预算的流续命也产不出完整重放，直接按不可脱钩杀）、已产出
 // 过内容（pre-content 流没有重放价值，且重放键会污染缓存）、语义未
 // 收口（已见 stopReason/停止序列的流只剩传输尾帧，续命等不到新
@@ -2276,7 +2280,8 @@ func (stream *responseStream) progressBound() time.Duration {
 func (stream *responseStream) detachable() bool {
 	return !stream.detached.Load() && !stream.finished.Load() &&
 		!stream.recorder.WasAborted() &&
-		stream.registry != nil && stream.detachKey != "" && stream.entry != nil &&
+		stream.registry != nil && !stream.registry.draining.Load() &&
+		stream.detachKey != "" && stream.entry != nil &&
 		!stream.entry.isTruncated() &&
 		stream.producedEvents.Load() && !stream.decoder.hasStopReason && !stream.decoder.stoppedByPattern
 }
@@ -2292,7 +2297,8 @@ func (stream *responseStream) detachable() bool {
 // stoppedByPattern 不卡：断连落在「语义已收口、只剩尾帧」的窗口时登记
 // 仍兑现前缀价值，泵随后自然定态 completed。
 func (stream *responseStream) admitIntent() bool {
-	return stream.registry != nil && stream.detachKey != "" && stream.entry != nil &&
+	return stream.registry != nil && !stream.registry.draining.Load() &&
+		stream.detachKey != "" && stream.entry != nil &&
 		stream.producedEvents.Load() && !stream.finished.Load() &&
 		!stream.entry.isTruncated() && !stream.recorder.WasAborted()
 }

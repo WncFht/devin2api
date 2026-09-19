@@ -375,6 +375,50 @@ func TestAbortedStreamNotDetachable(t *testing.T) {
 	}
 }
 
+// TestDrainingStreamNotDetachable 钉住排空窗不登记：部署排空期间客户端
+// 断连照常进脱钩判定，但本进程即将退出——准入的条目等不到挂接方，后台泵
+// 白烧上游算力到进程死。闩门后断连流直接随客户端死掉，与旧实现同形态。
+func TestDrainingStreamNotDetachable(t *testing.T) {
+	registry := newDetachedRegistry(nil, "")
+	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	defer close(receiver.release)
+	stream := detachedTestStream(registry, "k8", receiver)
+	ctx, cancel := context.WithCancel(context.Background())
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	registry.draining.Store(true)
+	cancel()
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	if !stream.detached.Load() {
+		// detached 置位只表「生命周期已处置」——排空期断连应被杀泵 CAS
+		// 认领而非挂起；准入与否由缓存侧 lookup 裁决。
+		t.Fatal("stream escaped disposal while the registry is draining")
+	}
+	if got := registry.lookup("k8"); got != nil {
+		t.Fatal("stream must not be admitted to a draining cache")
+	}
+}
+
+// TestBeginDrainLatchesDetachedRegistry 钉住排空接线：Adapter.BeginDrain
+// 闩死本 lane 的脱钩缓存，此后断连流不再登记。
+func TestBeginDrainLatchesDetachedRegistry(t *testing.T) {
+	registry := newDetachedRegistry(nil, "")
+	adapter := warmTestAdapter()
+	adapter.detached = registry
+	adapter.warm = newCacheWarmer(adapter, WarmConfig{})
+	t.Cleanup(adapter.warm.Close)
+	adapter.BeginDrain()
+	if !registry.draining.Load() {
+		t.Fatal("BeginDrain must latch the detached registry")
+	}
+}
+
 // TestDetachedEvictStopsPump 钉住容量淘汰的杀泵路径：evict 掐的是
 // drainCancel（一次性 CancelFunc），后台泵走 ctx.Done 退场并把条目
 // 收成 failed——截断前缀不得误标 completed 重放给同键重试。
