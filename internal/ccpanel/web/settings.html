@@ -11,10 +11,8 @@
   <title data-i18n="settings.title">系统设置 - Devin2API</title>
   <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
   <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
-  <link rel="stylesheet" href="/web/assets/css/highlight-theme.css?v=__VERSION__">
   <link rel="stylesheet" href="/web/assets/css/settings.css?v=__VERSION__">
-  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
+  <link rel="stylesheet" href="/web/assets/css/highlight-theme.css?v=__VERSION__">
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/template-engine.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/highlight.min.js?v=__VERSION__"></script>
@@ -23,9 +21,9 @@
   <script defer src="/web/assets/js/ui-api.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-format.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-filters.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-notify.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-topbar.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-combobox.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/ui-autorefresh.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-codeview.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/settings.js?v=__VERSION__"></script>
@@ -37,13 +35,24 @@
         <h1 class="visually-hidden" data-i18n="nav.settings">设置</h1>
         <section id="settings-group-nav-section" class="mt-2 mb-2 settings-group-nav-section" hidden>
           <div class="time-range-container settings-group-nav-container">
-            <div id="settings-group-nav" class="time-range-selector settings-group-nav">
+            <div id="settings-group-nav" class="time-range-selector seg settings-group-nav">
               <!-- 动态填充：分组快捷跳转 -->
             </div>
           </div>
         </section>
 
         <section class="card mb-6">
+          <div class="settings-card-header">
+            <h3 class="section-title" data-i18n="settings.table.title">面板设置</h3>
+            <div class="settings-obs-actions">
+              <button id="runtime-metrics-btn" type="button" class="btn btn-secondary settings-runtime-metrics-btn" data-i18n="settings.runtimeMetrics.button">
+                运行状态
+              </button>
+              <button id="process-log-btn" type="button" class="btn btn-secondary" data-i18n="settings.processLog.button">
+                进程日志
+              </button>
+            </div>
+          </div>
           <div class="table-container settings-table-container mobile-card-table-container">
             <table class="modern-table settings-table mobile-card-table">
               <colgroup>
@@ -57,12 +66,6 @@
             </table>
           </div>
           <div class="settings-save-actions">
-            <button id="runtime-metrics-btn" type="button" class="btn btn-secondary settings-runtime-metrics-btn" data-i18n="settings.runtimeMetrics.button">
-              运行状态
-            </button>
-            <button id="process-log-btn" type="button" class="btn btn-secondary" data-i18n="settings.processLog.button">
-              进程日志
-            </button>
             <button id="save-all-btn" class="btn btn-primary settings-save-btn" data-i18n="settings.saveAll">
               保存所有更改
             </button>

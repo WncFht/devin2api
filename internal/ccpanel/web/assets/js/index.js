@@ -263,6 +263,9 @@
       const successRequests = data ? (data.success_requests || 0) : 0;
       const errorRequests = data ? (data.error_requests || 0) : 0;
 
+      // 零流量渠道收成 slim 卡；DOM id 契约不动，流量恢复即还原
+      card.classList.toggle('channel-card--empty', totalRequests === 0);
+
       const successRate = totalRequests > 0
         ? ((successRequests / totalRequests) * 100).toFixed(1) + '%'
         : '—';
@@ -277,8 +280,7 @@
       // 无请求时不着色，避免 0 流量被误读为故障
       rateEl.classList.remove('tone-healthy', 'tone-warning', 'tone-critical');
       if (totalRequests > 0) {
-        const rate = successRequests / totalRequests;
-        rateEl.classList.add(rate >= 0.95 ? 'tone-healthy' : rate >= 0.8 ? 'tone-warning' : 'tone-critical');
+        rateEl.classList.add('tone-' + window.ServiceHealth.classifyRate(successRequests / totalRequests));
       }
 
       const inputTokens = data ? (data.total_input_tokens || 0) : 0;
@@ -379,8 +381,7 @@
       const err = t0.errors || 0;
       const rate = req > 0 ? (((req - err) / req) * 100).toFixed(1) + '%' : '—';
       const rateState = req > 0 ? (req - err) / req : null;
-      const rateTone = rateState === null ? '' :
-        window.toneClass(rateState >= 0.95 ? 'healthy' : rateState >= 0.8 ? 'warning' : 'critical');
+      const rateTone = rateState === null ? '' : window.toneClass(window.ServiceHealth.classifyRate(rateState));
       const credits = t0.credit_cost || 0;
       return `<div class="card channel-card">
         <div class="channel-card-header">

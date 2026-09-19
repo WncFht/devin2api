@@ -1,13 +1,5 @@
 /* 登录页专属样式 */
 
-/* ===== 导航组件 ===== */
-
-.logo-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-lg);
-}
-
 /* ===== 登录页面样式 ===== */
 
 .login-page {

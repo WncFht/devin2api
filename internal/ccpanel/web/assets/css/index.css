@@ -76,6 +76,57 @@
   display: none;
 }
 
+/* 零流量渠道卡收成单行 slim 形态：DOM 结构不动（id 契约保留，流量恢复即还原），
+   只隐数据区、缩图标与留白，右侧给「暂无请求」提示。 */
+
+.channel-empty-hint {
+  display: none;
+}
+
+.channel-card--empty {
+  padding: var(--space-3) var(--space-4);
+  box-shadow: none;
+}
+
+.channel-card--empty:hover {
+  box-shadow: var(--shadow-sm);
+}
+
+.channel-card--empty .channel-card-header {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.channel-card--empty .channel-card-title {
+  font-size: var(--text-base);
+}
+
+.channel-card--empty .channel-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-md);
+  box-shadow: none;
+}
+
+.channel-card--empty .channel-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.channel-card--empty .channel-cost,
+.channel-card--empty .channel-metrics,
+.channel-card--empty .token-stats {
+  display: none;
+}
+
+.channel-card--empty .channel-empty-hint {
+  display: inline;
+  font-size: var(--text-xs);
+  color: var(--neutral-500);
+  white-space: nowrap;
+}
+
 .cost-label {
   display: block;
   font-size: var(--text-xs);
@@ -514,19 +565,6 @@
   }
 }
 
-@media (max-width: 480px) {
-.grid-cols-2 {
-    grid-template-columns: repeat(1, 1fr);
-  }
-.channel-metrics {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-.grid {
-  display: grid;
-}
-
 .gap-space-3 {
   gap: var(--space-3);
 }
@@ -537,4 +575,8 @@
 
 .animate-delay-2 {
   animation-delay: 0.2s;
+}
+
+.animate-delay-3 {
+  animation-delay: 0.3s;
 }

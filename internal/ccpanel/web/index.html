@@ -12,19 +12,16 @@
   <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
   <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
   <link rel="stylesheet" href="/web/assets/css/index.css?v=__VERSION__">
-  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/date-range-selector.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/modal.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-api.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-format.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-filters.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-notify.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-topbar.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-combobox.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-autorefresh.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/ui-codeview.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/template-engine.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/service-health.js?v=__VERSION__"></script>
@@ -40,24 +37,13 @@
         <!-- 时间范围选择器 -->
         <section class="mb-4">
           <div class="time-range-container">
-            <div id="index-time-range" class="time-range-selector"></div>
+            <div id="index-time-range" class="time-range-selector seg"></div>
           </div>
-        </section>
-
-        <!-- 四个入口端点固定展示 -->
-        <section class="mb-6">
-          <div class="grid grid-cols-2 animate-slide-up animate-delay-1 gap-space-3" id="channel-grid">
-            <!-- 渠道卡片由 index.js 按 tpl-channel-card 模板渲染 -->
-          </div>
-        </section>
-        <!-- 用量概览：今日聚合 + 高频令牌 + 逐号配额（admin 专属；加载失败保持隐藏） -->
-        <section class="mb-6" id="usage-section" hidden>
-          <div class="usage-grid animate-slide-up animate-delay-2" id="usage-grid"></div>
         </section>
 
         <!-- 服务健康监测 -->
         <section class="mb-6">
-          <div class="card service-health-card animate-slide-up animate-delay-2" aria-labelledby="service-health-title">
+          <div class="card service-health-card animate-slide-up animate-delay-1" aria-labelledby="service-health-title">
             <div class="service-health-header">
               <h2 id="service-health-title" class="service-health-title" data-i18n="index.health.title">服务健康监测</h2>
               <div class="service-health-summary">
@@ -97,6 +83,17 @@
           </div>
         </section>
 
+        <!-- 四个入口端点固定展示 -->
+        <section class="mb-6">
+          <div class="grid grid-cols-2 animate-slide-up animate-delay-2 gap-space-3" id="channel-grid">
+            <!-- 渠道卡片由 index.js 按 tpl-channel-card 模板渲染 -->
+          </div>
+        </section>
+        <!-- 用量概览：今日聚合 + 高频令牌 + 逐号配额（admin 专属；加载失败保持隐藏） -->
+        <section class="mb-6" id="usage-section" hidden>
+          <div class="usage-grid animate-slide-up animate-delay-3" id="usage-grid"></div>
+        </section>
+
       </div>
     </main>
   </div>
@@ -114,6 +111,7 @@
           <span class="cost-label" data-i18n="common.cost">成本</span>
           <span class="cost-value" id="type-{{type}}-cost">$0.00</span>
         </div>
+        <span class="channel-empty-hint" data-i18n="index.channelEmpty">暂无请求</span>
       </div>
       <div class="channel-metrics">
         <div class="metric-item">

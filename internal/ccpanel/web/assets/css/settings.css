@@ -29,6 +29,27 @@
   max-width: 100%;
 }
 
+/* 卡片头：标题左置，运行状态/进程日志两个观测入口右置 */
+
+.settings-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.settings-card-header .section-title {
+  margin: 0;
+}
+
+.settings-obs-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .settings-input--number {
   width: 100px;
   text-align: right;
@@ -53,10 +74,6 @@
   margin-left: 16px;
 }
 
-.settings-group-nav-section[hidden] {
-  display: none !important;
-}
-
 .settings-group-nav-container {
   justify-content: flex-end;
 }
@@ -68,16 +85,8 @@
   overflow: visible;
 }
 
-.settings-group-nav .time-range-btn {
+.settings-group-nav .seg-btn {
   padding-inline: 12px;
-}
-
-.settings-input {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-secondary);
-  color: var(--color-text);
-  font-size: var(--text-13);
 }
 
 .setting-data-row--dirty {
@@ -219,7 +228,7 @@
 
 .runtime-transcript-summary strong {
   color: var(--color-text);
-  font-size: 22px;
+  font-size: var(--text-2xl);
 }
 
 .runtime-transcript-summary span {
@@ -449,9 +458,6 @@
 .settings-group-nav-container {
     padding: 0 2px 2px;
   }
-.settings-group-nav-section {
-    display: none !important;
-  }
 .settings-table.mobile-card-table tbody .setting-data-row {
     grid-template-columns: minmax(0, 1fr) 56px;
   }
@@ -572,16 +578,10 @@
   white-space: pre;
 }
 
-/* styles.css ≤768px 把分组导航整段 display:none !important（7 组堆成长页）；
-   这里改回横向滚动条——time-range-selector 窄屏本就 overflow-x:auto，
-   只需复位桌面端对 .settings-group-nav 的 wrap/visible 覆盖。
-   !important 必需：同优先级拼加载顺序，本文件后加载；[hidden] 选择器
-   优先级更高，单组时仍隐藏，不受影响。 */
+/* 窄屏分组导航改横向滚动条：section 显隐只由 [hidden] 属性（单组时 JS
+   收起）决定，不再叠 display 规则；这里只复位桌面端对 .settings-group-nav
+   的 wrap/visible 覆盖。 */
 @media (max-width: 768px) {
-  .settings-group-nav-section {
-    display: block !important;
-  }
-
   .settings-group-nav-container {
     justify-content: flex-start;
   }

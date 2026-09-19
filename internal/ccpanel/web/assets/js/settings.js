@@ -1,6 +1,6 @@
 // 系统设置页面
 const t = window.t;
-const i18nText = window.i18nText || ((key, fallback) => fallback || key);
+const i18nText = window.i18nText;
 
 let originalSettings = {}; // 保存原始值用于比较
 let settingDefinitions = new Map();
@@ -577,24 +577,27 @@ function formatRuntimeMilliseconds(value) {
   return formatRuntimeSeconds(numeric / 1000);
 }
 
+// metric.format → formatter 的分派表；无 format 走 formatRuntimeInteger。
+// 三个时刻源三种刻度（unix 毫秒/秒/RFC3339）各占一键，不复用。
+const runtimeMetricFormatters = {
+  bytes: formatRuntimeBytes,
+  duration: formatRuntimeDuration,
+  seconds: formatRuntimeSeconds,
+  durationNs: formatRuntimeDurationNs,
+  milliseconds: formatRuntimeMilliseconds,
+  percent: formatRuntimePercent,
+  decimal: formatRuntimeNumber,
+  boolean: formatRuntimeBoolean,
+  unixMilliseconds: formatRuntimeTimestamp,
+  unixSeconds: formatRuntimeUnixSeconds,
+  isoTime: formatRuntimeISOTime,
+  text: (value) => (value === null || value === undefined || String(value).trim() === '' ? '—' : String(value)),
+};
+
 function formatRuntimeMetric(metric, stats) {
   if (metric.zeroUnavailable && normalizeRuntimeMetric(stats[metric.key]) === 0) return '—';
-  if (metric.format === 'bytes') return formatRuntimeBytes(stats[metric.key]);
-  if (metric.format === 'duration') return formatRuntimeDuration(stats[metric.key]);
-  if (metric.format === 'seconds') return formatRuntimeSeconds(stats[metric.key]);
-  if (metric.format === 'durationNs') return formatRuntimeDurationNs(stats[metric.key]);
-  if (metric.format === 'milliseconds') return formatRuntimeMilliseconds(stats[metric.key]);
-  if (metric.format === 'percent') return formatRuntimePercent(stats[metric.key]);
-  if (metric.format === 'decimal') return formatRuntimeNumber(stats[metric.key]);
-  if (metric.format === 'boolean') return formatRuntimeBoolean(stats[metric.key]);
-  if (metric.format === 'unixMilliseconds') return formatRuntimeTimestamp(stats[metric.key]);
-  if (metric.format === 'unixSeconds') return formatRuntimeUnixSeconds(stats[metric.key]);
-  if (metric.format === 'isoTime') return formatRuntimeISOTime(stats[metric.key]);
-  if (metric.format === 'text') {
-    const value = stats[metric.key];
-    return value === null || value === undefined || String(value).trim() === '' ? '—' : String(value);
-  }
-  return formatRuntimeInteger(stats[metric.key]);
+  const formatter = runtimeMetricFormatters[metric.format];
+  return formatter ? formatter(stats[metric.key]) : formatRuntimeInteger(stats[metric.key]);
 }
 
 function renderRuntimeMetricCard(metric, stats) {
@@ -1473,13 +1476,13 @@ function renderGroupNav(groups) {
   for (let i = 0; i < groups.length; i++) {
     const g = groups[i];
     const btn = document.createElement('button');
-    btn.className = 'time-range-btn' + (i === 0 ? ' active' : '');
+    btn.className = 'seg-btn' + (i === 0 ? ' active' : '');
     btn.dataset.group = g.id;
     btn.textContent = i18nText(`settings.nav.${g.id}`, g.name);
     btn.title = g.name;
     btn.addEventListener('click', () => {
       // 移除所有按钮的 active 状态
-      nav.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
+      nav.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       // 滚动到对应分组
       const target = document.getElementById(`settings-group-${g.id}`);
