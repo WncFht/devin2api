@@ -822,11 +822,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 路径（目录校验/构建/闸门/发送）都不发生——重放不消耗上游。
 	detachKey := detachedRequestKey(request, model)
 	if entry := adapter.detached.lookup(detachKey); entry != nil {
-		// 标记字段读取收进 entry.mu：originDir/state 在脱钩登记与
-		// finish 定态时都可能被并发写。
-		entry.mu.Lock()
-		originDir, state, buffered := entry.originDir, entry.state, len(entry.events)
-		entry.mu.Unlock()
+		originDir, state, buffered := entry.marker()
 		detail := map[string]any{
 			"key":             detachKey,
 			"origin_dir":      originDir,
@@ -1089,30 +1085,6 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 // 登记——锁内阻塞段（tryResume/extend/托管搜索的 gate.wait+dial，内层
 // maxConnectAttempts 重试，实测剩余 ~95s）会把持 mu 的判定推迟到段末，
 // 且段末 finished=true 时 detachable() 已假、登记整段丢失。占位路径只用
-// 单调位判定、CAS 认领后条目即刻落册（对同键 lookup、面板 abort 的
-// 清场与 census 立即可见，台账行同步持久化），后台泵不持锁启动、首个
-// Recv 随 mu 释放自然进场。资格不符或占位旁落才回落持 mu 的终局判定
-// （可脱钩则正式脱钩，否则杀泵）。
-func (stream *responseStream) watchClientCtx(ctx context.Context) {
-	<-ctx.Done()
-	if stream.admitIntent() {
-		stream.admitDetached(ctx)
-	}
-	if stream.detached.Load() {
-		return
-	}
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	if stream.detached.Load() {
-		return
-	}
-	if stream.detachable() {
-		stream.detach(ctx)
-	} else {
-		stream.cancel()
-	}
-}
-
 // isTransientConnectError 判断错误是否为传输层断裂（可重试、记
 // devin_transport）。connect-go 会把底层传输失败统一包成 connect.Error——
 // RoundTrip/读写断 → CodeUnavailable（duplex_http_call.go），envelope 帧
@@ -2028,165 +2000,10 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		stream.queue = stream.queue[1:]
 		// 下发即缓冲：脱钩后重试方需要含前缀的完整事件序列，
 		// tee 在返回点才能覆盖 start 扣留在内的全部对外事件。
-		if stream.entry != nil && stream.entry.append(event) {
-			// 本次追加越过字节预算：缓冲冻结成截断前缀+终止错误。
-			// 截断发生数在冻结点记账（与条目之后的移除路径解耦）；
-			// 记 04 标记行给「flood  drain 进缓存」留取证——detached/
-			// detached_attach 之外的第三条脱钩标记。
-			stream.registry.noteTruncated(stream.detachKey, stream.entry)
-			detail := map[string]any{
-				"key":          stream.detachKey,
-				"budget_bytes": detachedMaxBufferedBytes,
-			}
-			stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_truncated", detail)
-			// 后台泵经同一 tee 点触发的截断落在 Complete 之后：04 标记行
-			// 走 closed 豁免照常落库；meta 镜像追加同时排一条终态 meta
-			// 重写任务，detached_events 覆盖脱钩泵的余生而非停在定稿点。
-			stream.recorder.NoteDetachedEvent("detached_truncated", detail)
-		}
+		stream.teeDetached(event)
 		return event, nil
 	}
 	return llm.ResponseEvent{}, io.EOF
-}
-
-// detachable 判定这条流客户端断开后是否值得脱钩续命：七个条件缺一
-// 不可——缓存挂接面注入（registry/detachKey/entry 非空，Adapter.Stream
-// 才有；测试裸流恒假）、未被主动中断（面板 abort/排空强掐与客户端
-// 断连同走 ctx.Done，但缓存只救断连：被掐死的流准入会续烧上游至
-// running TTL，同键重试还会重放尸体）、缓存未闩门（排空中的进程即将
-// 退出，登记的条目随进程死蒸发，挂接方永远来不了——续烧的上游算力
-// 纯浪费，断连流直接随客户端死掉）、缓冲未截断（客户端还在场时
-// 缓冲就越预算的流续命也产不出完整重放，直接按不可脱钩杀）、已产出
-// 过内容（pre-content 流没有重放价值，且重放键会污染缓存）、语义未
-// 收口（已见 stopReason/停止序列的流只剩传输尾帧，续命等不到新
-// 内容）、流未终结（finished 的流没有可续命的泵：handler 返回同样
-// 取消请求 ctx，哨兵必然醒来一次——产过内容但未带 stopReason 的
-// 失败收尾如 midcontent 式截断，少了这道闸会把死流登记进缓存白占
-// 容量）。已脱钩的流不可再脱钩。
-func (stream *responseStream) detachable() bool {
-	return !stream.detached.Load() && !stream.finished.Load() &&
-		!stream.recorder.WasAborted() &&
-		stream.registry != nil && !stream.registry.draining.Load() &&
-		stream.detachKey != "" && stream.entry != nil &&
-		!stream.entry.isTruncated() &&
-		stream.producedEvents.Load() && !stream.decoder.hasStopReason && !stream.decoder.stoppedByPattern
-}
-
-// admitIntent 是断连时刻的占位登记资格（admitDetached 锁外快路的准入
-// 判定）：与 detachable() 的分工是「断开瞬间值不值得留」对「持锁终局
-// 该不该留」——判据只收单调位与非可变字段（producedEvents/finished/
-// detached、entry.truncated、recorder.aborted 全单向翻转，registry/key/
-// entry 构造期定型），锁外读到的 true 恒为已成立事实。finished 仍在列：
-// 正常完结的请求 handler 返回即取消 ctx、哨兵必醒，那时 finished 已真，
-// 拒绝占位才不致把每条成功请求都存进缓存；断连落在锁内阻塞段的场景
-// 段未收束 finished 必假，洞例照样占得上位。hasStopReason/
-// stoppedByPattern 不卡：断连落在「语义已收口、只剩尾帧」的窗口时登记
-// 仍兑现前缀价值，泵随后自然定态 completed。
-func (stream *responseStream) admitIntent() bool {
-	return stream.registry != nil && !stream.registry.draining.Load() &&
-		stream.detachKey != "" && stream.entry != nil &&
-		stream.producedEvents.Load() && !stream.finished.Load() &&
-		!stream.entry.isTruncated() && !stream.recorder.WasAborted()
-}
-
-// admitDetached 是登记动作的唯一实现：detached CAS 认领「登记一次」——
-// 占位哨兵（锁外快路）与持 mu 的 detach() 共用，后到者空转。赢家把
-// originDir/drainCancel 落 entry、registry.admit 落册（台账行同步持久化），
-// 写 04 detached 标记与 meta 镜像，再起后台泵。锁序：本方法不持
-// stream.mu 也可运行，内部只依次取 entry.mu→registry.mu→entry.mu，
-// 不破坏 stream.mu > registry.mu > entry.mu 的既有顺序。
-func (stream *responseStream) admitDetached(ctx context.Context) {
-	if !stream.detached.CompareAndSwap(false, true) {
-		return
-	}
-	entry := stream.entry
-	entry.mu.Lock()
-	entry.originDir = stream.recorder.Dir()
-	entry.mu.Unlock()
-	drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), detachedRunningTTL)
-	entry.mu.Lock()
-	entry.drainCancel = drainCancel
-	entry.mu.Unlock()
-	stream.registry.admit(stream.detachKey, entry)
-	detail := map[string]any{
-		"key":             stream.detachKey,
-		"buffered_events": entry.len(),
-	}
-	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached", detail)
-	stream.recorder.NoteDetachedEvent("detached", detail)
-	go stream.pumpDetached(drainCtx, drainCancel, entry)
-}
-
-// detach 把流从客户端生命周期解耦（持 mu 路径）：停掉两个看门狗计时器
-// 后经 admitDetached 登记——占位哨兵先 CAS 时本调用只剩停表与兑入已
-// 认领的 detached 标记。调用方须持 stream.mu（消费方 Recv 与哨兵慢路
-// 都满足）；由此串行保证同一时刻只有一个 Recv 在场，后台泵的第一轮
-// Recv 会等持锁方退场。
-func (stream *responseStream) detach(ctx context.Context) {
-	if stream.stall != nil {
-		stream.stall.Stop()
-		stream.stall = nil
-	}
-	if stream.progress != nil {
-		stream.progress.Stop()
-		stream.progress = nil
-	}
-	stream.admitDetached(ctx)
-}
-
-// pumpDetached 是脱钩后的后台泵：续消费直到终态——缓冲经 tee 持续追加，
-// 挂接方按序追帧。泵的存活上界是 running TTL：到期/被容量淘汰掐
-// drainCtx 退场时补一条终局错误——截断前缀若误标 completed 会把半成品
-// 当完整响应重放给同键重试。退场必收尸：TTL/淘汰走的 ctx.Done 分支不
-// 杀泵（detached 态直接退场），不补这一刀泵协程会随 streamBase 永久
-// 阻塞在 Receive 上；kill 在 mu 下拿当前 cancel，换流后也不会杀错。
-func (stream *responseStream) pumpDetached(drainCtx context.Context, drainCancel context.CancelFunc, entry *detachedEntry) {
-	defer drainCancel()
-	defer stream.kill()
-	for {
-		_, err := stream.Recv(drainCtx)
-		// 缓冲越预算截断时同步停泵：重放价值归零，继续 drain 是
-		// 纯配额浪费——末帧已是截断错误，finish 收成不可重放的
-		// failed。isTruncated 走 entry.mu，与 append 同一临界区。
-		if err == nil && !entry.isTruncated() {
-			continue
-		}
-		if err != nil && !errors.Is(err, io.EOF) {
-			if entry.append(llm.ResponseEvent{
-				Type: llm.ResponseEventError,
-				Error: &llm.AssistantMessage{
-					ErrorMessage: "detached pump stopped: " + err.Error(),
-					Failure:      &llm.Failure{Code: "internal", UpstreamFault: true},
-				},
-			}) {
-				// 终局错误的追加自身越预算：同一冻结点记账口径。
-				stream.registry.noteTruncated(stream.detachKey, entry)
-			}
-		}
-		// 泵终局按原因记四档：drainCtx 超时是 running TTL 到期，
-		// drainCancel 是 registry 淘汰掐泵，EOF 的 completed/failed
-		// 由 finish 尾帧定态，其余错误归 failed。
-		reason := detachFinishFailed
-		switch state := entry.finish(); {
-		case errors.Is(err, context.DeadlineExceeded):
-			reason = detachFinishExpired
-		case errors.Is(err, context.Canceled):
-			reason = detachFinishKilled
-		case errors.Is(err, io.EOF) && state == detachedCompleted:
-			reason = detachFinishCompleted
-		}
-		stream.registry.noteFinish(stream.detachKey, reason, entry)
-		return
-	}
-}
-
-// kill 中止上游泵：持 mu 拿当前 cancel 值再调——swap/tryResume 换流时
-// 在 mu 下重赋值该字段，func 值两词，裸读写有撕裂风险。只供锁外
-// 调用方（后台泵退场 defer）；流内持锁路径直接调 stream.cancel()。
-func (stream *responseStream) kill() {
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	stream.cancel()
 }
 
 // tryReopen 在「上游已失败但尚未产出任何内容」时整体重发请求一次：
