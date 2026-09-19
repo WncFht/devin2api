@@ -139,10 +139,10 @@ func (application *App) SetMaxConcurrency(limit int) {
 	application.concurrencyLimit.Store(int64(normalizeMaxConcurrency(limit)))
 }
 
-// SetServingLastGoodConfig 标记本次生效配置来自 last-good 缓存（boot
-// 文件加载失败兜底）——healthz 据此透出降级服役信号。
-func (application *App) SetServingLastGoodConfig() {
-	application.servingLastGoodConfig.Store(true)
+// SetServingLastGoodConfig 置位/复位「生效配置来自 last-good 缓存」——boot
+// 兜底置位、reload 成功恢复文件服役时复位，healthz 据此透出降级服役信号。
+func (application *App) SetServingLastGoodConfig(serving bool) {
+	application.servingLastGoodConfig.Store(serving)
 }
 
 // MaxConcurrency 返回当前生效的并发上限（归一后的值）。

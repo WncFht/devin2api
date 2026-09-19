@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -151,6 +152,22 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	}
 	if lanes := devinPool.AccountLaneStates(); len(lanes) != 1 {
 		t.Fatalf("pool lanes = %v, want {a}", lanes)
+	}
+
+	// 兜底服役的恢复半程：healthz 的 config_last_good 必须随 reload 成功
+	// 复位——否则 /admin/config 已报恢复文件服役而探活仍判降级，两面矛盾。
+	application.SetServingLastGoodConfig(true)
+	if _, err := reloadRuntimeConfig(rt, application, panel, manager, settings); err != nil {
+		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
+	}
+	recorder := httptest.NewRecorder()
+	application.Router().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	var hz map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &hz); err != nil {
+		t.Fatal(err)
+	}
+	if hz["config_last_good"] != false {
+		t.Fatalf("config_last_good = %v, want false after reload recovery", hz["config_last_good"])
 	}
 }
 

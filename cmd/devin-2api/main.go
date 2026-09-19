@@ -263,7 +263,7 @@ func main() {
 	application := app.New(devinPool, serviceConfig.Server, debugManager)
 	// 兜底服役标记进 healthz：外部探活能区分健康与「带陈化配置服役」。
 	if lastGood != nil {
-		application.SetServingLastGoodConfig()
+		application.SetServingLastGoodConfig(true)
 	}
 	// 用 logs 表回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
 	// 开始，RPM 峰值口径同样恢复。完成时刻按 time+duration_ms 归桶，
@@ -716,7 +716,9 @@ func reloadRuntimeConfig(rt *accounts.Runtime, application *app.App, panel *ccpa
 	}
 	rt.CommitConfig(cfg)
 	// 文件再次成功加载：刷新 last-good 缓存（兜底期若有缓存也推进到
-	// 最新好配置）并给兜底期补恢复告警——与 boot 成功加载同一条记账线。
+	// 最新好配置）、清 healthz 兜底位并补恢复告警——与 boot 成功加载
+	// 同一条记账线。
+	application.SetServingLastGoodConfig(false)
 	warnIfConfigFallbackRecovered(filepath.Join(rt.StateDir(), "logs"))
 	if err := config.WriteLastGood(rt.StateDir(), rt.ConfigPath(), cfg); err != nil {
 		slog.Warn("write last-good config cache failed", "error", err)
