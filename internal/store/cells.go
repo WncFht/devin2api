@@ -208,16 +208,8 @@ var (
 // cellsWatermarkKey 是 rollup 覆盖水位线在 runtime_state 的键。
 const cellsWatermarkKey = "log_cells_covered_id"
 
-// cellDB 是格子记账语句的最小执行面：*sql.Tx（常规写事务）与
-// *sql.Conn（BackfillCells 手工 BEGIN IMMEDIATE 的事务连接）都满足。
-type cellDB interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
 // cellsWatermark 读当前覆盖水位（缺席按 0——全表未记账）。
-func cellsWatermark(ctx context.Context, q cellDB) (int64, error) {
+func cellsWatermark(ctx context.Context, q dbtx) (int64, error) {
 	var v string
 	switch err := q.QueryRowContext(ctx, `SELECT value FROM runtime_state WHERE "key" = ?`, cellsWatermarkKey).Scan(&v); {
 	case err == sql.ErrNoRows:
@@ -232,7 +224,7 @@ func cellsWatermark(ctx context.Context, q cellDB) (int64, error) {
 // 但 reuseport 交接期新旧两写者并发，本方读水位到提交之间对侧可能
 // 已推进更高值——冲突取 MAX 防迟到提交把水位回写变小（水位回退
 // 会让已记账行被下次补漏重新聚合，双计贡献）。
-func setCellsWatermark(ctx context.Context, q cellDB, id int64) error {
+func setCellsWatermark(ctx context.Context, q dbtx, id int64) error {
 	_, err := q.ExecContext(ctx, `INSERT INTO runtime_state("key", value, updated_at) VALUES(?,?,?)
 		ON CONFLICT("key") DO UPDATE SET
 			value = CAST(MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT),
@@ -743,7 +735,7 @@ func (s *Store) BackfillCells(ctx context.Context, slotLo, slotHi int64, apply b
 }
 
 // cellsAuditTx 在连接当前事务快照上跑窗口对账（调用方负责事务）。
-func (s *Store) cellsAuditTx(ctx context.Context, q cellDB, wm, lo, hi int64) (*CellsAuditReport, error) {
+func (s *Store) cellsAuditTx(ctx context.Context, q dbtx, wm, lo, hi int64) (*CellsAuditReport, error) {
 	r := &CellsAuditReport{SlotLo: lo, SlotHi: hi, Watermark: wm}
 	args := func() []any { return []any{wm, lo, hi} }
 	scan := func(query string, dests ...any) error {
@@ -800,7 +792,7 @@ func (s *Store) cellsAuditTx(ctx context.Context, q cellDB, wm, lo, hi int64) (*
 // cellsBreachedSlots 列出窗口内「不可证完整」的占用 slot（格底低于
 // 全表最早存活行——前缀删除已吃掉该 slot 的一部分）。返回空集即
 // 窗口内每个占用 slot 的源行都完好。
-func cellsBreachedSlots(ctx context.Context, q cellDB, wm, lo, hi int64) ([]int64, error) {
+func cellsBreachedSlots(ctx context.Context, q dbtx, wm, lo, hi int64) ([]int64, error) {
 	rows, err := q.QueryContext(ctx,
 		`SELECT DISTINCT time/600000 FROM logs WHERE `+cellSrcPred+`
 		AND time/600000*600000 < (SELECT MIN(time) FROM logs)`, wm, lo, hi)
@@ -822,7 +814,7 @@ func cellsBreachedSlots(ctx context.Context, q cellDB, wm, lo, hi int64) ([]int6
 // cellsSurplusSlots 列出窗口内格子计数超过存活源行的 slot（两张
 // rollup 表各查一遍）。盈余意味着格子声称的历史比源行多——REPLACE
 // 会把它写成更小的数，属数据损毁方向，必须中止人工核对。
-func cellsSurplusSlots(ctx context.Context, q cellDB, wm, lo, hi int64) ([]int64, error) {
+func cellsSurplusSlots(ctx context.Context, q dbtx, wm, lo, hi int64) ([]int64, error) {
 	var out []int64
 	for _, query := range []string{
 		`SELECT slot FROM (

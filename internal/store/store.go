@@ -95,6 +95,50 @@ func (s *Store) writeTx(ctx context.Context, op string) (*sql.Tx, func(), error)
 	}, nil
 }
 
+// dbtx 是事务作用域内语句执行的最小面：*sql.Tx（常规写事务）与
+// *sql.Conn（immediateTx 手工 BEGIN IMMEDIATE 的事务连接）都满足。
+type dbtx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// immediateTx 在独占连接上把 f 跑在一个 BEGIN IMMEDIATE 事务里：IMMEDIATE
+// 在 BEGIN 即取写锁、借 busy_timeout 排队等待——deferred 事务（writeTx）
+// 先读后写时，读快照与写锁升级之间被并发写挤入会吃 SQLITE_BUSY_SNAPSHOT
+// 快败（busy_timeout 救不了过期快照；IMMEDIATE 下没有读快照就没有
+// SNAPSHOT 类）。database/sql 的 BeginTx 给不出 IMMEDIATE，只能手工
+// BEGIN，故事务生命周期（committed 标记 + 失败路径 Background 回滚）收在
+// 这里一处；op 口径同 writeTx：连接拿出到事务收尾全程计慢占用。
+func immediateTx(ctx context.Context, db *sql.DB, op string, f func(context.Context, dbtx) error) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	start := time.Now()
+	defer warnSlowWrite(op, start)
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			// 不用可能已经取消的 ctx：回滚失败会让带 open tx 的连接
+			// 回池污染后续使用者。
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	if err := f(ctx, conn); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 // warnSlowWrite 在占用超阈值时按 op 名记一条 WARN。
 func warnSlowWrite(op string, start time.Time) {
 	if d := time.Since(start); d >= slowWriteWarn {
@@ -243,7 +287,7 @@ func Open(path string) (*Store, error) {
 	stageStart = time.Now()
 	// 列演进走版本化迁移：幂等建表只管新库全量 DDL，存量库的
 	// ALTER/回填由 runner 按 schema_migrations 登记跳过。
-	if err := applyMigrations(db); err != nil {
+	if err := applyMigrations(context.Background(), db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}

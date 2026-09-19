@@ -1,16 +1,19 @@
 // 本文件验证版本化迁移的补列路径与幂等性（存量库 ALTER、新库直建、
-// 重复 Open 不重复执行）。
+// 重复 Open 不重复执行），以及 BEGIN IMMEDIATE 在并发写者下的等锁行为。
 package store
 
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func openRaw(t *testing.T, path string) *sql.DB {
@@ -200,5 +203,136 @@ func TestMigration0007FreshDB(t *testing.T) {
 		if err := s.Close(); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// walDSN 给出与 Open 同族（WAL + busy_timeout）的测试 DSN——
+// BUSY_SNAPSHOT 是 WAL 读快照特有的失败类，busy_timeout 是
+// BEGIN IMMEDIATE 排队等锁的前提。
+func walDSN(path string) string {
+	return fmt.Sprintf("file:%s?_pragma=busy_timeout(30000)&_pragma=journal_mode=WAL&_pragma=foreign_keys(1)", path)
+}
+
+// TestDeferredReadThenWriteBusySnapshot 复现 prod 事故的失败形状作对照：
+// deferred BEGIN 先读（pragma_table_info 拿 WAL 读快照）后写（ALTER
+// 升级写锁）——两动之间另一连接提交写推进了 WAL 末尾，升级时快照
+// 过期，sqlite 立即返回 SQLITE_BUSY_SNAPSHOT（busy_timeout 救不了
+// 过期快照）。这正是迁移改 BEGIN IMMEDIATE 要消掉的类。
+func TestDeferredReadThenWriteBusySnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.db")
+	db, err := sql.Open("sqlite", walDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE t(a INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	connA, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connA.Close() }()
+	connB, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connB.Close() }()
+	if _, err := connA.ExecContext(ctx, `BEGIN`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = connA.ExecContext(context.Background(), `ROLLBACK`) }()
+	var n int
+	if err := connA.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('t')`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	// 竞争写者在 connA 快照之后提交——推进 WAL 末尾使 connA 快照过期。
+	if _, err := connB.ExecContext(ctx, `INSERT INTO t(a) VALUES(1)`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = connA.ExecContext(ctx, `ALTER TABLE t ADD COLUMN b INTEGER`)
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		t.Fatalf("want *sqlite.Error, got %v", err)
+	}
+	if se.Code() != sqlite3.SQLITE_BUSY_SNAPSHOT {
+		t.Fatalf("code = %d (%v), want SQLITE_BUSY_SNAPSHOT", se.Code(), err)
+	}
+}
+
+// TestApplyMigrationsImmediateUnderLock 验证修复后形状：竞争写者持写锁
+// 期间 applyMigrations 的 BEGIN IMMEDIATE 经 busy_timeout 排队而非快败，
+// 持锁者提交后迁移照常完成——含「探列缺席→ALTER→登记」的完整路径
+// （即 prod 事故中死掉的那条迁移形态）。
+func TestApplyMigrationsImmediateUnderLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "contended.db")
+	dsn := walDSN(path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	ctx := context.Background()
+	if err := applySchema(db); err != nil {
+		t.Fatal(err)
+	}
+	// 只留 0016 未登记并物理删列，逼它走探列→ALTER→登记全路径。
+	if _, err := db.ExecContext(ctx, `ALTER TABLE logs DROP COLUMN upstream_done_ms`); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range schemaMigrations {
+		if m.version == "0016_logs_upstream_done_ms" {
+			continue
+		}
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO schema_migrations(version, applied_at) VALUES(?,?)`,
+			m.version, time.Now().UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 竞争写者持文件写锁（第二连接池，模拟交接期在役实例）。
+	comp, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = comp.Close() }()
+	compConn, err := comp.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = compConn.Close() }()
+	if _, err := compConn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- applyMigrations(ctx, db) }()
+	select {
+	case err := <-done:
+		t.Fatalf("applyMigrations returned while write lock held: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := compConn.ExecContext(ctx, `COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("applyMigrations: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("applyMigrations did not finish after lock release")
+	}
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('logs') WHERE name='upstream_done_ms'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("column count = %d err=%v", n, err)
+	}
+	var applied int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM schema_migrations WHERE version='0016_logs_upstream_done_ms'`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("0016 registered = %d err=%v", applied, err)
 	}
 }
