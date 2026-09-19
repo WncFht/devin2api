@@ -39,8 +39,8 @@ type StreamEncoder struct {
 	// item id 在一次响应内必须唯一，后续 message 块用合成的 msg_。
 	outputIDClaimed bool
 	// toolNameMap 把 namespace 展平的 wire 名（{ns}__{sub}）还原为客户端
-	// 面向的带点全名（{ns}.{sub}）——codex 按带点全名分发调用。
-	toolNameMap map[string]string
+	// 面向的 {namespace,name} 分字段形态——codex 按两字段查注册表分发。
+	toolNameMap map[string]QualifiedToolName
 }
 
 // streamItem 保存一个 reasoning、function_call 或 message output item 的编码状态。
@@ -53,8 +53,8 @@ type streamItem struct {
 	outputIndex int
 	// callID 是 function_call 与 function_call_output 关联的业务标识。
 	callID string
-	// name 是 function_call 的工具名称。
-	name string
+	// toolName 是 function_call 的工具名（namespace 分字段形态）。
+	toolName QualifiedToolName
 	// contentIndex 是 message 内 output_text part 的下标。
 	contentIndex int
 	// value 累计文字、思考摘要或工具参数。
@@ -71,7 +71,7 @@ type streamItem struct {
 
 // NewStreamEncoder 为一次 HTTP Responses 请求创建独立的 SSE 编码状态。
 // toolNameMap 是 namespace 展平名到客户端面向名的还原表（无展平时传 nil）。
-func NewStreamEncoder(model string, toolNameMap map[string]string) *StreamEncoder {
+func NewStreamEncoder(model string, toolNameMap map[string]QualifiedToolName) *StreamEncoder {
 	return &StreamEncoder{
 		model:       model,
 		responseID:  randid.Prefixed("resp_"),
@@ -85,7 +85,7 @@ func NewStreamEncoder(model string, toolNameMap map[string]string) *StreamEncode
 // model 是回显给客户端的模型名（请求原文，可能是别名）；为空时
 // 回落到上游声明的 actual uid 再到解析后的请求 uid。
 // toolNameMap 与 NewStreamEncoder 同源。
-func EncodeResponse(message *llm.AssistantMessage, model string, toolNameMap map[string]string) ([]byte, error) {
+func EncodeResponse(message *llm.AssistantMessage, model string, toolNameMap map[string]QualifiedToolName) ([]byte, error) {
 	if message == nil {
 		return nil, fmt.Errorf("response message is nil")
 	}
@@ -414,10 +414,13 @@ func (encoder *StreamEncoder) startToolCall(event llm.ResponseEvent) ([]SSEEvent
 			}),
 		}, nil
 	}
-	item.name = encoder.restoreToolName(event.ToolName)
+	item.toolName = encoder.restoreToolName(event.ToolName)
 	addedItem := map[string]any{
 		"id": item.id, "type": kind, "status": "in_progress",
-		"call_id": item.callID, "name": item.name,
+		"call_id": item.callID, "name": item.toolName.Name,
+	}
+	if item.toolName.Namespace != "" {
+		addedItem["namespace"] = item.toolName.Namespace
 	}
 	if kind == "custom_tool_call" {
 		addedItem["input"] = ""
@@ -461,7 +464,7 @@ func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, 
 	// 不再依赖 delta 累计值。
 	arguments := string(event.ToolCall.Arguments)
 	item.callID = event.ToolCall.ID
-	item.name = encoder.restoreToolName(event.ToolCall.Name)
+	item.toolName = encoder.restoreToolName(event.ToolCall.Name)
 	if item.kind == "web_search_call" {
 		// 完整参数存进 value 供收尾时还原 action.query；此时执行尚未发生，
 		// 过早关项会让 done() 的「无悬空 item」校验抓到未完结的托管调用。
@@ -473,7 +476,10 @@ func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, 
 	}
 	completedItem := map[string]any{
 		"id": item.id, "type": item.kind, "status": "completed",
-		"call_id": item.callID, "name": item.name,
+		"call_id": item.callID, "name": item.toolName.Name,
+	}
+	if item.toolName.Namespace != "" {
+		completedItem["namespace"] = item.toolName.Namespace
 	}
 	eventName := "response.function_call_arguments.done"
 	field := "arguments"
@@ -539,12 +545,13 @@ func (encoder *StreamEncoder) serverToolResult(event llm.ResponseEvent) ([]SSEEv
 	}, nil
 }
 
-// restoreToolName 把 wire 展平名还原为客户端面向的带点全名（无映射原样）。
-func (encoder *StreamEncoder) restoreToolName(name string) string {
-	if dotted, ok := encoder.toolNameMap[name]; ok {
-		return dotted
+// restoreToolName 把 wire 展平名还原为客户端面向的 {namespace,name}
+// 分字段形态（无映射时按 functions 默认命名空间原样透传裸名）。
+func (encoder *StreamEncoder) restoreToolName(name string) QualifiedToolName {
+	if qualified, ok := encoder.toolNameMap[name]; ok {
+		return qualified
 	}
-	return name
+	return QualifiedToolName{Name: name}
 }
 
 // done 校验无悬空 item 后发 response.completed/incomplete 终帧。
@@ -721,7 +728,7 @@ func responseUsage(usage llm.Usage) map[string]any {
 
 // outputFromMessage 把最终消息内容块投影成 Responses output 数组。
 // toolNameMap 是 namespace 展平名到客户端面向名的还原表（同流式编码器）。
-func outputFromMessage(message *llm.AssistantMessage, toolNameMap map[string]string) ([]any, error) {
+func outputFromMessage(message *llm.AssistantMessage, toolNameMap map[string]QualifiedToolName) ([]any, error) {
 	// 托管搜索结果块折叠进对应调用的 web_search_call item（调用+结果一体
 	// 是 OpenAI 的原生形态），先按 ToolCallID 建索引。
 	serverResults := make(map[string]llm.ServerToolResult)
@@ -767,21 +774,25 @@ func outputFromMessage(message *llm.AssistantMessage, toolNameMap map[string]str
 				toolCalls = append(toolCalls, webSearchCallItem(content, serverResults[content.ID]))
 				continue
 			}
-			name := content.Name
-			if dotted, ok := toolNameMap[name]; ok {
-				name = dotted
+			toolName := QualifiedToolName{Name: content.Name}
+			if qualified, ok := toolNameMap[content.Name]; ok {
+				toolName = qualified
+			}
+			item := map[string]any{
+				"id": randid.Prefixed("fc_"), "status": "completed",
+				"call_id": content.ID, "name": toolName.Name,
+			}
+			if toolName.Namespace != "" {
+				item["namespace"] = toolName.Namespace
 			}
 			if content.Custom {
-				toolCalls = append(toolCalls, map[string]any{
-					"id": randid.Prefixed("fc_"), "type": "custom_tool_call", "status": "completed",
-					"call_id": content.ID, "name": name, "input": string(content.Arguments),
-				})
+				item["type"] = "custom_tool_call"
+				item["input"] = string(content.Arguments)
 			} else {
-				toolCalls = append(toolCalls, map[string]any{
-					"id": randid.Prefixed("fc_"), "type": "function_call", "status": "completed",
-					"call_id": content.ID, "name": name, "arguments": string(content.Arguments),
-				})
+				item["type"] = "function_call"
+				item["arguments"] = string(content.Arguments)
 			}
+			toolCalls = append(toolCalls, item)
 		case llm.ServerToolResult:
 			// 已折叠进 web_search_call item，无独立 output item。
 		default:

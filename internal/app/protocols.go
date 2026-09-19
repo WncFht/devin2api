@@ -111,8 +111,8 @@ type protocolOptions struct {
 	Stream       bool
 	IncludeUsage bool
 	// ToolNameMap 是 namespace 展平名到客户端面向名的还原表
-	//（responses 侧 {ns}__{sub} → {ns}.{sub}）；其余协议恒为空。
-	ToolNameMap map[string]string
+	//（responses 侧 {ns}__{sub} → {namespace,name} 分字段）；其余协议恒为空。
+	ToolNameMap map[string]responses.QualifiedToolName
 }
 
 // responsesProtocol 实现 OpenAI Responses API 协议。

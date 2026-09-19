@@ -110,9 +110,10 @@ type RequestOptions struct {
 	// PreviousResponseID 是调用方提供的上游响应关联标识。
 	PreviousResponseID string
 	// ToolNameMap 记录 namespace 展平名到客户端面向名的还原
-	//（"collaboration__spawn_agent" → "collaboration.spawn_agent"），
-	// 响应编码器据此把 wire 名改回 codex 按带点全名分发的形态。
-	ToolNameMap map[string]string
+	//（"collaboration__spawn_agent" → {"collaboration","spawn_agent"}），
+	// 响应编码器据此把 wire 名改回 codex 按 {namespace,name} 分字段
+	// 分发的形态。
+	ToolNameMap map[string]QualifiedToolName
 }
 
 // DecodeRequest 将 OpenAI Responses JSON 请求转换为中间请求。
@@ -142,10 +143,14 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	context.TopP = request.TopP
 	context.SessionKey = common.SessionKey(request.PromptCacheKey, request.User)
 	// 工具声明先于 input 解析：namespace 展平的双向映射既要在响应侧还原
-	// 带点全名，也要在本函数内回写历史 function_call 名与 tool_choice 指名。
-	nameMaps := &toolNameMaps{restore: map[string]string{}, flatten: map[string]string{}}
+	// {namespace,name} 分字段形态，也要在本函数内回写历史 function_call
+	// 名与 tool_choice 指名。additional_tools 载体项的声明同样要先于
+	// tool_choice 注册——lite 模型（codex use_responses_lite）把全部工具
+	// 塞进 input 而非顶层 tools，指名其中工具的 tool_choice 需要先见到。
+	nameMaps := &toolNameMaps{restore: map[string]QualifiedToolName{}, flatten: map[string]string{}}
 	droppedTools := make(map[string]bool)
 	appendToolDefinitions(&context, request.Tools, "", "", nameMaps, droppedTools)
+	extractAdditionalTools(&context, request.Input, nameMaps, droppedTools)
 	toolChoice, err := parseResponsesToolChoice(request.ToolChoice, &context, nameMaps)
 	if err != nil {
 		return AdaptedRequest{}, err
@@ -182,21 +187,38 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	}, nil
 }
 
+// QualifiedToolName 是 codex 按 {namespace, name} 分字段分发的工具名
+// 形态；Namespace 为空表示 functions 默认命名空间（未展平的普通工具）。
+type QualifiedToolName struct {
+	Namespace string
+	Name      string
+}
+
+// dotted 返回带点全名（{ns}.{name}）——回放历史调用名与 tool_choice
+// 指名的规范形态；无命名空间时即裸名。
+func (name QualifiedToolName) dotted() string {
+	if name.Namespace == "" {
+		return name.Name
+	}
+	return name.Namespace + "." + name.Name
+}
+
 // toolNameMaps 记录 namespace 展平的双向映射：restore 把 wire 展平名
-// （{ns}__{sub}）还原为客户端面向的带点全名（{ns}.{sub}）供响应编码；
-// flatten 相反，供回放历史调用名与 tool_choice 指名改写。
+// （{ns}__{sub}）还原为客户端面向的 {namespace,name} 分字段形态供响应
+// 编码；flatten 以带点全名为键，供回放历史调用名与 tool_choice 指名
+// 改写。
 type toolNameMaps struct {
-	restore map[string]string
+	restore map[string]QualifiedToolName
 	flatten map[string]string
 }
 
 // add 登记一对展平名/面向名；相同（非命名空间工具）不登记。
-func (maps *toolNameMaps) add(flat, dotted string) {
-	if flat == dotted {
+func (maps *toolNameMaps) add(flat string, qualified QualifiedToolName) {
+	if flat == qualified.dotted() {
 		return
 	}
-	maps.restore[flat] = dotted
-	maps.flatten[dotted] = flat
+	maps.restore[flat] = qualified
+	maps.flatten[qualified.dotted()] = flat
 }
 
 // wire 把客户端面向名改写为 wire 展平名（无映射时原样返回）。
@@ -215,7 +237,12 @@ func (maps *toolNameMaps) wire(name string) string {
 // （file_search/mcp/tool_search/computer_use_* 等）无桥接通道，记 dropped。
 // dropped 收集被丢条目的全部可指名形态（展平名与带点全名），供
 // DecodeRequest 尾部的 DemoteDroppedToolChoice 判定「声明过但被丢」。
-func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefix, dottedPrefix string, nameMaps *toolNameMaps, dropped map[string]bool) {
+// nsPrefix 是嵌套命名空间的路径前缀（"a.b" 形态，顶层为空），与
+// flatPrefix 的 "{ns}__" 层叠一一对应。
+func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefix, nsPrefix string, nameMaps *toolNameMaps, dropped map[string]bool) {
+	qualify := func(name string) QualifiedToolName {
+		return QualifiedToolName{Namespace: nsPrefix, Name: name}
+	}
 	// 先整层收集客户端声明名：web_search 诱饵的去重判定要查全表——同名
 	// function/custom 可能排在诱饵声明之后，只回扫已收录项会漏判，
 	// wire 上两个同名声明会被上游拒绝。
@@ -240,7 +267,7 @@ func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefi
 			if tool.Strict != nil {
 				definition.Strict = *tool.Strict
 			}
-			nameMaps.add(definition.Name, dottedPrefix+tool.Name)
+			nameMaps.add(definition.Name, qualify(tool.Name))
 			context.Tools = append(context.Tools, definition)
 		case "custom":
 			description := tool.Description
@@ -253,7 +280,7 @@ func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefi
 				InputSchema: customToolInputSchema,
 				Custom:      true,
 			}
-			nameMaps.add(definition.Name, dottedPrefix+tool.Name)
+			nameMaps.add(definition.Name, qualify(tool.Name))
 			context.Tools = append(context.Tools, definition)
 		case "namespace":
 			namespace := tool.Name
@@ -266,11 +293,15 @@ func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefi
 				// 按「声明过但被丢」降 auto，不吃指名校验的 400。
 				if namespace != "" {
 					dropped[flatPrefix+namespace] = true
-					dropped[dottedPrefix+namespace] = true
+					dropped[qualify(namespace).dotted()] = true
 				}
 				continue
 			}
-			appendToolDefinitions(context, tool.Tools, flatPrefix+namespace+"__", dottedPrefix+namespace+".", nameMaps, dropped)
+			childPrefix := namespace
+			if nsPrefix != "" {
+				childPrefix = nsPrefix + "." + namespace
+			}
+			appendToolDefinitions(context, tool.Tools, flatPrefix+namespace+"__", childPrefix, nameMaps, dropped)
 		case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
 			// 同名工具已在声明表时不叠加：客户端自实现的 web_search
 			// function 保持客户端语义，不被劫持为托管执行。占位进
@@ -280,7 +311,7 @@ func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefi
 				continue
 			}
 			declared[flatPrefix+"web_search"] = true
-			nameMaps.add(flatPrefix+"web_search", dottedPrefix+"web_search")
+			nameMaps.add(flatPrefix+"web_search", qualify("web_search"))
 			context.Tools = append(context.Tools, llm.ToolDefinition{
 				Name:        flatPrefix + "web_search",
 				Description: "Search the web for up-to-date information; returns a synthesized answer with sources.",
@@ -295,9 +326,31 @@ func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefi
 			// 分支不在此记账——同名 function 幸存，名字仍可满足。
 			if tool.Name != "" {
 				dropped[flatPrefix+tool.Name] = true
-				dropped[dottedPrefix+tool.Name] = true
+				dropped[qualify(tool.Name).dotted()] = true
 			}
 		}
+	}
+}
+
+// extractAdditionalTools 预扫 input 里的 additional_tools 载体项，把其
+// tools 数组并入声明集。codex use_responses_lite 模型（swe-2-max 等）
+// 把全部工具声明塞进 input 而非顶层 tools 字段——必须在 tool_choice
+// 解析前完成注册，否则指名其中工具的 tool_choice 会被当成指向未声明
+// 工具而降 auto/报 400。载体项本身由 appendInputItem 消费跳过。
+func extractAdditionalTools(context *llm.RequestMessages, raw json.RawMessage, nameMaps *toolNameMaps, dropped map[string]bool) {
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return
+	}
+	for _, item := range items {
+		var carrier struct {
+			Type  string `json:"type"`
+			Tools []Tool `json:"tools"`
+		}
+		if err := json.Unmarshal(item, &carrier); err != nil || carrier.Type != "additional_tools" || len(carrier.Tools) == 0 {
+			continue
+		}
+		appendToolDefinitions(context, carrier.Tools, "", "", nameMaps, dropped)
 	}
 }
 
@@ -650,6 +703,11 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 			Content:     content,
 			TimestampMS: time.Now().UnixMilli(),
 		})
+		return nil
+	case "additional_tools":
+		// codex use_responses_lite 模型的工具声明载体：tools 已在
+		// DecodeRequest 预扫中注册（tool_choice 解析依赖先见声明），
+		// 载体项本身只是传输信封，不进消息流。
 		return nil
 	default:
 		// tool_search_output / mcp_* 等服务端工具产物没有对应中间类型；
