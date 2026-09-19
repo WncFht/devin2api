@@ -56,6 +56,11 @@ const (
 	// fgRateAlpha 是每窗口 fg 准入数 EMA 的更新系数：0.2 对应
 	// ~3 窗口半衰期，足够跟上交互负载的起落又不被单窗口抖动带走。
 	fgRateAlpha = 0.2
+	// throttleAlpha 是上游限流占比 EMA 的更新系数：0.1 对应 ~19 个
+	// 结局样本的有效窗口。09-15 实测限流突发窗内上游结局速率
+	// 80-144/min，读数 ~15s 内响应；低谷期样本稀疏衰减自然变慢，
+	// 但此时也无流量需要整形，读数陈旧无害。
+	throttleAlpha = 0.1
 )
 
 // 闸门拒绝的 X-Gate-Reason 取值：latch 是冷却闩快败（Retry-After
@@ -188,6 +193,18 @@ type rateGate struct {
 	// 覆盖期限制。
 	waitTotalFg GateWaitTotal
 	waitTotalBg GateWaitTotal
+	// throttleEMA 是上游限流占上游结局比例的指数滑动平均：上游
+	// resource_exhausted 结局记 1，其余到达上游的结局（开流确认帧、
+	// 非限流失败）记 0；本地闸门拒绝不入样——未触达上游的快败进
+	// 分母只会冲淡真实占比。quota_samples 测预算余量、本信号测
+	// seat 级速率维度的上游拒绝，两维正交（09-15 波：quota 死平
+	// 93/41 期间 upstream 三波 429 共 524 行，闸门对该物种结构
+	// 性失明）。纯遥测读数，不参与放行判定。
+	throttleEMA float64
+	// throttleSamples 是入样结局总数（进程期单调）：EMA 读数的
+	// 置信底数——样本极少时高读数是噪声而非趋势，消费方据此
+	// 决定读数是否可用。
+	throttleSamples int
 }
 
 // gateEventCap 是闩事件环容量；闩迁移低频，64 条足够回看一整天。
@@ -400,6 +417,13 @@ type GateStats struct {
 	// 覆盖全结局（含拒绝与取消），补上 transform 段看不见的尾部。
 	// 进程内尚无评估时为 nil。
 	Wait *GateWait `json:"wait,omitempty"`
+	// ThrottleEMA 是上游限流占上游结局比例的指数滑动平均（0~1）：
+	// seat 级速率限流的实时读数，与 quota_samples 的预算余量正交——
+	// 09-15 波 quota 死平期间 upstream 三波 429 全靠它可见。纯遥测，
+	// 不参与放行判定。ThrottleSamples 是入样结局总数（进程期单调），
+	// 读数的置信底数。
+	ThrottleEMA     float64 `json:"throttle_ema"`
+	ThrottleSamples int     `json:"throttle_samples"`
 }
 
 // GateLatchRange 是一段闩时段；Start 为 nil 表示开窗事件已滚出事件环
@@ -803,6 +827,8 @@ func (gate *rateGate) stats() GateStats {
 		PersistFailures:  gate.persistFailures,
 		PersistDropped:   gate.persistDropped,
 		PendingWindows:   len(gate.pendingWindows),
+		ThrottleEMA:      gate.throttleEMA,
+		ThrottleSamples:  gate.throttleSamples,
 	}
 	if gate.quota > 0 {
 		open := ws
@@ -1411,17 +1437,32 @@ func (gate *rateGate) tryAdmit() (bool, string) {
 // 重排滴灌只会无谓推迟下一枚探针。
 func (gate *rateGate) noteUpstreamError(err error) {
 	failure := llm.Classify(err)
-	// 本地闸门自己的拒绝（LocalGate）不带上游证据，不能拿来上闩。
-	if failure == nil || failure.LocalGate || !failure.RateLimited {
+	// 本地闸门自己的拒绝（LocalGate）不带上游证据：既不上闩也不入
+	// EMA 样本——未触达上游的快败进分母会冲淡真实限流占比。
+	if failure == nil || failure.LocalGate {
 		return
 	}
 	now := gate.now()
 	// defaultLatch 由 setParams 热更新，须在锁内读。
 	var until time.Time
-	if resetAt, ok := failure.RateLimitReset(now); ok {
-		until = resetAt
+	if failure.RateLimited {
+		if resetAt, ok := failure.RateLimitReset(now); ok {
+			until = resetAt
+		}
 	}
 	gate.mu.Lock()
+	// 上游限流占比遥测：限流结局记 1、其余上游失败记 0——与上闩
+	// 判定同一份 RateLimited 分类，不另从文案反推。
+	sample := 0.0
+	if failure.RateLimited {
+		sample = 1
+	}
+	gate.throttleEMA += throttleAlpha * (sample - gate.throttleEMA)
+	gate.throttleSamples++
+	if !failure.RateLimited {
+		gate.mu.Unlock()
+		return
+	}
 	if until.IsZero() {
 		until = now.Add(gate.defaultLatch)
 	}
@@ -1458,6 +1499,10 @@ func (gate *rateGate) noteUpstreamError(err error) {
 // 是窗口内齐射的天然上限。
 func (gate *rateGate) noteUpstreamSuccess() {
 	gate.mu.Lock()
+	// 首个上游帧即该次发送越过上游准入的证据：限流占比 EMA 记 0
+	// 样本——与 noteUpstreamError 的限流记 1 合成 throttle 读数。
+	gate.throttleEMA += throttleAlpha * (0 - gate.throttleEMA)
+	gate.throttleSamples++
 	latched := !gate.limitedUntil.IsZero()
 	if latched {
 		gate.pushEvent(gateEventReleased, gate.limitedUntil, "")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -195,6 +196,54 @@ func TestRateGateIgnoresTransportMasquerade(t *testing.T) {
 	}
 	if err := gate.wait(context.Background()); err != nil {
 		t.Fatalf("wait after masqueraded error = %v, want pass", err)
+	}
+}
+
+// throttle_ema 遥测：上游限流结局记 1、其余到达上游的结局记 0、
+// 本地闸门拒绝（LocalGate，未触达上游）不入样；读数与样本数经
+// GateStats 透出，不参与任何放行判定。
+func TestRateGateThrottleEMA(t *testing.T) {
+	gate := newRateGate(GateConfig{}, nil, "")
+	approx := func(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
+
+	// 连续两个上游限流结局：EMA 递推 0→0.1→0.19。
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 0 seconds."))
+	if ema := gate.stats().ThrottleEMA; !approx(ema, 0.1) {
+		t.Fatalf("ThrottleEMA after first 429 = %v, want 0.1", ema)
+	}
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 0 seconds."))
+	if ema := gate.stats().ThrottleEMA; !approx(ema, 0.19) {
+		t.Fatalf("ThrottleEMA after second 429 = %v, want 0.19", ema)
+	}
+	if n := gate.stats().ThrottleSamples; n != 2 {
+		t.Fatalf("ThrottleSamples = %d, want 2", n)
+	}
+
+	// 非限流上游失败记 0：EMA ×0.9 衰减；传输伪装（ENHANCE_YOUR_CALM
+	// 映成的 resource_exhausted）同样记 0 而非 1——与上闩判定同源。
+	gate.noteUpstreamError(connect.NewError(connect.CodeInvalidArgument, errors.New("bad request")))
+	gate.noteUpstreamError(connect.NewError(connect.CodeResourceExhausted,
+		errors.New("bandwidth exhausted: stream error: stream ID 5; ENHANCE_YOUR_CALM; received from peer")))
+	if ema := gate.stats().ThrottleEMA; !approx(ema, 0.19*0.81) {
+		t.Fatalf("ThrottleEMA after two non-429 failures = %v, want %v", ema, 0.19*0.81)
+	}
+
+	// 上游确认帧记 0。
+	gate.noteUpstreamSuccess()
+	if ema := gate.stats().ThrottleEMA; !approx(ema, 0.19*0.81*0.9) {
+		t.Fatalf("ThrottleEMA after upstream success = %v, want %v", ema, 0.19*0.81*0.9)
+	}
+	if n := gate.stats().ThrottleSamples; n != 5 {
+		t.Fatalf("ThrottleSamples = %d, want 5", n)
+	}
+
+	// 本地闸门快败不入样：EMA 与样本数原样。
+	before := gate.stats()
+	gate.noteUpstreamError(gateRejection(time.Second, gateReasonLatch))
+	after := gate.stats()
+	if after.ThrottleEMA != before.ThrottleEMA || after.ThrottleSamples != before.ThrottleSamples {
+		t.Fatalf("local-gate rejection must not sample: before=%v/%d after=%v/%d",
+			before.ThrottleEMA, before.ThrottleSamples, after.ThrottleEMA, after.ThrottleSamples)
 	}
 }
 
