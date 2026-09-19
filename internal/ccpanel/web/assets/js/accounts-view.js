@@ -476,5 +476,6 @@
     </div>`;
   }
 
-  window.acctView = { cardBlocks, pillList, curveInit, disposeCharts, emptyStateHTML };
+  // relTime/countdown 同时被 ops 层证据抽屉复用（loads 顺序 view→ops→core）
+  window.acctView = { cardBlocks, pillList, curveInit, disposeCharts, emptyStateHTML, relTime, countdown };
 })();

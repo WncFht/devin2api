@@ -431,10 +431,7 @@
     if (!el) return;
     let data = null;
     try {
-      const res = await fetchWithAuth(`${BASE}/cli-credentials`);
-      if (!res.ok) return;
-      const payload = await res.json();
-      data = payload && payload.data !== undefined ? payload.data : payload;
+      data = await apiCall(`${BASE}/cli-credentials`);
     } catch (_) {
       return;
     }
@@ -454,25 +451,9 @@
   // ---- 抽屉壳：failover 明细与「为什么病了」证据共用 ----
   // 挂在卡的 [data-slot=drawer] 槽里；core 逐块 diff 不碰此槽，开着的抽屉
   // 扛得住自动刷新（auto-refresh 另有 .acct-drawer[open] 跳本轮兜底）。
-  function relText(iso) {
-    const ms = Date.now() - Date.parse(iso);
-    if (!Number.isFinite(ms)) return '';
-    const m = Math.floor(ms / 60000);
-    if (m < 1) return t('accounts.justNow');
-    if (m < 60) return t('accounts.minAgo', { m });
-    const h = Math.floor(m / 60);
-    if (h < 24) return t('accounts.hourAgo', { h, m: m % 60 });
-    return t('accounts.dayAgo', { d: Math.floor(h / 24), h: h % 24 });
-  }
-
-  function leftText(iso) {
-    const ms = Date.parse(iso) - Date.now();
-    if (!Number.isFinite(ms) || ms <= 0) return t('accounts.now');
-    const m = Math.ceil(ms / 60000);
-    if (m >= 1440) return t('accounts.inDaysHours', { d: Math.floor(m / 1440), h: Math.floor((m % 1440) / 60) });
-    if (m >= 60) return t('accounts.inHoursMinutes', { h: Math.floor(m / 60), m: m % 60 });
-    return t('accounts.inMinutes', { m });
-  }
+  // 相对时刻文案复用 view 层（accounts-view.js 先于本文件加载）。
+  const relText = window.acctView.relTime;
+  const leftText = window.acctView.countdown;
 
   function secLeft(iso) {
     return Math.max(0, Math.round((Date.parse(iso) - Date.now()) / 1000));
