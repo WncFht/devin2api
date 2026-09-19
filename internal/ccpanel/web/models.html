@@ -41,7 +41,7 @@
                 <p class="page-subtitle" data-i18n="models.pageSubtitle">对外模型名的启用开关与重定向；重定向在别名解析之前生效</p>
                 <p id="models-summary" class="page-subtitle"></p>
               </div>
-              <button type="button" id="add-model-btn" class="btn btn-primary" data-i18n="models.add.button">+ 添加模型</button>
+              <button type="button" id="add-model-btn" class="btn btn-primary" data-action="show-add-model-modal" data-i18n="models.add.button">+ 添加模型</button>
             </div>
           </div>
         </header>
@@ -49,32 +49,32 @@
         <section class="mb-2">
           <div class="time-range-container models-filter-bar">
             <div id="models-filter-pills" class="time-range-selector">
-              <button type="button" class="time-range-btn active" data-filter="all" data-i18n="common.all">全部</button>
-              <button type="button" class="time-range-btn" data-filter="disabled" data-i18n="models.filter.disabled">已禁用</button>
-              <button type="button" class="time-range-btn" data-filter="redirected" data-i18n="models.filter.redirected">已重定向</button>
-              <button type="button" class="time-range-btn" data-filter="override" data-i18n="models.filter.override">有覆盖</button>
+              <button type="button" class="time-range-btn active" data-range="all" data-i18n="common.all">全部</button>
+              <button type="button" class="time-range-btn" data-range="disabled" data-i18n="models.filter.disabled">已禁用</button>
+              <button type="button" class="time-range-btn" data-range="redirected" data-i18n="models.filter.redirected">已重定向</button>
+              <button type="button" class="time-range-btn" data-range="override" data-i18n="models.filter.override">有覆盖</button>
             </div>
-            <input id="models-filter" type="search" class="form-input"
+            <input id="models-filter" type="search" class="form-input" data-input-action="filter-models-text"
               data-i18n-placeholder="models.filterPlaceholder" placeholder="筛选模型名" spellcheck="false">
           </div>
           <div class="models-filter-selects">
-            <select id="f-provider" class="form-input">
+            <select id="f-provider" class="form-input" data-change-action="apply-models-filter">
               <option value="" data-i18n="models.filter.allProviders">全部供应商</option>
             </select>
-            <select id="f-api" class="form-input">
+            <select id="f-api" class="form-input" data-change-action="apply-models-filter">
               <option value="" data-i18n="models.filter.allApis">全部 API</option>
             </select>
-            <select id="f-tier" class="form-input">
+            <select id="f-tier" class="form-input" data-change-action="apply-models-filter">
               <option value="" data-i18n="models.filter.allTiers">全部档位</option>
               <option value="free">free</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
-            <select id="f-pricing" class="form-input">
+            <select id="f-pricing" class="form-input" data-change-action="apply-models-filter">
               <option value="" data-i18n="models.filter.allPricings">全部定价</option>
             </select>
-            <select id="f-sort" class="form-input" data-i18n-aria-label="models.sort.label" aria-label="排序">
+            <select id="f-sort" class="form-input" data-change-action="change-models-sort" data-i18n-aria-label="models.sort.label" aria-label="排序">
               <option value="default" data-i18n="models.sort.default">默认排序</option>
               <option value="mult_asc" data-i18n="models.sort.multAsc">倍率 低→高</option>
               <option value="mult_desc" data-i18n="models.sort.multDesc">倍率 高→低</option>
@@ -86,16 +86,16 @@
             </select>
           </div>
           <div id="models-tag-chips" class="tag-chip-list">
-            <button type="button" class="tag-chip" data-tag="free" data-i18n="models.tag.free">免费</button>
-            <button type="button" class="tag-chip" data-tag="promo" data-i18n="models.tag.promo">促销</button>
-            <button type="button" class="tag-chip" data-tag="img" data-i18n="models.tag.img">图像</button>
-            <button type="button" class="tag-chip" data-tag="beta">BETA</button>
-            <button type="button" class="tag-chip" data-tag="new">NEW</button>
-            <button type="button" class="tag-chip" data-tag="fast">FAST</button>
-            <button type="button" class="tag-chip" data-tag="premium">Premium</button>
-            <button type="button" class="tag-chip" data-tag="rec" data-i18n="models.tag.rec">推荐</button>
-            <button type="button" class="tag-chip" data-tag="empty_mult" data-i18n="models.tag.emptyMult">无倍率</button>
-            <button type="button" class="tag-chip" data-tag="disabled" data-i18n="models.tag.catalogDisabled">目录禁用</button>
+            <button type="button" class="tag-chip" data-action="toggle-tag-chip" data-tag="free" data-i18n="models.tag.free">免费</button>
+            <button type="button" class="tag-chip" data-action="toggle-tag-chip" data-tag="promo" data-i18n="models.tag.promo">促销</button>
+            <button type="button" class="tag-chip" data-action="toggle-tag-chip" data-tag="img" data-i18n="models.tag.img">图像</button>
+            <button type="button" class="tag-chip" data-action="toggle-tag-chip" data-tag="beta">BETA</button>
+            <button type="button" class="tag-chip" data-action="toggle-tag-chip" data-tag="new">NEW</button>
+            <button type="button" class="tag-chip" data-action="toggle-tag-chip" data-tag="fast">FAST</button>
+            <button type="button" class="tag-chip" data-action="toggle-tag-chip" data-tag="premium">Premium</button>
+            <button type="button" class="tag-chip" data-action="toggle-tag-chip" data-tag="rec" data-i18n="models.tag.rec">推荐</button>
+            <button type="button" class="tag-chip" data-action="toggle-tag-chip" data-tag="empty_mult" data-i18n="models.tag.emptyMult">无倍率</button>
+            <button type="button" class="tag-chip" data-action="toggle-tag-chip" data-tag="disabled" data-i18n="models.tag.catalogDisabled">目录禁用</button>
           </div>
         </section>
 
@@ -134,14 +134,14 @@
           <div class="card logs-pagination-card">
             <div class="flex justify-center items-center">
               <div class="pagination-controls logs-pagination-controls">
-                <button id="models_first" class="btn btn-secondary btn-sm" type="button" data-action="first-page">
+                <button id="models_first" class="btn btn-secondary btn-sm" type="button" data-action="first-models-page">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 17l-5-5 5-5"/>
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18V6"/>
                   </svg>
                   <span data-i18n="common.firstPage">首页</span>
                 </button>
-                <button id="models_prev" class="btn btn-secondary btn-sm" type="button" data-action="prev-page">
+                <button id="models_prev" class="btn btn-secondary btn-sm" type="button" data-action="prev-models-page">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 18l-6-6 6-6"/>
                   </svg>
@@ -162,19 +162,19 @@
                   />
                   <span data-i18n="logs.pageUnit">页</span>
                   <span class="logs-pagination-separator">|</span>
-                  <select id="models_page_size" class="form-input">
+                  <select id="models_page_size" class="form-input" data-change-action="change-models-page-size">
                     <option value="20">20</option>
                     <option value="50">50</option>
                     <option value="100">100</option>
                   </select>
                 </span>
-                <button id="models_next" class="btn btn-secondary btn-sm" type="button" data-action="next-page">
+                <button id="models_next" class="btn btn-secondary btn-sm" type="button" data-action="next-models-page">
                   <span data-i18n="common.nextPage">下一页</span>
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 6l6 6-6 6"/>
                   </svg>
                 </button>
-                <button id="models_last" class="btn btn-secondary btn-sm" type="button" data-action="last-page">
+                <button id="models_last" class="btn btn-secondary btn-sm" type="button" data-action="last-models-page">
                   <span data-i18n="common.lastPage">尾页</span>
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 7l5 5-5 5"/>
@@ -223,7 +223,7 @@
         <button type="button" class="close-btn" data-action="close-redirect-modal" data-i18n-aria-label="common.close" aria-label="关闭">&times;</button>
       </div>
       <div class="modal-body">
-        <input id="redirect-search" class="form-input" data-i18n-placeholder="models.redirect.search"
+        <input id="redirect-search" class="form-input" data-input-action="filter-redirect-models" data-i18n-placeholder="models.redirect.search"
           placeholder="搜索模型名" spellcheck="false" autocomplete="off">
         <p id="redirect-alias-note" class="chat-hint" data-i18n="models.redirect.aliasNote" hidden>当前经别名解析，非注册表重定向</p>
         <div id="redirect-model-list" class="redirect-list"></div>

@@ -28,53 +28,82 @@
   // 档级徽章走冷色递升阶（浅蓝→蓝→紫），不用告警色的红/琥珀
   const TIER_BADGE = { free: '#10b981', low: '#60a5fa', medium: '#3b82f6', high: '#8b5cf6' };
 
+  // 行按钮/弹窗/分页统一走共享委托注册表；dataset.model → 行数据的派发用 rowAction 收敛
+  const rowAction = (fn) => (el) => {
+    const row = rowOf(el.dataset.model);
+    if (row) fn(row);
+  };
+
   window.initPageBootstrap({
     topbarKey: 'models',
     run: () => {
-      document.getElementById('models-filter').addEventListener('input', (e) => {
-        filterText = e.target.value.trim().toLowerCase();
-        currentPage = 1;
-        render();
-      });
-      document.getElementById('models-filter-pills').addEventListener('click', (e) => {
-        const btn = e.target.closest('.time-range-btn');
-        if (!btn) return;
-        document.querySelectorAll('#models-filter-pills .time-range-btn').forEach((b) => b.classList.remove('active'));
-        btn.classList.add('active');
-        filterMode = btn.dataset.filter;
-        currentPage = 1;
-        render();
-      });
-      ['f-provider', 'f-api', 'f-tier', 'f-pricing', 'f-sort'].forEach((id) => {
-        document.getElementById(id).addEventListener('change', () => {
-          if (id === 'f-sort') {
-            try { localStorage.setItem('models.sort', document.getElementById(id).value); } catch (_) { /* ignore */ }
+      window.initDelegatedActions({
+        boundKey: 'modelsPageActionsBound',
+        click: {
+          'show-add-model-modal': () => openAddModal(),
+          'close-add-modal': () => closeAddModal(),
+          'confirm-add-model': () => addModel(),
+          'close-redirect-modal': () => closeRedirectModal(),
+          'clear-redirect': () => applyRedirect(''),
+          'apply-redirect': (el) => applyRedirect(el.dataset.model),
+          'toggle-tag-chip': (el) => {
+            const tag = el.dataset.tag;
+            if (activeTags.has(tag)) {
+              activeTags.delete(tag);
+              el.classList.remove('active');
+            } else {
+              activeTags.add(tag);
+              el.classList.add('active');
+            }
+            currentPage = 1;
+            render();
+          },
+          'first-models-page': () => { currentPage = 1; render(); },
+          'prev-models-page': () => { currentPage = Math.max(1, currentPage - 1); render(); },
+          'next-models-page': () => { currentPage = Math.min(totalPages, currentPage + 1); render(); },
+          'last-models-page': () => { currentPage = totalPages; render(); },
+          'toggle-model': rowAction((r) => save(r.model, !r.enabled, r.redirect_model || '')),
+          'reset-model-override': rowAction((r) => removeOverride(r.model)),
+          'delete-model-override': rowAction((r) => {
+            Modal.confirm(t('models.confirmDelete', { model: r.model }), { danger: true })
+              .then((ok) => { if (ok) removeOverride(r.model); });
+          }),
+          // 探活模态共享自 logs 页：模型锁定本行，协议默认 anthropic。
+          'test-model': rowAction((r) => window.openModelTestModal({ model: r.model, clientProtocol: 'anthropic' })),
+          'chat-model': rowAction((r) => window.openChatModal({ mode: 'admin', model: r.model, clientProtocol: 'anthropic' })),
+          'open-redirect-modal': rowAction(openRedirectModal)
+        },
+        change: {
+          'apply-models-filter': () => { currentPage = 1; render(); },
+          'change-models-sort': (el) => {
+            try { localStorage.setItem('models.sort', el.value); } catch (_) { /* ignore */ }
+            currentPage = 1;
+            render();
+          },
+          'change-models-page-size': (el) => {
+            pageSize = parseInt(el.value, 10) || 20;
+            try { localStorage.setItem('models.pageSize', String(pageSize)); } catch (_) { /* ignore */ }
+            currentPage = 1;
+            render();
           }
-          currentPage = 1;
-          render();
-        });
-      });
-      document.getElementById('models-tag-chips').addEventListener('click', (e) => {
-        const chip = e.target.closest('[data-tag]');
-        if (!chip) return;
-        const tag = chip.dataset.tag;
-        if (activeTags.has(tag)) {
-          activeTags.delete(tag);
-          chip.classList.remove('active');
-        } else {
-          activeTags.add(tag);
-          chip.classList.add('active');
+        },
+        input: {
+          'filter-models-text': (el) => {
+            filterText = el.value.trim().toLowerCase();
+            currentPage = 1;
+            render();
+          },
+          'filter-redirect-models': () => renderRedirectList()
         }
+      });
+
+      window.initTimeRangeSelector((filter) => {
+        filterMode = filter;
         currentPage = 1;
         render();
-      });
+      }, document.getElementById('models-filter-pills'));
+
       document.getElementById('models_page_size').value = String(pageSize);
-      document.getElementById('models_page_size').addEventListener('change', (e) => {
-        pageSize = parseInt(e.target.value, 10) || 20;
-        try { localStorage.setItem('models.pageSize', String(pageSize)); } catch (_) { /* ignore */ }
-        currentPage = 1;
-        render();
-      });
       document.getElementById('models_jump_page').addEventListener('keydown', (e) => {
         if (e.key !== 'Enter') return;
         const input = e.target;
@@ -89,40 +118,10 @@
           render();
         }
       });
-      document.getElementById('add-model-btn').addEventListener('click', openAddModal);
-      document.getElementById('models-tbody').addEventListener('click', onTableClick);
-      document.querySelector('.logs-pagination-card').addEventListener('click', (e) => {
-        const btn = e.target.closest('[data-action]');
-        if (!btn) return;
-        const actions = {
-          'first-page': () => { currentPage = 1; },
-          'prev-page': () => { currentPage = Math.max(1, currentPage - 1); },
-          'next-page': () => { currentPage = Math.min(totalPages, currentPage + 1); },
-          'last-page': () => { currentPage = totalPages; }
-        };
-        const fn = actions[btn.dataset.action];
-        if (fn) {
-          fn();
-          render();
-        }
-      });
-      document.getElementById('addModelModal').addEventListener('click', (e) => {
-        if (e.target.closest('[data-action="close-add-modal"]')) closeAddModal();
-        if (e.target.closest('[data-action="confirm-add-model"]')) addModel();
-      });
-      document.getElementById('redirect-search').addEventListener('input', renderRedirectList);
       document.getElementById('redirect-search').addEventListener('keydown', (e) => {
         if (e.key !== 'Enter') return;
         const first = document.querySelector('#redirect-model-list .redirect-item');
         if (first) applyRedirect(first.dataset.model);
-      });
-      document.getElementById('redirect-model-list').addEventListener('click', (e) => {
-        const item = e.target.closest('.redirect-item');
-        if (item) applyRedirect(item.dataset.model);
-      });
-      document.getElementById('redirectModal').addEventListener('click', (e) => {
-        if (e.target.closest('[data-action="close-redirect-modal"]')) closeRedirectModal();
-        if (e.target.closest('[data-action="clear-redirect"]')) applyRedirect('');
       });
       const savedSort = localStorage.getItem('models.sort');
       if (savedSort && [...document.getElementById('f-sort').options].some((o) => o.value === savedSort)) {
@@ -455,7 +454,7 @@
       enabledTd.dataset.mobileLabel = labels.enabled;
       const sw = h('button', 'channel-enable-switch ' + (r.enabled ? 'channel-enable-switch--on' : 'channel-enable-switch--off'));
       sw.type = 'button';
-      sw.dataset.action = 'toggle';
+      sw.dataset.action = 'toggle-model';
       sw.dataset.model = r.model;
       sw.setAttribute('role', 'switch');
       sw.setAttribute('aria-checked', String(r.enabled));
@@ -473,7 +472,7 @@
       }
       const editBtn = h('button', 'redirect-edit-btn');
       editBtn.type = 'button';
-      editBtn.dataset.action = 'redirect';
+      editBtn.dataset.action = 'open-redirect-modal';
       editBtn.dataset.model = r.model;
       editBtn.title = t('models.redirect.open');
       editBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
@@ -485,14 +484,14 @@
       actionsTd.style.whiteSpace = 'nowrap';
       const test = h('button', 'btn btn-secondary', t('models.action.test'));
       test.type = 'button';
-      test.dataset.action = 'test';
+      test.dataset.action = 'test-model';
       test.dataset.model = r.model;
       test.style.padding = '4px 10px';
       test.title = t('models.action.test');
       actionsTd.appendChild(test);
       const chat = h('button', 'btn btn-secondary', t('models.action.chat'));
       chat.type = 'button';
-      chat.dataset.action = 'chat';
+      chat.dataset.action = 'chat-model';
       chat.dataset.model = r.model;
       chat.style.padding = '4px 10px';
       chat.style.marginLeft = '6px';
@@ -504,7 +503,7 @@
         const registryOnly = (r.sources || []).every((s) => s === 'registry');
         const reset = h('button', 'btn btn-secondary', registryOnly ? t('models.action.delete') : t('models.action.reset'));
         reset.type = 'button';
-        reset.dataset.action = registryOnly ? 'delete' : 'reset';
+        reset.dataset.action = registryOnly ? 'delete-model-override' : 'reset-model-override';
         reset.dataset.model = r.model;
         reset.style.padding = '4px 10px';
         reset.style.marginLeft = '6px';
@@ -528,29 +527,6 @@
 
   function rowOf(model) {
     return rows.find((r) => r.model === model);
-  }
-
-  function onTableClick(e) {
-    const btn = e.target.closest('[data-action]');
-    if (!btn) return;
-    const row = rowOf(btn.dataset.model);
-    if (!row) return;
-    if (btn.dataset.action === 'toggle') {
-      save(row.model, !row.enabled, row.redirect_model || '');
-    } else if (btn.dataset.action === 'reset') {
-      removeOverride(row.model);
-    } else if (btn.dataset.action === 'delete') {
-      Modal.confirm(t('models.confirmDelete', { model: row.model }), { danger: true }).then((ok) => {
-        if (ok) removeOverride(row.model);
-      });
-    } else if (btn.dataset.action === 'test') {
-      // 探活模态共享自 logs 页：模型锁定本行，协议默认 anthropic。
-      window.openModelTestModal({ model: row.model, clientProtocol: 'anthropic' });
-    } else if (btn.dataset.action === 'chat') {
-      window.openChatModal({ mode: 'admin', model: row.model, clientProtocol: 'anthropic' });
-    } else if (btn.dataset.action === 'redirect') {
-      openRedirectModal(row);
-    }
   }
 
   function openAddModal() {
@@ -597,6 +573,7 @@
     items.forEach((r) => {
       const item = h('button', 'redirect-item' + (r.model === cur ? ' redirect-item--active' : ''));
       item.type = 'button';
+      item.dataset.action = 'apply-redirect';
       item.dataset.model = r.model;
       item.appendChild(h('span', 'redirect-item-name', r.model));
       const label = r.catalog && r.catalog.label;
@@ -607,6 +584,7 @@
     if (typed && !items.some((r) => r.model.toLowerCase() === q)) {
       const item = h('button', 'redirect-item redirect-item--custom');
       item.type = 'button';
+      item.dataset.action = 'apply-redirect';
       item.dataset.model = typed;
       item.appendChild(h('span', 'redirect-item-name', t('models.redirect.useInput', { target: typed })));
       list.appendChild(item);
