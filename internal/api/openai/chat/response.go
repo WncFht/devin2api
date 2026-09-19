@@ -347,7 +347,11 @@ func messageToChat(message *llm.AssistantMessage) map[string]any {
 			textParts = append(textParts, content.Text)
 		case llm.ThinkingContent:
 			// 非流式模式下把思考单独放到 reasoning_content，正文只放 text。
-			reasoningParts = append(reasoningParts, content.Thinking)
+			// redacted/纯签名块的 Thinking 为空，跳过以免下发
+			// "reasoning_content":"" 这种带键空值。
+			if content.Thinking != "" {
+				reasoningParts = append(reasoningParts, content.Thinking)
+			}
 		case llm.ToolCall:
 			toolCalls = append(toolCalls, map[string]any{
 				"id":       content.ID,
