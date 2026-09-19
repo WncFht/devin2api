@@ -809,7 +809,7 @@ func TestQuotaDrainFlushPending(t *testing.T) {
 	h := &Handler{store: st}
 	_ = st.Close() // 落库必败，喂两笔挂账
 	for i := 0; i < 2; i++ {
-		h.persistQuotaSample(
+		_ = h.persistQuotaSample(
 			&store.QuotaSample{At: 1700000000 + int64(i*300), Account: "randall", DailyRemaining: f64(90 - float64(i))})
 	}
 	if stats := h.quotaPersistStats(); stats["pending_samples"] != 2 {
@@ -868,7 +868,9 @@ func TestQuotaDrainFlushWaitsInflight(t *testing.T) {
 		_, _ = conn.ExecContext(context.Background(), "COMMIT")
 	}()
 
-	go h.persistQuotaSample(&store.QuotaSample{At: 1700000000, Account: "randall", DailyRemaining: f64(90)})
+	go func() {
+		_ = h.persistQuotaSample(&store.QuotaSample{At: 1700000000, Account: "randall", DailyRemaining: f64(90)})
+	}()
 	// 等在途计数起来再排空：否则冲刷读到的 persistDone 还是 nil，
 	// 等待路径根本没被踩到。
 	deadline := time.Now().Add(2 * time.Second)
