@@ -268,6 +268,11 @@ func classifyGate(legs []legResult) gateVerdict {
 
 // ---- mode=proxy：走 devin-2api /v1/chat/completions ----
 
+// proxyLegClient 显式不经 HTTP(S)_PROXY 环境变量选路：本腿量的是
+// devin-2api 实例的直连路径，环境代理会把探测流量劫持到代理出口，
+// 延迟与缓存判读全部失真。
+var proxyLegClient = &http.Client{Transport: &http.Transport{Proxy: nil}}
+
 // runProxyLeg 经 OpenAI Chat Completions 前端打一腿：prompt_cache_key
 // 承载会话身份（SessionKey 的标准通道），非流式响应一次取回 usage
 // 与正文；X-Request-Id 头回写实例侧调试 dir 供交叉取证。
@@ -292,7 +297,7 @@ func runProxyLeg(ctx context.Context, baseURL, key, model, session, sys, msg str
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	start := time.Now()
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := proxyLegClient.Do(req)
 	res.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
 		res.Err = err.Error()
