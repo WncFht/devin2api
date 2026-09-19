@@ -669,11 +669,12 @@ html[data-resolved-theme="dark"] .chat-message {
 
 
 :root {
-  /* 双主题统一走 warning-* 令牌：暗色下令牌自身翻成琥珀系，不再另起 cyan */
-  --logs-pending-row-bg: var(--warning-50);
-  --logs-pending-row-hover-bg: var(--warning-100);
-  --logs-pending-badge-bg: var(--warning-100);
-  --logs-pending-badge-fg: var(--warning-700);
+  /* 在途行用品牌紫淡染——琥珀是"警告"语义，进行中是中性状态；
+     color-mix 随 --primary-500 的暗色提亮自动适配，无需另写暗色块 */
+  --logs-pending-row-bg: color-mix(in srgb, var(--primary-500) 7%, transparent);
+  --logs-pending-row-hover-bg: color-mix(in srgb, var(--primary-500) 12%, transparent);
+  --logs-pending-badge-bg: color-mix(in srgb, var(--primary-500) 15%, transparent);
+  --logs-pending-badge-fg: var(--primary-500);
 }
 
 /* API Key 测试按钮样式 */

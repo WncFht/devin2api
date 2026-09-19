@@ -88,7 +88,7 @@
   document.documentElement.style.color = resolvedTheme === 'dark' ? '#e5e7eb' : '#111827';
 
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', resolvedTheme === 'dark' ? '#0f172a' : '#3b82f6');
+  if (meta) meta.setAttribute('content', resolvedTheme === 'dark' ? '#0f172a' : '#6341f2');
 
   function clearInitialPaintStyle() {
     document.documentElement.style.removeProperty('background-color');

@@ -1,0 +1,126 @@
+/* ===== 筛选栏二级披露区与已选条件 chips（logs/stats/trend 共用） ===== */
+
+/* 「更多筛选」开关：纯文本按钮，挂在主行尾、actions 之前 */
+.filter-more-toggle {
+  --toggle-fg: var(--primary-600);
+  --toggle-hover-bg: var(--primary-50);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 var(--space-2);
+  flex: 0 0 auto;
+  border: none;
+  border-radius: var(--radius-base);
+  background: transparent;
+  color: var(--toggle-fg);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.filter-more-toggle:hover {
+  background: var(--toggle-hover-bg);
+}
+
+.filter-more-chevron {
+  width: 14px;
+  height: 14px;
+  transition: transform var(--duration-fast);
+}
+
+.filter-more-toggle[aria-expanded="true"] .filter-more-chevron {
+  transform: rotate(180deg);
+}
+
+/* 二级筛选区：收起时整盒消失；open 时解体成透明容器，
+   子 .filter-group 直接回流进 .filter-controls 的 flex 布局 */
+.filter-secondary {
+  display: none;
+}
+
+.filter-secondary.open {
+  display: contents;
+}
+
+/* 已选条件 chips：折叠态下仍给出筛选回执，× 复位该字段 */
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--surface-border);
+}
+
+.filter-chips[hidden] {
+  display: none;
+}
+
+.filter-chip {
+  --chip-bg: var(--primary-50);
+  --chip-bg-hover: var(--primary-100);
+  --chip-border: var(--primary-200);
+  --chip-border-hover: var(--primary-300);
+  --chip-fg: var(--primary-700);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 280px;
+  padding: 3px 6px 3px 10px;
+  border: 1px solid var(--chip-border);
+  border-radius: var(--radius-full);
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.filter-chip:hover {
+  background: var(--chip-bg-hover);
+  border-color: var(--chip-border-hover);
+}
+
+.filter-chip-name {
+  font-weight: 500;
+}
+
+.filter-chip-value {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.filter-chip-value::before {
+  content: ':';
+  margin: 0 3px 0 1px;
+  font-weight: 400;
+  opacity: 0.55;
+}
+
+.filter-chip-x {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  opacity: 0.6;
+}
+
+.filter-chip:hover .filter-chip-x {
+  opacity: 1;
+}
+
+html[data-resolved-theme="dark"] .filter-more-toggle {
+  --toggle-fg: var(--primary-400);
+  --toggle-hover-bg: rgba(124, 87, 240, 0.14);
+}
+
+html[data-resolved-theme="dark"] .filter-chip {
+  --chip-bg: rgba(124, 87, 240, 0.14);
+  --chip-bg-hover: rgba(124, 87, 240, 0.22);
+  --chip-border: rgba(167, 139, 250, 0.35);
+  --chip-border-hover: rgba(167, 139, 250, 0.55);
+  --chip-fg: #c4b5fd;
+}

@@ -379,13 +379,12 @@
       ${sub ? `<span class="kpi-sub">${sub}</span>` : ''}
     </div>`;
     grid.innerHTML = [
-      card(t('accounts.kpi.lanes'), list.length, null, null),
-      card(t('accounts.kpi.healthy'), healthy, list.length ? t('accounts.kpi.of', { n: list.length }) : null,
+      card(t('accounts.kpi.healthy'), `${healthy}/${list.length}`, null,
         healthy === list.length ? 'healthy' : 'warning'),
       card(t('accounts.kpi.requests'), num(requests), matrixErr ? esc(t('accounts.partial')) : null, null),
       card(t('accounts.kpi.errors'), num(errors), rateLimited ? t('accounts.kpi.rlSub', { n: rateLimited }) : null,
         errors ? 'critical' : 'healthy'),
-      card(t('accounts.kpi.switches'), num(switches), null, switches ? 'warning' : null)
+      card(t('accounts.kpi.switches'), num(switches), null, null)
     ].join('');
   }
 

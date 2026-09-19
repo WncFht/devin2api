@@ -127,6 +127,29 @@
   white-space: nowrap;
 }
 
+/* 零流量卡的归属容器：一条 muted chip 排，不再占网格位。
+   节点仍是同一张 .channel-card（id 契约不动），这里只加 pill 外形与弱化底色。 */
+.channel-empty-strip:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.channel-empty-strip .channel-card {
+  border-radius: var(--radius-full);
+  background: var(--surface-bg-muted);
+}
+
+.channel-empty-strip .channel-card-header {
+  gap: var(--space-3);
+}
+
+.channel-empty-strip .channel-card-title {
+  color: var(--neutral-600);
+  font-weight: var(--font-medium);
+}
+
 .cost-label {
   display: block;
   font-size: var(--text-xs);
@@ -183,6 +206,17 @@
 
 /* ===== 用量概览：复用 channel-card 壳，内层配额条与令牌行 ===== */
 
+.usage-quota-group {
+  margin-top: var(--space-4);
+}
+
+.usage-quota-group-title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--neutral-600);
+}
+
 .usage-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -202,11 +236,11 @@
 }
 
 .usage-quota-label {
-  width: 3.5em;
   flex-shrink: 0;
   font-size: var(--text-xs);
   color: var(--neutral-500);
   font-weight: var(--font-medium);
+  white-space: nowrap;
 }
 
 .usage-quota-track {

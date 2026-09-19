@@ -247,10 +247,24 @@
       if (grid) grid.setAttribute('aria-busy', 'false');
     }
 
-    // 更新统计显示：四张入口端点卡片，缺席的 api 显示 0
+    // 更新统计显示：四张入口端点卡片，缺席的 api 显示 0；
+    // 零流量卡整体挪进 chip 排（同 DOM 节点搬家，id 契约与 --empty 态不变），
+    // 让有流量的端点独占网格位，流量恢复即移回。
     function updateStatsDisplay() {
       const byApi = statsData.by_api || {};
       ENDPOINT_CARD_KEYS.forEach(api => updateOverviewCard(api, byApi[api]));
+      const grid = document.getElementById('channel-grid');
+      const strip = document.getElementById('channel-empty-strip');
+      if (!grid || !strip) return;
+      let emptyCount = 0;
+      ENDPOINT_CARD_KEYS.forEach(api => {
+        const card = document.getElementById(`type-${api}-card`);
+        if (!card) return;
+        const isEmpty = card.classList.contains('channel-card--empty');
+        (isEmpty ? strip : grid).appendChild(card);
+        if (isEmpty) emptyCount++;
+      });
+      strip.hidden = emptyCount === 0;
     }
 
     // 更新单个概览卡片的统计
@@ -457,20 +471,26 @@
     function renderUsageCards() {
       const section = document.getElementById('usage-section');
       const grid = document.getElementById('usage-grid');
-      if (!section || !grid) return;
+      const quotaGroup = document.getElementById('usage-quota-group');
+      const quotaGrid = document.getElementById('usage-quota-grid');
+      if (!section || !grid || !quotaGroup || !quotaGrid) return;
       const snap = usagePayload && !usagePayload.disabled ? usagePayload.snapshot : null;
       const accounts = (quotaPayload && quotaPayload.accounts) || {};
       const parts = [];
       if (snap) {
         parts.push(todayUsageCardHtml(snap), topKeysCardHtml(snap));
       }
-      Object.keys(accounts).sort().forEach(name => parts.push(laneUsageCardHtml(name, accounts[name])));
-      const html = parts.filter(Boolean).join('');
-      if (!html) {
+      const lanes = Object.keys(accounts).sort()
+        .map(name => laneUsageCardHtml(name, accounts[name]))
+        .filter(Boolean);
+      const mainHtml = parts.filter(Boolean).join('');
+      if (!mainHtml && !lanes.length) {
         section.hidden = true;
         return;
       }
-      grid.innerHTML = html;
+      grid.innerHTML = mainHtml;
+      quotaGrid.innerHTML = lanes.join('');
+      quotaGroup.hidden = lanes.length === 0;
       section.hidden = false;
     }
 

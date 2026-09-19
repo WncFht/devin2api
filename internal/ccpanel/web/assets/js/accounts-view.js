@@ -190,7 +190,7 @@
     const pills = pillsHTML(a, 3);
     const lane = a.lane || {};
     const fail = lane.last_failure_at && (Date.now() - Date.parse(lane.last_failure_at) < 24 * 3600e3)
-      ? `<div class="acct-fail-line" title="${esc((lane.last_failure_code || '') + (lane.last_failure_message ? ' — ' + lane.last_failure_message : ''))}">${esc(relTime(lane.last_failure_at))} · ${esc(lane.last_failure_code || t('accounts.st.unknownError'))}</div>`
+      ? `<div class="acct-fail-line" title="${esc((lane.last_failure_code || '') + (lane.last_failure_message ? ' — ' + lane.last_failure_message : ''))}">${esc(t('accounts.ev.failure'))} ${esc(relTime(lane.last_failure_at))} · ${esc(lane.last_failure_code || t('accounts.st.unknownError'))}</div>`
       : '';
     return `<div class="acct-cell-status"><div class="acct-badges">${pills}</div>${fail}</div>`;
   }
@@ -265,8 +265,10 @@
     if (lane.inflight !== undefined && lane.inflight !== null) {
       bits.push(`<div>${esc(t('accounts.m.inflight'))} ${num(lane.inflight)}</div>`);
     }
-    const ttfb = [u.ttfb_p50, u.ttfb_p90].filter((v) => Number.isFinite(Number(v)));
-    if (ttfb.length) bits.push(`<div>TTFB ${ttfb.map((v) => Math.round(Number(v)) + 'ms').join('/')}</div>`);
+    const ttfb = [['p50', u.ttfb_p50], ['p90', u.ttfb_p90]]
+      .filter(([, v]) => Number.isFinite(Number(v)))
+      .map(([k, v]) => `${k} ${Math.round(Number(v))}ms`);
+    if (ttfb.length) bits.push(`<div>TTFB ${ttfb.join(' · ')}</div>`);
     if (u.tps_now !== undefined && u.tps_now !== null && Number.isFinite(Number(u.tps_now))) {
       bits.push(`<div>TPS ${fmtN(u.tps_now)}</div>`);
     }
@@ -519,7 +521,7 @@
         splitLine: { lineStyle: { color: theme.splitLine } }
       },
       series: [
-        mk(t('accounts.curveDaily'), '#3b82f6', (p) => p.daily_remaining),
+        mk(t('accounts.curveDaily'), '#7f56f1', (p) => p.daily_remaining),
         mk(t('accounts.curveWeekly'), '#10b981', (p) => p.weekly_remaining)
       ]
     };

@@ -194,6 +194,12 @@
     text-align: right;
   }
 
+  /* 特性列给足常见双徽标（档位+img）一行放下的宽度，别竖叠 */
+  .models-table th:nth-child(3),
+  .models-table td:nth-child(3) {
+    min-width: 96px;
+  }
+
   /* 启用列是开关，居中；操作列右对齐 */
   .models-table th:nth-child(9),
   .models-table td:nth-child(9) {
@@ -222,7 +228,13 @@
 }
 
 .resolved-cell:hover .redirect-edit-btn {
+  opacity: 1;
   color: var(--neutral-900);
+}
+
+/* 键盘到达时也要现身，纯 hover 隐藏对 Tab 用户不可见 */
+.redirect-edit-btn:focus-visible {
+  opacity: 1;
 }
 
 .redirect-edit-btn {
@@ -238,7 +250,8 @@
   background: transparent;
   color: var(--color-text-secondary);
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  opacity: 0;
+  transition: background 0.15s ease, color 0.15s ease, opacity 0.15s ease;
 }
 
 .redirect-edit-btn:hover {

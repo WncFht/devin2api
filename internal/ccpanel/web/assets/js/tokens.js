@@ -4,6 +4,8 @@
     const API_BASE = '/admin';
     let allTokens = [];
     let isToday = true;      // 是否为本日（本日才显示最近一分钟）
+    // 「仅显示活跃」：零调用令牌在批量场景下占多数，默认关（全量可见），选择持久化
+    let activeOnly = localStorage.getItem('ccload_tokens_active_only') === '1';
 
     // 当前选中的时间范围(默认为本日)
     let currentTimeRange = 'today';
@@ -104,6 +106,7 @@
       initExpirySelects();
       stampTokenQuotaFields('token');
       stampTokenQuotaFields('edit');
+      document.getElementById('tokens-active-only').checked = activeOnly;
 
       window.bindTimeRangeSelector({
         containerId: 'tokens-time-range',
@@ -192,6 +195,11 @@
           },
           'toggle-select-all-allowed-models': (actionTarget) => toggleSelectAllAllowedModels(actionTarget.checked),
           'toggle-select-all-models': (actionTarget) => toggleSelectAllModels(actionTarget.checked),
+          'toggle-active-only': (actionTarget) => {
+            activeOnly = actionTarget.checked;
+            localStorage.setItem('ccload_tokens_active_only', activeOnly ? '1' : '0');
+            renderTokens();
+          },
           'toggle-allowed-model': (actionTarget) => {
             const index = Number(actionTarget.dataset.index);
             if (!Number.isNaN(index)) {
@@ -274,11 +282,22 @@
 
       const tbody = document.createElement('tbody');
 
+      // 「仅显示活跃」= 本范围内有过成功或失败调用；仓内行照留，过滤只影响展示
+      const visibleTokens = activeOnly
+        ? allTokens.filter((token) => (token.success_count || 0) + (token.failure_count || 0) > 0)
+        : allTokens;
+
       // 行渲染统一走 tpl-token-row 模板
-      allTokens.forEach(token => {
+      visibleTokens.forEach(token => {
         const row = createTokenRowWithTemplate(token);
         if (row) tbody.appendChild(row);
       });
+
+      if (visibleTokens.length === 0) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td colspan="11" class="tokens-no-active">${t('tokens.noActiveTokens')}</td>`;
+        tbody.appendChild(tr);
+      }
 
       table.appendChild(tbody);
       container.innerHTML = '';

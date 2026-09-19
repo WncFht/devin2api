@@ -243,7 +243,7 @@
 
 .acct-fail-line {
   font-size: var(--text-2xs);
-  color: var(--error-600);
+  color: var(--color-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

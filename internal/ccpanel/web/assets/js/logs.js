@@ -480,7 +480,8 @@ function buildActiveRequestTimingHtml(req, elapsedRaw, elapsedText) {
   const durationDisplay = buildDurationTimingHtml(elapsedRaw, `${elapsedText}s...`);
   if (req.is_streaming && req.client_first_byte_time > 0) {
     const firstByte = Number(req.client_first_byte_time);
-    return `<span class="log-timing-pair">${buildFirstByteTimingHtml(firstByte, `${firstByte.toFixed(2)}s`)}${buildTimingSeparatorHtml()}${durationDisplay}</span>`;
+    const pairTitle = ` title="${escapeHtml(t('logs.tip.timingPair', { fb: firstByte.toFixed(2), dur: String(elapsedText) }))}"`;
+    return `<span class="log-timing-pair"${pairTitle}>${buildFirstByteTimingHtml(firstByte, `${firstByte.toFixed(2)}s`)}${buildTimingSeparatorHtml()}${durationDisplay}</span>`;
   }
   return durationDisplay;
 }
@@ -1434,7 +1435,10 @@ function renderLogs(data) {
       const firstByteDisplay = hasFirstByte ?
         buildFirstByteTimingHtml(entry.first_byte_time, entry.first_byte_time.toFixed(2)) :
         '<span class="log-timing-first-byte logs-dash">—</span>';
-      responseTimingDisplay = `<span class="log-timing-pair">${firstByteDisplay}${buildTimingSeparatorHtml()}${durationDisplay}</span>${streamFlag}`;
+      const pairTitle = hasFirstByte && hasDuration
+        ? ` title="${escapeHtml(t('logs.tip.timingPair', { fb: entry.first_byte_time.toFixed(2), dur: entry.duration.toFixed(2) }))}"`
+        : '';
+      responseTimingDisplay = `<span class="log-timing-pair"${pairTitle}>${firstByteDisplay}${buildTimingSeparatorHtml()}${durationDisplay}</span>${streamFlag}`;
     } else {
       responseTimingDisplay = `<span class="log-timing-pair">${durationDisplay}</span>${streamFlag}`;
     }

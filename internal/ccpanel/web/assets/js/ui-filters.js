@@ -363,20 +363,36 @@
   // 页面筛选组合框的统一形态：attach 到 page-filters 渲染的 {inputId}_dropdown，
   // 允许自由输入、空提交取首项（allLabel）。输入元素缺席（布局未渲染该字段）
   // 返回 null。opts.initialLabel 缺省取 initialValue || allLabel。
+  // 选中/程序写入都会经 input 上的 filter:change 事件冒泡出去（chip 引擎据此重算），
+  // FilterControlResets 登记表给 chip 提供「回到首项」的复位入口。
   function initFilterCombobox(opts) {
     if (typeof window.createSearchableCombobox !== 'function') return null;
-    if (!document.getElementById(opts.inputId)) return null;
-    return window.createSearchableCombobox({
+    const input = document.getElementById(opts.inputId);
+    if (!input) return null;
+    const allLabel = opts.allLabel || '';
+    input.dataset.filterAllLabel = allLabel;
+    const emitChange = () => input.dispatchEvent(new CustomEvent('filter:change', { bubbles: true }));
+    const inst = window.createSearchableCombobox({
       inputId: opts.inputId,
       dropdownId: opts.inputId + '_dropdown',
       attachMode: true,
       allowCustomInput: true,
       commitEmptyAsFirst: true,
       initialValue: opts.initialValue || '',
-      initialLabel: opts.initialLabel !== undefined ? opts.initialLabel : (opts.initialValue || opts.allLabel),
-      getOptions: () => [{ value: '', label: opts.allLabel }, ...opts.getOptions()],
-      onSelect: opts.onSelect
+      initialLabel: opts.initialLabel !== undefined ? opts.initialLabel : (opts.initialValue || allLabel),
+      getOptions: () => [{ value: '', label: allLabel }, ...opts.getOptions()],
+      onSelect: (value, label) => {
+        if (typeof opts.onSelect === 'function') opts.onSelect(value, label);
+        emitChange();
+      }
     });
+    if (inst) {
+      (window.FilterControlResets = window.FilterControlResets || new Map()).set(opts.inputId, () => {
+        inst.setValue('', allLabel);
+        emitChange();
+      });
+    }
+    return inst;
   }
 
   window.bindFilterApplyInputs = bindFilterApplyInputs;

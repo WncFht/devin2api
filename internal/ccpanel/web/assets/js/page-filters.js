@@ -134,6 +134,9 @@
     };
   }
 
+  // primary 常驻一行；secondary 收进「更多筛选」披露区（display:contents 参与
+  // 同一 flex 流，不包额外盒子）；actions 永远排在末尾。所有字段元素始终在 DOM
+  // 中——页面脚本按 id 绑定，披露只是视觉折叠。
   const LAYOUTS = {
     stats: {
       barClass: 'filter-bar stats-filter-bar mt-2',
@@ -141,7 +144,9 @@
       groupClass: 'stats-filter-group',
       checkboxGroupClass: 'stats-filter-group stats-filter-group--checkbox',
       actionsClass: 'stats-filter-actions',
-      items: ['timeRange', 'api', 'modelCombobox', 'authToken', 'statsSummary']
+      primary: ['timeRange', 'modelCombobox'],
+      secondary: ['api', 'authToken'],
+      actions: ['statsSummary']
     },
     logs: {
       barClass: 'filter-bar logs-filter-bar mt-2',
@@ -150,17 +155,19 @@
       timeRangeGroupClass: 'logs-filter-group--range',
       authTokenGroupClass: 'logs-filter-group--token',
       actionsClass: 'logs-filter-actions',
-      // 单条 flex 流一行排布：先「哪些请求」（范围/入口/模型/令牌/来源）
-      // 后「结果如何」（状态码/结果/失败阶段），清空+筛选靠右收尾；
       // 列显隐/导出不参与查询，挪到表格上方工具条（logs.html）。
-      items: ['timeRange', 'api', 'modelCombobox', 'authToken', 'account', 'logSource', 'status', 'result', 'errorStage', 'logsActions']
+      primary: ['timeRange', 'modelCombobox', 'status'],
+      secondary: ['api', 'authToken', 'account', 'logSource', 'result', 'errorStage'],
+      actions: ['logsActions']
     },
     trend: {
       barClass: 'filter-bar mt-2',
       controlsClass: 'filter-controls trend-filter-controls',
       groupClass: '',
       actionsClass: '',
-      items: ['timeRange', 'api', 'modelSelect', 'authToken', 'filterButton']
+      primary: ['timeRange'],
+      secondary: ['api', 'modelSelect', 'authToken'],
+      actions: ['filterButton']
     }
   };
 
@@ -172,16 +179,175 @@
     }
 
     const fields = buildSharedFields(config);
-    const content = (config.items || [])
+    const pick = (keys) => (keys || [])
       .map((item) => fields[item] || '')
       .filter(Boolean)
       .join('\n');
+    const secondaryHtml = pick(config.secondary);
+    const disclosureHtml = secondaryHtml
+      ? `<button type="button" class="filter-more-toggle" data-filter-more-toggle aria-expanded="false">
+            <span data-i18n="common.moreFilters">更多筛选</span>
+            <svg class="filter-more-chevron" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M6 8l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="filter-secondary" data-filter-secondary>
+            ${secondaryHtml}
+          </div>`
+      : '';
 
     return `<div class="${config.barClass}">
           <div class="${config.controlsClass}">
-            ${content}
+            ${pick(config.primary)}
+            ${disclosureHtml}
+            ${pick(config.actions)}
           </div>
+          <div class="filter-chips" data-filter-chips hidden></div>
         </div>`;
+  }
+
+  // ============================================================
+  // 已选条件 chips：折叠后仍给出「当前筛了什么」的可视回执，
+  // 点 chip 上的 × 把该字段复位到首项/默认并立即应用。
+  // ============================================================
+
+  function escapeChipText(str) {
+    return String(str).replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+  }
+
+  function initFilterChips(container) {
+    const bar = container.querySelector('.filter-bar');
+    const chipsRow = bar && bar.querySelector('[data-filter-chips]');
+    if (!bar || !chipsRow) return;
+
+    const secondary = bar.querySelector('[data-filter-secondary]');
+    const toggle = bar.querySelector('[data-filter-more-toggle]');
+    if (secondary && toggle) {
+      toggle.addEventListener('click', () => {
+        toggle.setAttribute('aria-expanded', String(secondary.classList.toggle('open')));
+      });
+    }
+
+    let chipSpecs = new Map();
+
+    // 每个 .filter-group 按其控件形态推导：是否激活（≠默认值）、展示文案、
+    // 复位动作。applyViaButton=true 的控件没有原生 apply 事件，复位后需代点筛选按钮。
+    function specFor(group) {
+      const labelEl = group.querySelector('.filter-label');
+      const label = labelEl ? labelEl.textContent.trim() : '';
+
+      const checkbox = group.querySelector('input[type="checkbox"]');
+      if (checkbox) {
+        const text = group.querySelector('.filter-checkbox-label span');
+        return {
+          key: checkbox.id,
+          label: text ? text.textContent.trim() : label,
+          display: '',
+          active: checkbox.checked !== checkbox.defaultChecked,
+          applyViaButton: false,
+          reset() {
+            checkbox.checked = checkbox.defaultChecked;
+            checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        };
+      }
+
+      // searchable-select 给每个 select 挂了影子 combobox input（无 filterAllLabel），
+      // 必须先查 select——它才是语义控件；select 缺席的组才是真 combobox 字段。
+      const select = group.querySelector('select');
+      if (select) {
+        if (!select.options.length) return null;
+        const defaultValue = select.options[0].value;
+        const selected = select.options[select.selectedIndex];
+        return {
+          key: select.id,
+          label,
+          display: selected ? selected.textContent.trim() : select.value,
+          active: select.value !== defaultValue,
+          applyViaButton: true,
+          reset() {
+            select.value = defaultValue;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        };
+      }
+
+      const combo = group.querySelector('input.filter-combobox');
+      if (combo) {
+        const allLabel = (combo.dataset.filterAllLabel || '').trim();
+        const value = combo.value.trim();
+        return {
+          key: combo.id,
+          label,
+          display: value,
+          active: value !== '' && value !== allLabel,
+          applyViaButton: true,
+          reset() {
+            const reset = window.FilterControlResets && window.FilterControlResets.get(combo.id);
+            if (reset) reset();
+          }
+        };
+      }
+
+      const input = group.querySelector('input.filter-input');
+      if (input) {
+        const value = input.value.trim();
+        return {
+          key: input.id,
+          label,
+          display: value,
+          active: value !== '',
+          applyViaButton: true,
+          reset() {
+            input.value = '';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        };
+      }
+
+      return null;
+    }
+
+    function computeChips() {
+      const specs = Array.from(bar.querySelectorAll('.filter-group'))
+        .filter((group) => !group.hidden)
+        .map(specFor)
+        .filter((spec) => spec && spec.active);
+      chipSpecs = new Map(specs.map((spec) => [spec.key, spec]));
+      chipsRow.innerHTML = specs.map((spec) => {
+        const name = escapeChipText(spec.label);
+        const value = spec.display
+          ? `<span class="filter-chip-value">${escapeChipText(spec.display)}</span>`
+          : '';
+        return `<button type="button" class="filter-chip" data-chip-key="${escapeChipText(spec.key)}"><span class="filter-chip-name">${name}</span>${value}<svg class="filter-chip-x" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M6 6l8 8M14 6l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>`;
+      }).join('');
+      chipsRow.hidden = specs.length === 0;
+    }
+
+    chipsRow.addEventListener('click', (e) => {
+      const chip = e.target.closest('[data-chip-key]');
+      if (!chip) return;
+      const spec = chipSpecs.get(chip.dataset.chipKey);
+      if (!spec) return;
+      spec.reset();
+      if (spec.applyViaButton) bar.querySelector('#btn_filter')?.click();
+      computeChips();
+    });
+
+    bar.addEventListener('change', computeChips);
+    bar.addEventListener('input', computeChips);
+    bar.addEventListener('filter:change', computeChips);
+    bar.addEventListener('click', (e) => {
+      if (e.target.closest('#btn_filter, #btn_clear_filters')) setTimeout(computeChips, 0);
+    });
+
+    if (window.i18n && typeof window.i18n.onLocaleChange === 'function') {
+      window.i18n.onLocaleChange(() => setTimeout(computeChips, 0));
+    }
+
+    // 恢复值/选项列表/角色显隐都在渲染后异步落地，分档补算
+    [0, 400, 1500].forEach((delay) => setTimeout(computeChips, delay));
   }
 
   function initPageFilters(root = document) {
@@ -191,6 +357,7 @@
       const layoutName = container.getAttribute('data-page-filters');
       if (!layoutName) return;
       container.innerHTML = renderLayout(layoutName);
+      initFilterChips(container);
     });
   }
 

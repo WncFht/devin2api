@@ -1291,3 +1291,22 @@ html[data-resolved-theme="dark"] {
   border-color: var(--warning-200);
   color: var(--warning-700);
 }
+
+/* 「仅显示活跃」开关：贴在表格上方的轻量工具条 */
+.tokens-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-bottom: var(--space-2);
+}
+
+.tokens-active-toggle {
+  font-size: var(--text-13);
+  color: var(--color-text-secondary);
+}
+
+td.tokens-no-active {
+  padding: var(--space-4);
+  text-align: center;
+  color: var(--color-text-secondary);
+}

@@ -83,15 +83,20 @@
           </div>
         </section>
 
-        <!-- 四个入口端点固定展示 -->
+        <!-- 四个入口端点固定展示；零流量卡由 index.js 挪入下方 chip 排，不占网格位 -->
         <section class="mb-6">
           <div class="grid grid-cols-2 animate-slide-up animate-delay-2 gap-space-3" id="channel-grid">
             <!-- 渠道卡片由 index.js 按 tpl-channel-card 模板渲染 -->
           </div>
+          <div id="channel-empty-strip" class="channel-empty-strip" hidden></div>
         </section>
-        <!-- 用量概览：今日聚合 + 高频令牌 + 逐号配额（admin 专属；加载失败保持隐藏） -->
+        <!-- 用量概览：今日聚合 + 高频令牌走主网格，逐号配额单列一组（admin 专属；加载失败保持隐藏） -->
         <section class="mb-6" id="usage-section" hidden>
           <div class="usage-grid animate-slide-up animate-delay-3" id="usage-grid"></div>
+          <div class="usage-quota-group" id="usage-quota-group" hidden>
+            <h3 class="usage-quota-group-title" data-i18n="index.usage.laneQuotas">号池配额</h3>
+            <div class="usage-grid" id="usage-quota-grid"></div>
+          </div>
         </section>
 
       </div>
