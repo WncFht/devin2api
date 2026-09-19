@@ -824,7 +824,13 @@ func detachedRingKey(key string) string {
 }
 
 // stats 返回完成缓存快照：在场条目按态分解 + 累计计数 + 事件环
-// （新在前）。每请求一次的轮询成本是 8 条上限的线性扫。
+// （新在前）。每请求一次的轮询成本是 8 条上限的线性扫。遍历顺手
+// 清收过期条目——与 lookup/admit 相同的 evictLocked 惰性口径：低流量
+// 期两条惰性路径数小时不点火，metrics 轮询就此兼任被动清扫器，entries
+// 现值与 expired/孤儿记账不再被尸体驻留推迟。running 条目过期时其
+// drainCtx 期限已先点火（泵的存活上界先于 admit 写 expiresAt 创建），
+// evictLocked 的 drainCancel 落在已断的 ctx 上，不抢泵的 ttl_expired
+// 终局归因。
 func (registry *detachedRegistry) stats() DetachedStats {
 	stats := DetachedStats{}
 	if registry == nil {
@@ -832,10 +838,17 @@ func (registry *detachedRegistry) stats() DetachedStats {
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	stats.Entries = len(registry.entries)
-	for _, entry := range registry.entries {
+	now := time.Now()
+	for key, entry := range registry.entries {
 		entry.mu.Lock()
-		switch entry.state {
+		expired := now.After(entry.expiresAt)
+		state := entry.state
+		entry.mu.Unlock()
+		if expired {
+			registry.evictLocked(key, entry, detachEvictExpired)
+			continue
+		}
+		switch state {
 		case detachedCompleted:
 			stats.Completed++
 		case detachedFailed:
@@ -843,8 +856,8 @@ func (registry *detachedRegistry) stats() DetachedStats {
 		default:
 			stats.Running++
 		}
-		entry.mu.Unlock()
 	}
+	stats.Entries = len(registry.entries)
 	stats.Detaches = registry.detaches
 	stats.Attaches = registry.attaches
 	stats.AttachMisses = registry.attachMisses

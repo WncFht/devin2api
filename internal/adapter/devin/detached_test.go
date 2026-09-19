@@ -1047,6 +1047,50 @@ func TestDetachedStatsCounters(t *testing.T) {
 	}
 }
 
+// TestDetachedStatsSweepsExpired 钉住 stats() 的被动清扫：过期条目在快照
+// 遍历中经同一 evictLocked 口径逐出——entries 现值只数在场活条目，expired
+// 与孤儿记账即时入账，不再等 lookup/admit 两条惰性路径点火。过期的
+// running 条目同样扫（其 drainCtx 期限先于 expiresAt 点火，泵已在退场
+// 路上）；二次调用无可扫对象，计数不复发。
+func TestDetachedStatsSweepsExpired(t *testing.T) {
+	registry := newDetachedRegistry(nil, "")
+	// 过期终态尸体：无人挂接的 completed——移除应同时落孤儿账。
+	corpse := &detachedEntry{notify: make(chan struct{})}
+	corpse.append(llm.ResponseEvent{Type: llm.ResponseEventDone})
+	corpse.finish()
+	registry.admit("dead", corpse)
+	corpse.mu.Lock()
+	corpse.expiresAt = time.Now().Add(-time.Second)
+	corpse.mu.Unlock()
+	// 过期 running 条目：drainCtx 已先到期，evictLocked 的 drainCancel
+	// 是已灭 ctx 上的收尾确认。
+	killed := false
+	stuck := &detachedEntry{notify: make(chan struct{}), drainCancel: func() { killed = true }}
+	registry.admit("stuck", stuck)
+	stuck.mu.Lock()
+	stuck.expiresAt = time.Now().Add(-time.Second)
+	stuck.mu.Unlock()
+	// 活条目不受影响。
+	registry.admit("live", &detachedEntry{notify: make(chan struct{})})
+
+	stats := registry.stats()
+	if stats.Entries != 1 || stats.Running != 1 || stats.Completed != 0 {
+		t.Fatalf("gauges = %+v, want only the live entry counted", stats)
+	}
+	if registry.entries["dead"] != nil || registry.entries["stuck"] != nil {
+		t.Fatal("expired entries must be swept out of the map")
+	}
+	if !killed {
+		t.Fatal("sweeping an expired running entry must release its drain ctx")
+	}
+	if stats.Expired != 2 || stats.Orphans != 2 || stats.OrphanCompleted != 1 {
+		t.Fatalf("sweep bookkeeping = %+v, want expired/orphans 2 + orphan_completed 1", stats)
+	}
+	if again := registry.stats(); again.Entries != 1 || again.Expired != 2 {
+		t.Fatalf("second stats() = %+v, sweep must be idempotent", again)
+	}
+}
+
 // TestDetachedPumpFinishAccounting 钉住泵终局的归因记账：后台泵 EOF
 // 收口记 finished_completed，被 registry 淘汰掐死记 finished_killed
 // ——两档走真实 detach→泵→finish 路径，与 orphan（有没有人接）正交。
@@ -1209,13 +1253,18 @@ func TestDetachedPeek(t *testing.T) {
 	if _, usable, ok, _ = registry.peek("p3"); !ok || usable {
 		t.Fatalf("peek expired = (?, %v, %v), want (false,true)", usable, ok)
 	}
+	if len(registry.entries) != 3 {
+		t.Fatal("peek must not evict the expired entry either")
+	}
 
 	// 缺席：普通首发。
 	if _, _, ok, _ := registry.peek("p9"); ok {
 		t.Fatal("peek on absent key must miss")
 	}
+	// peek 全程不动计数；expired=1 是 stats() 自身的被动清扫收走 p3
+	// （上一步的在场断言证明它活到这次调用），与 peek 无关。
 	stats := registry.stats()
-	if stats.AttachMisses != 0 || stats.Expired != 0 {
+	if stats.AttachMisses != 0 || stats.Expired != 1 {
 		t.Fatalf("peek must be counter-free: %+v", stats)
 	}
 }
