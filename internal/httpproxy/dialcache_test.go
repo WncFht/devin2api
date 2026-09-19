@@ -106,6 +106,58 @@ func TestDNSFallbackPrefersFreshLookup(t *testing.T) {
 	}
 }
 
+// 解析器整窗故障时同一 host 的 inline 重查按窗口领牌：第二次失败
+// 不再各背一次注定超时的重查，直接走缓存兜底。
+func TestDNSFallbackFailureLookupClaimsOncePerWindow(t *testing.T) {
+	lookups := 0
+	dialer := &dnsFallbackDialer{
+		inner: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return nil, dnsError()
+		},
+		lookupIP: func(ctx context.Context, host string) ([]net.IP, error) {
+			lookups++
+			return nil, dnsError()
+		},
+		entries: map[string]dnsCacheEntry{},
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := dialer.dial(context.Background(), "tcp", "example.com:443"); err == nil {
+			t.Fatal("dial should fail")
+		}
+	}
+	if lookups != 1 {
+		t.Fatalf("lookups = %d, want 1 per retry window", lookups)
+	}
+}
+
+// 领牌时刻过期后放行新一轮重查——故障窗结束能拿到新鲜答案。
+func TestDNSFallbackFailureLookupAfterWindow(t *testing.T) {
+	lookups := 0
+	dialer := &dnsFallbackDialer{
+		inner: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return nil, dnsError()
+		},
+		lookupIP: func(ctx context.Context, host string) ([]net.IP, error) {
+			lookups++
+			return nil, dnsError()
+		},
+		entries: map[string]dnsCacheEntry{},
+	}
+	if _, err := dialer.dial(context.Background(), "tcp", "example.com:443"); err == nil {
+		t.Fatal("dial should fail")
+	}
+	// 把领牌时刻推回窗口外，等价于等待窗口过期。
+	dialer.mu.Lock()
+	dialer.freshTried["example.com"] = time.Now().Add(-2 * dnsLookupRetry)
+	dialer.mu.Unlock()
+	if _, err := dialer.dial(context.Background(), "tcp", "example.com:443"); err == nil {
+		t.Fatal("dial should fail")
+	}
+	if lookups != 2 {
+		t.Fatalf("lookups = %d, want re-lookup after window", lookups)
+	}
+}
+
 // 缓存空且重查失败：原错误原样返回，兜底不编造新失败形态。
 func TestDNSFallbackReturnsOriginalError(t *testing.T) {
 	dialer := &dnsFallbackDialer{

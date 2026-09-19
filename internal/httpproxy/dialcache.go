@@ -26,6 +26,10 @@ const (
 	// 整窗失败时该调用大概率同样超时，给一个短预算避免故障期
 	// 每次拨号都背上完整的 resolver 超时。
 	dnsRedialTimeout = 3 * time.Second
+	// dnsLookupRetry 是 inline 重查的按 host 领牌窗口：解析器整窗
+	// 故障时每个拨号 goroutine 各自背满超时仍会成簇——窗口内只
+	// 放行一次重查，其余直接走缓存兜底，不等领牌者的结果。
+	dnsLookupRetry = 10 * time.Second
 )
 
 // dnsFallbackDialer 包装一个拨号函数：正常路径原样透传，DNS 解析
@@ -39,6 +43,9 @@ type dnsFallbackDialer struct {
 	dialIP   dialFunc
 	mu       sync.Mutex
 	entries  map[string]dnsCacheEntry
+	// freshTried 记各 host 最近一次 inline 重查的领牌时刻——领牌在
+	// 重查之前，故障期的并发拨号据此共享同一次重查窗口。
+	freshTried map[string]time.Time
 }
 
 // dnsCacheEntry 是某 host 最近一次成功解析的结果与刷新状态；
@@ -97,13 +104,16 @@ func (dialer *dnsFallbackDialer) dial(ctx context.Context, network, address stri
 		return nil, err
 	}
 	// 解析失败先短时限重查：故障窗可能已结束，新鲜答案优于缓存。
-	if ips := dialer.lookupFresh(host); len(ips) > 0 {
-		if conn, dialErr := dialer.dialFirstIP(ctx, network, port, ips); dialErr == nil {
-			return conn, nil
+	// 重查按 host 领牌——领不到（窗内已有人查过）直接落缓存兜底。
+	if dialer.claimLookup(host) {
+		if ips := dialer.lookupFresh(host); len(ips) > 0 {
+			if conn, dialErr := dialer.dialFirstIP(ctx, network, port, ips); dialErr == nil {
+				return conn, nil
+			}
+			// lookupFresh 已把这组答案写进缓存——cached() 只会原样返回
+			// 同一批死 IP，复拨是纯延迟，直接交还原错误。
+			return nil, err
 		}
-		// lookupFresh 已把这组答案写进缓存——cached() 只会原样返回
-		// 同一批死 IP，复拨是纯延迟，直接交还原错误。
-		return nil, err
 	}
 	if ips := dialer.cached(host); len(ips) > 0 {
 		if conn, dialErr := dialer.dialFirstIP(ctx, network, port, ips); dialErr == nil {
@@ -141,6 +151,22 @@ func (dialer *dnsFallbackDialer) refreshIfStale(host string) {
 		entry.fetchedAt = time.Now()
 		dialer.entries[host] = entry
 	}()
+}
+
+// claimLookup 为本 host 的 inline 重查领牌：dnsLookupRetry 窗口内只
+// 放行一个调用方去碰解析器。map 懒建——测试侧按字面量构造的 dialer
+// 不必预初始化该字段。
+func (dialer *dnsFallbackDialer) claimLookup(host string) bool {
+	dialer.mu.Lock()
+	defer dialer.mu.Unlock()
+	if time.Since(dialer.freshTried[host]) < dnsLookupRetry {
+		return false
+	}
+	if dialer.freshTried == nil {
+		dialer.freshTried = map[string]time.Time{}
+	}
+	dialer.freshTried[host] = time.Now()
+	return true
 }
 
 // lookupFresh inline 重查一次解析器；成功即回填缓存。
