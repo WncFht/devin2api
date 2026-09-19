@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 
 	devinproto "local/devinproto"
@@ -53,6 +54,32 @@ func (receiver *pauseReceiver) Msg() *devinproto.GetChatMessageResponse { return
 
 // Err 模拟正常 EOF。
 func (receiver *pauseReceiver) Err() error { return nil }
+
+// failAfterReceiver 按序发完脚本帧后以 err 终止：模拟「已产出内容后上游
+// 流中途失败」——终帧携带的 Err() 经泵透出为流终止错误，是 finished_failed
+// 桶的真实触发形态（区别于 EOF 干净收尾、ctx 取消与 TTL 到期三档）。
+type failAfterReceiver struct {
+	frames  []*devinproto.GetChatMessageResponse
+	err     error
+	index   int
+	current *devinproto.GetChatMessageResponse
+}
+
+// Receive 发完脚本帧即报流终止。
+func (receiver *failAfterReceiver) Receive() bool {
+	if receiver.index >= len(receiver.frames) {
+		return false
+	}
+	receiver.current = receiver.frames[receiver.index]
+	receiver.index++
+	return true
+}
+
+// Msg 返回最近一次成功读取的帧。
+func (receiver *failAfterReceiver) Msg() *devinproto.GetChatMessageResponse { return receiver.current }
+
+// Err 返回脚本设定的终止错误。
+func (receiver *failAfterReceiver) Err() error { return receiver.err }
 
 // detachedTestStream 构造一条带完成缓存挂接面的测试流：与 Adapter.Stream
 // 注入的字段同形，差别只在泵与 cancel 是测试桩。
@@ -1203,6 +1230,107 @@ func TestDetachedPumpTTLExpires(t *testing.T) {
 	head := stats.Events[0]
 	if head.Kind != detachedEventFinish || head.Detail != detachFinishExpired || head.Key != "t1" {
 		t.Fatalf("events head = %+v, want finish/ttl_expired on t1", head)
+	}
+}
+
+// TestDetachedPumpFinishFailed 钉住上游错误的泵终局：脱钩后上游 Err()
+// 透出非 nil 终止错误时，decoder.finish 把它物化成尾帧 error 入缓冲，
+// 条目收成 failed，终局记账 finished_failed（四档归因至此全覆盖）。
+// replayable 按失败分类决定同键重试吃缓存终态还是走新上游：语义拒绝
+// （permission_denied 等可修正 code）是确定性失败，重放终态替同键省
+// 一发上游；传输断裂（UpstreamFault）是瞬态故障，同键重试必须走新
+// 上游——缓存在场只为给「同键确实来过」记 attach_miss。
+func TestDetachedPumpFinishFailed(t *testing.T) {
+	registry := newDetachedRegistry(nil, "")
+	receiver := &failAfterReceiver{
+		frames: []*devinproto.GetChatMessageResponse{{DeltaText: proto.String("hi")}},
+		err:    connect.NewError(connect.CodePermissionDenied, errors.New("blocked by content policy")),
+	}
+	stream := detachedTestStream(registry, "f1", receiver)
+	ctx, cancel := context.WithCancel(context.Background())
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel()
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	entry := registry.lookup("f1")
+	if entry == nil {
+		t.Fatal("detached stream was not registered")
+	}
+	waitEntryState(t, entry, detachedFailed)
+	entry.mu.Lock()
+	last := entry.events[len(entry.events)-1]
+	replayable := entry.replayable
+	entry.mu.Unlock()
+	if last.Type != llm.ResponseEventError || last.Error == nil ||
+		!strings.Contains(last.Error.ErrorMessage, "blocked by content policy") {
+		t.Fatalf("terminal event = %#v, want upstream refusal error", last)
+	}
+	if !replayable {
+		t.Fatal("client-fixable failed entry must stay replayable")
+	}
+	stats := waitRegistryStat(t, registry, func(s DetachedStats) bool {
+		return s.FinishedFailed == 1
+	})
+	if stats.FinishedCompleted != 0 || stats.FinishedKilled != 0 || stats.FinishedExpired != 0 {
+		t.Fatalf("upstream-error pump misaccounted: %+v", stats)
+	}
+	head := stats.Events[0]
+	if head.Kind != detachedEventFinish || head.Detail != detachFinishFailed || head.Key != "f1" {
+		t.Fatalf("events head = %+v, want finish/failed on f1", head)
+	}
+	// 可重放 failed：lookup 命中，挂接方重放前缀 + 缓存的终态错误。
+	if got := registry.lookup("f1"); got != entry {
+		t.Fatal("replayable failed entry should attach")
+	}
+	replayed, err := collectAttached(&attachStream{entry: entry})
+	if err != nil {
+		t.Fatalf("attach Recv: %v", err)
+	}
+	if replayed[len(replayed)-1].Type != llm.ResponseEventError {
+		t.Fatalf("last replayed event = %v, want cached refusal", replayed[len(replayed)-1].Type)
+	}
+
+	// 传输断裂同归 failed 但不可重放：同键重试走新上游而非吃缓存终态。
+	receiver2 := &failAfterReceiver{
+		frames: []*devinproto.GetChatMessageResponse{{DeltaText: proto.String("hi")}},
+		err:    io.ErrUnexpectedEOF,
+	}
+	stream2 := detachedTestStream(registry, "f2", receiver2)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	drainUntil(t, stream2, ctx2, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel2()
+	if _, err := stream2.Recv(ctx2); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	entry2 := registry.lookup("f2")
+	if entry2 == nil {
+		t.Fatal("second detached stream was not registered")
+	}
+	waitEntryState(t, entry2, detachedFailed)
+	entry2.mu.Lock()
+	last2 := entry2.events[len(entry2.events)-1]
+	replayable2 := entry2.replayable
+	entry2.mu.Unlock()
+	if last2.Type != llm.ResponseEventError {
+		t.Fatalf("terminal event = %v, want upstream transport error", last2.Type)
+	}
+	if replayable2 {
+		t.Fatal("upstream-fault failed entry must not be replayable")
+	}
+	stats = waitRegistryStat(t, registry, func(s DetachedStats) bool {
+		return s.FinishedFailed == 2
+	})
+	head = stats.Events[0]
+	if head.Kind != detachedEventFinish || head.Detail != detachFinishFailed || head.Key != "f2" {
+		t.Fatalf("events head = %+v, want finish/failed on f2", head)
+	}
+	if got := registry.lookup("f2"); got != nil {
+		t.Fatal("unreplayable failed entry must miss lookup")
 	}
 }
 
