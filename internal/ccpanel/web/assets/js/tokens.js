@@ -16,6 +16,72 @@
     let currentAllowedModelFilter = '';
     let initialEditExpiryState = { type: 'never', value: '' };
 
+    // 配额字段单一事实源：create/edit 两表单的 markup、读回校验、重置与回显
+    // 都由这张表驱动。元素 id = {prefix}{suffix}；wire 是 /admin/auth-tokens 的
+    // JSON 键；编辑表单 cost 字段带已用额展示（id 按 suffix→UsedDisplay 推导）。
+    const TOKEN_QUOTA_FIELDS = [
+      { suffix: '5hCostLimitUSD', wire: 'cost_5h_limit_usd', labelKey: 'tokens.cost5hLimitLabel', cost: true },
+      { suffix: 'DailyCostLimitUSD', wire: 'cost_daily_limit_usd', labelKey: 'tokens.dailyCostLimitLabel', cost: true },
+      { suffix: 'WeeklyCostLimitUSD', wire: 'cost_weekly_limit_usd', labelKey: 'tokens.weeklyCostLimitLabel', cost: true },
+      { suffix: 'MonthlyCostLimitUSD', wire: 'cost_monthly_limit_usd', labelKey: 'tokens.monthlyCostLimitLabel', cost: true },
+      { suffix: 'CostLimitUSD', wire: 'cost_limit_usd', labelKey: 'tokens.costLimitLabel', cost: true },
+      { suffix: 'MaxConcurrency', wire: 'max_concurrency', labelKey: 'tokens.maxConcurrencyLabel', phKey: 'tokens.maxConcurrencyPlaceholder', intKey: 'tokens.msg.maxConcurrencyInteger' },
+      { suffix: 'MaxRPM', wire: 'max_rpm', labelKey: 'tokens.maxRPMLabel', phKey: 'tokens.zeroUnlimitedHint', intKey: 'tokens.msg.maxRPMInteger' }
+    ];
+
+    // 按 spec 把配额行写进宿主（data-i18n 随行，translatePage 重扫自动接管多语言）
+    function stampTokenQuotaFields(prefix) {
+      const host = document.getElementById(prefix + 'QuotaFields');
+      if (!host) return;
+      const editing = prefix === 'edit';
+      host.innerHTML = TOKEN_QUOTA_FIELDS.map((f) => {
+        const inputId = prefix + f.suffix;
+        const phKey = f.cost ? 'tokens.costLimitPlaceholder' : f.phKey;
+        const groupCls = editing ? ` token-edit-field token-edit-field--${f.cost ? 'cost' : (f.suffix === 'MaxConcurrency' ? 'concurrency' : 'rpm')}` : '';
+        const usedId = editing && f.cost ? `edit${f.suffix.replace('LimitUSD', 'UsedDisplay')}` : '';
+        return `<div class="form-group form-row-inline${groupCls}">
+          <label for="${inputId}" class="form-label form-row-inline__label" data-i18n="${f.labelKey}">${t(f.labelKey)}</label>
+          <div class="form-row-inline__content token-limit-control${editing && f.cost ? ' token-edit-cost-control' : ''}">
+            <div class="token-limit-input-line${editing && f.cost ? ' token-edit-cost-row' : ''}">
+              ${f.cost ? '<span class="token-cost-prefix" aria-hidden="true">$</span>' : ''}
+              <input type="number" id="${inputId}" class="form-input field-grow" min="0" step="${f.cost ? '0.01' : '1'}" data-i18n-placeholder="${phKey}" placeholder="${t(phKey)}">
+              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">${t('tokens.zeroUnlimitedHint')}</span>
+            </div>
+            ${usedId ? `<div class="token-limit-meta token-edit-cost-meta"><span id="${usedId}" class="token-edit-cost-used"></span></div>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    // 读回校验：顺序 = 费用负值 → 并发整数 → RPM 整数（与原逐行展开同口径）
+    function readTokenQuotaFields(prefix) {
+      const values = {};
+      for (const f of TOKEN_QUOTA_FIELDS) {
+        const raw = document.getElementById(prefix + f.suffix).value;
+        if (f.cost) {
+          const v = parseFloat(raw) || 0;
+          if (v < 0) return { error: t('tokens.msg.costLimitNegative') };
+          values[f.wire] = v;
+        } else {
+          const r = parseNonNegativeIntInput(raw, f.intKey);
+          if (r.error) return { error: r.error };
+          values[f.wire] = r.value;
+        }
+      }
+      return { values };
+    }
+
+    // expiryType → {expiresAt, customDate}；custom 未填返回 null（调用方弹提示并中止）
+    function resolveTokenExpiry(expiryType, customInputId) {
+      if (expiryType === 'never') return { expiresAt: null, customDate: '' };
+      if (expiryType === 'custom') {
+        const customDate = document.getElementById(customInputId).value;
+        if (!customDate) return null;
+        return { expiresAt: new Date(customDate).getTime(), customDate };
+      }
+      return { expiresAt: Date.now() + parseInt(expiryType) * 86400000, customDate: '' };
+    }
+
     function initExpirySelects() {
       const template = document.getElementById('tpl-token-expiry-options');
       if (!template) return;
@@ -34,6 +100,8 @@
       topbarKey: 'tokens',
       run: () => {
       initExpirySelects();
+      stampTokenQuotaFields('token');
+      stampTokenQuotaFields('edit');
 
       window.bindTimeRangeSelector({
         containerId: 'tokens-time-range',
@@ -55,9 +123,6 @@
       loadAvailableModels();
 
       initPageActionDelegation();
-
-      // 初始化事件委托
-      initEventDelegation();
 
       // 监听语言切换事件，重新渲染令牌相关动态内容
       window.i18n.onLocaleChange(() => {
@@ -97,6 +162,21 @@
             if (!Number.isNaN(index)) {
               removeAllowedModel(index);
             }
+          },
+          'copy-token-hash': (actionTarget) => {
+            const hash = actionTarget.dataset.token;
+            if (hash) copyTokenToClipboard(hash);
+          },
+          'play-token': () => {
+            if (typeof window.openChatModal === 'function') window.openChatModal({ mode: 'token' });
+          },
+          'edit-token': (actionTarget) => {
+            const id = parseInt(actionTarget.closest('tr').dataset.tokenId);
+            if (id) editToken(id);
+          },
+          'delete-token': (actionTarget) => {
+            const id = parseInt(actionTarget.closest('tr').dataset.tokenId);
+            if (id) deleteToken(id);
           }
         },
         change: {
@@ -121,48 +201,6 @@
           'filter-available-models': (actionTarget) => filterAvailableModels(actionTarget.value),
           'filter-allowed-models': (actionTarget) => filterAllowedModels(actionTarget.value),
           'update-model-import-preview': () => updateModelImportPreview()
-        }
-      });
-    }
-
-    /**
-     * 初始化事件委托(统一处理表格内按钮点击)
-     */
-    function initEventDelegation() {
-      const container = document.getElementById('tokens-container');
-      if (!container) return;
-
-      container.addEventListener('click', (e) => {
-        const target = e.target.closest('.btn-copy-token, .btn-edit, .btn-delete, .btn-play');
-        if (!target) return;
-
-        // 处理 Playground 按钮（粘贴令牌明文直连 /v1 试聊）
-        if (target.classList.contains('btn-play')) {
-          if (typeof window.openChatModal === 'function') window.openChatModal({ mode: 'token' });
-          return;
-        }
-
-        // 处理复制令牌按钮
-        if (target.classList.contains('btn-copy-token')) {
-          const tokenHash = target.dataset.token;
-          if (tokenHash) copyTokenToClipboard(tokenHash);
-          return;
-        }
-
-        // 处理编辑按钮
-        if (target.classList.contains('btn-edit')) {
-          const row = target.closest('tr');
-          const tokenId = row ? parseInt(row.dataset.tokenId) : null;
-          if (tokenId) editToken(tokenId);
-          return;
-        }
-
-        // 处理删除按钮
-        if (target.classList.contains('btn-delete')) {
-          const row = target.closest('tr');
-          const tokenId = row ? parseInt(row.dataset.tokenId) : null;
-          if (tokenId) deleteToken(tokenId);
-          return;
         }
       });
     }
@@ -575,9 +613,9 @@
       const classBadgeHtml = buildClassBadgeHtml(token.class);
       // 匿名通道行没有可出示的凭据：复制/试聊按钮整行略去
       const copyBtnHtml = token.anonymous ? '' :
-        `<button class="btn-copy-token btn btn-secondary token-row-action-btn" data-token="${escapeHtml(token.token)}">${t('common.copy')}</button>`;
+        `<button class="btn-copy-token btn btn-secondary token-row-action-btn" data-action="copy-token-hash" data-token="${escapeHtml(token.token)}">${t('common.copy')}</button>`;
       const playBtnHtml = token.anonymous ? '' :
-        `<button class="btn btn-secondary btn-play token-row-action-btn">${t('tokens.action.test')}</button>`;
+        `<button class="btn btn-secondary btn-play token-row-action-btn" data-action="play-token">${t('tokens.action.test')}</button>`;
 
       return `
         <tr class="mobile-card-row token-card-row${rowClass}" data-token-id="${token.id}">
@@ -599,8 +637,8 @@
             <div class="token-row-actions">
               ${copyBtnHtml}
               ${playBtnHtml}
-              <button class="btn btn-secondary btn-edit token-row-action-btn">${t('common.edit')}</button>
-              <button class="btn btn-danger btn-delete token-row-action-btn">${t('common.delete')}</button>
+              <button class="btn btn-secondary btn-edit token-row-action-btn" data-action="edit-token">${t('common.edit')}</button>
+              <button class="btn btn-danger btn-delete token-row-action-btn" data-action="delete-token">${t('common.delete')}</button>
             </div>
           </td>
         </tr>
@@ -617,13 +655,7 @@
     function showCreateModal() {
       document.getElementById('tokenDescription').value = '';
       document.getElementById('tokenExpiry').value = 'never';
-      document.getElementById('token5hCostLimitUSD').value = 0;
-      document.getElementById('tokenDailyCostLimitUSD').value = 0;
-      document.getElementById('tokenWeeklyCostLimitUSD').value = 0;
-      document.getElementById('tokenMonthlyCostLimitUSD').value = 0;
-      document.getElementById('tokenCostLimitUSD').value = 0;
-      document.getElementById('tokenMaxConcurrency').value = 0;
-      document.getElementById('tokenMaxRPM').value = 0;
+      TOKEN_QUOTA_FIELDS.forEach((f) => { document.getElementById('token' + f.suffix).value = 0; });
       document.getElementById('tokenAllowedModels').value = '';
       document.getElementById('tokenClass').value = 'fg';
       document.getElementById('tokenActive').checked = true;
@@ -645,39 +677,15 @@
         window.showNotification(t('tokens.msg.enterDescription'), 'error');
         return;
       }
-      const expiryType = document.getElementById('tokenExpiry').value;
-      let expiresAt = null;
-      if (expiryType !== 'never') {
-        if (expiryType === 'custom') {
-          const customDate = document.getElementById('customExpiry').value;
-          if (!customDate) {
-            window.showNotification(t('tokens.msg.selectExpiry'), 'error');
-            return;
-          }
-          expiresAt = new Date(customDate).getTime();
-        } else {
-          const days = parseInt(expiryType);
-          expiresAt = Date.now() + days * 24 * 60 * 60 * 1000;
-        }
+      const expiry = resolveTokenExpiry(document.getElementById('tokenExpiry').value, 'customExpiry');
+      if (!expiry) {
+        window.showNotification(t('tokens.msg.selectExpiry'), 'error');
+        return;
       }
       const isActive = document.getElementById('tokenActive').checked;
-      const cost5hLimitUSD = parseFloat(document.getElementById('token5hCostLimitUSD').value) || 0;
-      const dailyCostLimitUSD = parseFloat(document.getElementById('tokenDailyCostLimitUSD').value) || 0;
-      const weeklyCostLimitUSD = parseFloat(document.getElementById('tokenWeeklyCostLimitUSD').value) || 0;
-      const monthlyCostLimitUSD = parseFloat(document.getElementById('tokenMonthlyCostLimitUSD').value) || 0;
-      const costLimitUSD = parseFloat(document.getElementById('tokenCostLimitUSD').value) || 0;
-      const maxConcurrencyResult = parseNonNegativeIntInput(document.getElementById('tokenMaxConcurrency').value, 'tokens.msg.maxConcurrencyInteger');
-      const maxRPMResult = parseNonNegativeIntInput(document.getElementById('tokenMaxRPM').value, 'tokens.msg.maxRPMInteger');
-      if (cost5hLimitUSD < 0 || dailyCostLimitUSD < 0 || weeklyCostLimitUSD < 0 || monthlyCostLimitUSD < 0 || costLimitUSD < 0) {
-        window.showNotification(t('tokens.msg.costLimitNegative'), 'error');
-        return;
-      }
-      if (maxConcurrencyResult.error) {
-        window.showNotification(maxConcurrencyResult.error, 'error');
-        return;
-      }
-      if (maxRPMResult.error) {
-        window.showNotification(maxRPMResult.error, 'error');
+      const quota = readTokenQuotaFields('token');
+      if (quota.error) {
+        window.showNotification(quota.error, 'error');
         return;
       }
       const allowedModels = parseModelInput(document.getElementById('tokenAllowedModels').value);
@@ -691,16 +699,10 @@
             description,
             anonymous,
             class: document.getElementById('tokenClass').value,
-            expires_at: expiresAt,
+            expires_at: expiry.expiresAt,
             is_active: isActive,
             allowed_models: allowedModels,
-            cost_5h_limit_usd: cost5hLimitUSD,
-            cost_daily_limit_usd: dailyCostLimitUSD,
-            cost_weekly_limit_usd: weeklyCostLimitUSD,
-            cost_monthly_limit_usd: monthlyCostLimitUSD,
-            cost_limit_usd: costLimitUSD,
-            max_concurrency: maxConcurrencyResult.value,
-            max_rpm: maxRPMResult.value
+            ...quota.values
           })
         });
 
@@ -759,15 +761,14 @@
       // 请求类与服务端 NormalizeClass 同向：空值/未知值回显 fg
       document.getElementById('editTokenClass').value = token.class === 'bg' ? 'bg' : 'fg';
 
-      fillCostLimitField('edit5hCostLimitUSD', 'edit5hCostUsedDisplay', token.cost_5h_limit_usd, token.cost_5h_used_usd);
-      fillCostLimitField('editDailyCostLimitUSD', 'editDailyCostUsedDisplay', token.cost_daily_limit_usd, token.cost_daily_used_usd);
-      fillCostLimitField('editWeeklyCostLimitUSD', 'editWeeklyCostUsedDisplay', token.cost_weekly_limit_usd, token.cost_weekly_used_usd);
-      fillCostLimitField('editMonthlyCostLimitUSD', 'editMonthlyCostUsedDisplay', token.cost_monthly_limit_usd, token.cost_monthly_used_usd);
-      fillCostLimitField('editCostLimitUSD', 'editCostUsedDisplay', token.cost_limit_usd, token.cost_used_usd);
-
-      const maxConcurrencyInput = document.getElementById('editMaxConcurrency');
-      maxConcurrencyInput.value = token.max_concurrency || 0;
-      document.getElementById('editMaxRPM').value = token.max_rpm || 0;
+      TOKEN_QUOTA_FIELDS.forEach((f) => {
+        if (f.cost) {
+          fillCostLimitField('edit' + f.suffix, 'edit' + f.suffix.replace('LimitUSD', 'UsedDisplay'),
+            token[f.wire], token[f.wire.replace('_limit_', '_used_')]);
+        } else {
+          document.getElementById('edit' + f.suffix).value = token[f.wire] || 0;
+        }
+      });
 
       // 初始化模型限制状态（2026-01新增）
       editAllowedModels = (token.allowed_models || []).slice();
@@ -801,45 +802,20 @@
       const description = document.getElementById('editTokenDescription').value.trim();
       const isActive = document.getElementById('editTokenActive').checked;
       const expiryType = document.getElementById('editTokenExpiry').value;
-      const cost5hLimitUSD = parseFloat(document.getElementById('edit5hCostLimitUSD').value) || 0;
-      const dailyCostLimitUSD = parseFloat(document.getElementById('editDailyCostLimitUSD').value) || 0;
-      const weeklyCostLimitUSD = parseFloat(document.getElementById('editWeeklyCostLimitUSD').value) || 0;
-      const monthlyCostLimitUSD = parseFloat(document.getElementById('editMonthlyCostLimitUSD').value) || 0;
-      const costLimitUSD = parseFloat(document.getElementById('editCostLimitUSD').value) || 0;
-      const maxConcurrencyResult = parseNonNegativeIntInput(document.getElementById('editMaxConcurrency').value, 'tokens.msg.maxConcurrencyInteger');
-      const maxRPMResult = parseNonNegativeIntInput(document.getElementById('editMaxRPM').value, 'tokens.msg.maxRPMInteger');
-      if (cost5hLimitUSD < 0 || dailyCostLimitUSD < 0 || weeklyCostLimitUSD < 0 || monthlyCostLimitUSD < 0 || costLimitUSD < 0) {
-        window.showNotification(t('tokens.msg.costLimitNegative'), 'error');
+      const quota = readTokenQuotaFields('edit');
+      if (quota.error) {
+        window.showNotification(quota.error, 'error');
         return;
       }
-      if (maxConcurrencyResult.error) {
-        window.showNotification(maxConcurrencyResult.error, 'error');
+      const expiry = resolveTokenExpiry(expiryType, 'editCustomExpiry');
+      if (!expiry) {
+        window.showNotification(t('tokens.msg.selectExpiry'), 'error');
         return;
-      }
-      if (maxRPMResult.error) {
-        window.showNotification(maxRPMResult.error, 'error');
-        return;
-      }
-      const maxConcurrency = maxConcurrencyResult.value;
-      let customDate = '';
-      let expiresAt = null;
-      if (expiryType !== 'never') {
-        if (expiryType === 'custom') {
-          customDate = document.getElementById('editCustomExpiry').value;
-          if (!customDate) {
-            window.showNotification(t('tokens.msg.selectExpiry'), 'error');
-            return;
-          }
-          expiresAt = new Date(customDate).getTime();
-        } else {
-          const days = parseInt(expiryType);
-          expiresAt = Date.now() + days * 24 * 60 * 60 * 1000;
-        }
       }
       const expiryUpdate = TokenExpiry.buildUpdatePayload(
         initialEditExpiryState,
-        { type: expiryType, value: customDate },
-        expiresAt
+        { type: expiryType, value: expiry.customDate },
+        expiry.expiresAt
       );
       try {
         await fetchDataWithAuth(`${API_BASE}/auth-tokens/${id}`, {
@@ -853,13 +829,7 @@
             ...expiryUpdate,
             class: document.getElementById('editTokenClass').value,
             allowed_models: editAllowedModels,  // 2026-01新增：模型限制
-            cost_5h_limit_usd: cost5hLimitUSD,
-            cost_daily_limit_usd: dailyCostLimitUSD,
-            cost_weekly_limit_usd: weeklyCostLimitUSD,
-            cost_monthly_limit_usd: monthlyCostLimitUSD,
-            cost_limit_usd: costLimitUSD,        // 总限额
-            max_concurrency: maxConcurrency,     // 2026-04新增：并发上限
-            max_rpm: maxRPMResult.value
+            ...quota.values
           })
         });
         closeEditModal();

@@ -119,80 +119,7 @@
           <p class="token-field-hint" data-i18n="tokens.classHint">fg 交互流量按闸门原规则准入；bg 批跑叠加动态预留与爬坡，吃 fg 剩余配额</p>
         </div>
 
-        <div class="form-group form-row-inline">
-          <label for="token5hCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.cost5hLimitLabel">5小时限额</label>
-          <div class="form-row-inline__content token-limit-control">
-            <div class="token-limit-input-line">
-              <span class="token-cost-prefix" aria-hidden="true">$</span>
-              <input type="number" id="token5hCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
-              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="form-group form-row-inline">
-          <label for="tokenDailyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.dailyCostLimitLabel">日限额</label>
-          <div class="form-row-inline__content token-limit-control">
-            <div class="token-limit-input-line">
-              <span class="token-cost-prefix" aria-hidden="true">$</span>
-              <input type="number" id="tokenDailyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
-              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="form-group form-row-inline">
-          <label for="tokenWeeklyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.weeklyCostLimitLabel">7天限额</label>
-          <div class="form-row-inline__content token-limit-control">
-            <div class="token-limit-input-line">
-              <span class="token-cost-prefix" aria-hidden="true">$</span>
-              <input type="number" id="tokenWeeklyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
-              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="form-group form-row-inline">
-          <label for="tokenMonthlyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.monthlyCostLimitLabel">月限额</label>
-          <div class="form-row-inline__content token-limit-control">
-            <div class="token-limit-input-line">
-              <span class="token-cost-prefix" aria-hidden="true">$</span>
-              <input type="number" id="tokenMonthlyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
-              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="form-group form-row-inline">
-          <label for="tokenCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.costLimitLabel">总限额</label>
-          <div class="form-row-inline__content token-limit-control">
-            <div class="token-limit-input-line">
-              <span class="token-cost-prefix" aria-hidden="true">$</span>
-              <input type="number" id="tokenCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
-              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="form-group form-row-inline">
-          <label for="tokenMaxConcurrency" class="form-label form-row-inline__label" data-i18n="tokens.maxConcurrencyLabel">并发上限</label>
-          <div class="form-row-inline__content token-limit-control">
-            <div class="token-limit-input-line">
-              <input type="number" id="tokenMaxConcurrency" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.maxConcurrencyPlaceholder" placeholder="0 表示无限制">
-              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="form-group form-row-inline">
-          <label for="tokenMaxRPM" class="form-label form-row-inline__label" data-i18n="tokens.maxRPMLabel">RPM 上限</label>
-          <div class="form-row-inline__content token-limit-control">
-            <div class="token-limit-input-line">
-              <input type="number" id="tokenMaxRPM" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.zeroUnlimitedHint" placeholder="0 表示无限制">
-              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-            </div>
-          </div>
-        </div>
+        <div id="tokenQuotaFields"></div>
 
         <div class="form-group">
           <label for="tokenAllowedModels" class="form-label" data-i18n="tokens.allowedModelsLabel">模型限制</label>
@@ -294,96 +221,7 @@
 
           <section class="token-edit-section token-edit-section--quota" data-token-edit-section="quota">
             <h3 class="token-edit-section-title" data-i18n="tokens.editSectionQuota">配额信息</h3>
-
-            <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
-              <label for="edit5hCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.cost5hLimitLabel">5小时限额</label>
-              <div class="form-row-inline__content token-limit-control token-edit-cost-control">
-                <div class="token-limit-input-line token-edit-cost-row">
-                  <span class="token-cost-prefix" aria-hidden="true">$</span>
-                  <input type="number" id="edit5hCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
-                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-                </div>
-                <div class="token-limit-meta token-edit-cost-meta">
-                  <span id="edit5hCostUsedDisplay" class="token-edit-cost-used"></span>
-                </div>
-              </div>
-            </div>
-
-            <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
-              <label for="editDailyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.dailyCostLimitLabel">日限额</label>
-              <div class="form-row-inline__content token-limit-control token-edit-cost-control">
-                <div class="token-limit-input-line token-edit-cost-row">
-                  <span class="token-cost-prefix" aria-hidden="true">$</span>
-                  <input type="number" id="editDailyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
-                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-                </div>
-                <div class="token-limit-meta token-edit-cost-meta">
-                  <span id="editDailyCostUsedDisplay" class="token-edit-cost-used"></span>
-                </div>
-              </div>
-            </div>
-
-            <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
-              <label for="editWeeklyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.weeklyCostLimitLabel">7天限额</label>
-              <div class="form-row-inline__content token-limit-control token-edit-cost-control">
-                <div class="token-limit-input-line token-edit-cost-row">
-                  <span class="token-cost-prefix" aria-hidden="true">$</span>
-                  <input type="number" id="editWeeklyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
-                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-                </div>
-                <div class="token-limit-meta token-edit-cost-meta">
-                  <span id="editWeeklyCostUsedDisplay" class="token-edit-cost-used"></span>
-                </div>
-              </div>
-            </div>
-
-            <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
-              <label for="editMonthlyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.monthlyCostLimitLabel">月限额</label>
-              <div class="form-row-inline__content token-limit-control token-edit-cost-control">
-                <div class="token-limit-input-line token-edit-cost-row">
-                  <span class="token-cost-prefix" aria-hidden="true">$</span>
-                  <input type="number" id="editMonthlyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
-                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-                </div>
-                <div class="token-limit-meta token-edit-cost-meta">
-                  <span id="editMonthlyCostUsedDisplay" class="token-edit-cost-used"></span>
-                </div>
-              </div>
-            </div>
-
-            <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
-              <label for="editCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.costLimitLabel">总限额</label>
-              <div class="form-row-inline__content token-limit-control token-edit-cost-control">
-                <div class="token-limit-input-line token-edit-cost-row">
-                  <span class="token-cost-prefix" aria-hidden="true">$</span>
-                  <input type="number" id="editCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
-                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-                </div>
-                <div class="token-limit-meta token-edit-cost-meta">
-                  <span id="editCostUsedDisplay" class="token-edit-cost-used"></span>
-                </div>
-              </div>
-            </div>
-
-            <div class="form-group form-row-inline token-edit-field token-edit-field--concurrency">
-              <label for="editMaxConcurrency" class="form-label form-row-inline__label" data-i18n="tokens.maxConcurrencyLabel">并发上限</label>
-              <div class="form-row-inline__content token-limit-control">
-                <div class="token-limit-input-line">
-                  <input type="number" id="editMaxConcurrency" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.maxConcurrencyPlaceholder" placeholder="0 表示无限制">
-                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="form-group form-row-inline token-edit-field token-edit-field--rpm">
-              <label for="editMaxRPM" class="form-label form-row-inline__label" data-i18n="tokens.maxRPMLabel">RPM 上限</label>
-              <div class="form-row-inline__content token-limit-control">
-                <div class="token-limit-input-line">
-                  <input type="number" id="editMaxRPM" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.zeroUnlimitedHint" placeholder="0 表示无限制">
-                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
-                </div>
-              </div>
-            </div>
+            <div id="editQuotaFields"></div>
 
             <div class="form-group token-edit-active-row">
               <label class="token-edit-active-label">
@@ -539,19 +377,19 @@
       <td class="tokens-col-last-used" data-mobile-label="{{mobileLabelLastUsed}}">{{{lastUsed}}}</td>
       <td class="tokens-col-actions" data-mobile-label="{{mobileLabelActions}}">
         <div class="token-row-actions">
-          <button type="button" class="btn-copy-token btn-icon token-row-action-btn" data-token="{{token}}"
+          <button type="button" class="btn-copy-token btn-icon token-row-action-btn" data-action="copy-token-hash" data-token="{{token}}"
             data-i18n-title="common.copy" title="复制" aria-label="复制">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M5 15H4C2.9 15 2 14.1 2 13V4C2 2.9 2.9 2 4 2H13C14.1 2 15 2.9 15 4V5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           </button>
-          <button type="button" class="btn-icon btn-play token-row-action-btn"
+          <button type="button" class="btn-icon btn-play token-row-action-btn" data-action="play-token"
             data-i18n-title="tokens.action.test" title="测试" aria-label="测试">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M21 11.5C21 16.19 17.19 20 12.5 20C11.18 20 9.92 19.74 8.78 19.26L3.6 20.9C3.27 21.01 2.99 20.73 3.1 20.4L4.74 15.22C4.26 14.08 4 12.82 4 11.5C4 6.81 7.81 3 12.5 3C17.19 3 21 6.81 21 11.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
           </button>
-          <button type="button" class="btn-icon btn-edit token-row-action-btn"
+          <button type="button" class="btn-icon btn-edit token-row-action-btn" data-action="edit-token"
             data-i18n-title="common.edit" title="编辑" aria-label="编辑">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M3 17.25V21H6.75L17.81 9.94L14.06 6.19L3 17.25Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M20.71 7.04C21.1 6.65 21.1 6.02 20.71 5.63L18.37 3.29C17.98 2.9 17.35 2.9 16.96 3.29L15.13 5.12L18.88 8.87L20.71 7.04Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-          <button type="button" class="btn-icon btn-danger btn-delete token-row-action-btn"
+          <button type="button" class="btn-icon btn-danger btn-delete token-row-action-btn" data-action="delete-token"
             data-i18n-title="common.delete" title="删除" aria-label="删除">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M3 6H21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M8 6V4H16V6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 6L18 20H6L5 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M14 11V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           </button>
