@@ -135,15 +135,14 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	if collectDropped {
 		context.Dropped = append(context.Dropped, common.UnconsumedFields(data, chatRequestFields)...)
 	}
-	// max_completion_tokens 优先于 max_tokens（OpenAI 语义）；选中的指针
-	// 非正时静默丢弃会让调用方以为上限已生效——记 Dropped 透出。
-	maxTokensValue := request.MaxCompletionTokens
-	droppedMaxTokens := "field:max_completion_tokens"
-	if maxTokensValue == nil {
-		maxTokensValue = request.MaxTokens
-		droppedMaxTokens = "field:max_tokens"
+	// max_completion_tokens 优先于 max_tokens（OpenAI 语义）；首选指针在
+	// 场但非正被丢弃时继续查次选——只丢首选值会把同时给出的合法
+	// max_tokens 一并吞掉。非正值静默丢弃会让调用方以为上限已生效，
+	// 记 Dropped 透出。
+	context.MaxTokens = common.PositiveIntOrDrop(request.MaxCompletionTokens, &context.Dropped, "field:max_completion_tokens")
+	if context.MaxTokens == nil {
+		context.MaxTokens = common.PositiveIntOrDrop(request.MaxTokens, &context.Dropped, "field:max_tokens")
 	}
-	context.MaxTokens = common.PositiveIntOrDrop(maxTokensValue, &context.Dropped, droppedMaxTokens)
 	context.Temperature = request.Temperature
 	context.TopP = request.TopP
 	context.TopK = common.PositiveIntOrDrop(request.TopK, &context.Dropped, "field:top_k")
