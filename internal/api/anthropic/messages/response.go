@@ -63,15 +63,7 @@ func EncodeResponse(message *llm.AssistantMessage, model string) ([]byte, error)
 	if message == nil {
 		return nil, errors.New("response message is nil")
 	}
-	if model == "" {
-		model = message.ResponseModel
-	}
-	if model == "" {
-		model = message.Model
-	}
-	if model == "" {
-		model = "claude"
-	}
+	model = common.EchoModel(model, message, "claude")
 	response := map[string]any{
 		"id":          randid.Prefixed("msg_"),
 		"type":        "message",
@@ -440,6 +432,8 @@ func (encoder *StreamEncoder) serverToolResult(event llm.ResponseEvent) []SSEEve
 // anthropicServerToolResultBlock 渲染托管工具结果块：正常结果按
 // {type:"<tool>_tool_result", tool_use_id, content:[web_search_result…]}
 // 形态——条目只带 title/url，上游不给 Anthropic 的加密锚点字段；
+// 无结构化条目但上游给了回放文本时降级为 text 条目，否则 content
+// 空数组会让客户端把这次搜索看成什么都没返回；
 // 失败结果是 {content:{type:"<tool>_tool_result_error",error_code}}。
 func anthropicServerToolResultBlock(result llm.ServerToolResult) map[string]any {
 	block := map[string]any{"type": result.ToolName + "_tool_result", "tool_use_id": result.ToolCallID}
@@ -450,11 +444,14 @@ func anthropicServerToolResultBlock(result llm.ServerToolResult) map[string]any 
 		}
 		return block
 	}
-	entries := make([]any, 0, len(result.Results))
+	entries := make([]any, 0, len(result.Results)+1)
 	for _, item := range result.Results {
 		entries = append(entries, map[string]any{
 			"type": "web_search_result", "title": item.Title, "url": item.URL, "page_age": nil,
 		})
+	}
+	if len(result.Results) == 0 && result.Text != "" {
+		entries = append(entries, map[string]any{"type": "text", "text": result.Text})
 	}
 	block["content"] = entries
 	return block

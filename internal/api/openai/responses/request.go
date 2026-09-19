@@ -676,7 +676,9 @@ func decodeToolOutput(context *llm.RequestMessages, raw json.RawMessage) ([]llm.
 	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
-		return nil, errors.New("function call output is required")
+		// output 缺席/null 与消息 content 缺席同口径归一为空文本——
+		// 工具无输出不是请求错误（与 chat tool 面、anthropic 面一致）。
+		return []llm.Content{llm.TextContent{Text: ""}}, nil
 	}
 	if trimmed[0] == '[' {
 		content, err := common.DecodeContent(raw, &context.Dropped)
@@ -725,9 +727,15 @@ func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role s
 	if err := json.Unmarshal(raw, &item); err != nil {
 		return err
 	}
-	content, err := common.DecodeContent(item.Content, &context.Dropped)
-	if err != nil {
-		return err
+	// content 缺席/null 归一为空（与 user/assistant 的空内容同义），
+	// 走下方统一的 len==0 对账路径——缺席不构成整单 400 的理由。
+	var content []llm.Content
+	if !common.JSONBlank(item.Content) {
+		var err error
+		content, err = common.DecodeContent(item.Content, &context.Dropped)
+		if err != nil {
+			return err
+		}
 	}
 	if len(content) == 0 {
 		// content 为空数组或全部 part 被丢弃：消息不静默消失——记
