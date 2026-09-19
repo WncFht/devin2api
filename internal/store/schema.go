@@ -272,6 +272,23 @@ var schemaStatements = []string{
 		PRIMARY KEY (day, lane, cause)
 	)`,
 
+	// detached_events：脱钩流完成缓存的生命周期台账（写方与词表
+	// 见 detached.go 文件头）。at 记 unix 毫秒与 logs.time 同单位；
+	// key 存全量语义请求哈希（与 04 标记行的 key 对照），origin_dir
+	// 是首请求调试目录名。两侧请求目录都可能缺席时（claim 失败、
+	// 标记被争用丢弃）这是唯一持久取证面。
+	`CREATE TABLE IF NOT EXISTS detached_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		at INTEGER NOT NULL,
+		lane TEXT NOT NULL DEFAULT '',
+		"key" TEXT NOT NULL DEFAULT '',
+		origin_dir TEXT NOT NULL DEFAULT '',
+		kind TEXT NOT NULL DEFAULT '',
+		detail TEXT NOT NULL DEFAULT ''
+	)`,
+	// 保留期清理（PruneDetachedEvents 按 at 范围删）的支点。
+	`CREATE INDEX IF NOT EXISTS idx_detached_events_at ON detached_events(at)`,
+
 	// runtime_state：键值小状态。gate:<lane> 存冷却闩 JSON；
 	// import_base_done / debug_dirs_imported 是导入进度标记。
 	`CREATE TABLE IF NOT EXISTS runtime_state (

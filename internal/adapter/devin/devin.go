@@ -272,7 +272,7 @@ func New(config Config) (*Adapter, error) {
 		modelsCacheTTL: 5 * time.Minute,
 		gate:           newRateGate(config.Gate, config.GateStateStore, store.GateStateKey(config.Identity.Name)),
 		assignments:    make(map[string]resolvedAssignment),
-		detached:       newDetachedRegistry(),
+		detached:       newDetachedRegistry(config.GateStateStore, config.Identity.Name),
 	}
 	link, err := newUpstreamLink(config, adapter.currentToken)
 	if err != nil {
@@ -835,11 +835,11 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			if reg == adapter.detached {
 				continue
 			}
-			state, usable, ok := reg.peek(detachKey)
+			state, usable, ok, originDir := reg.peek(detachKey)
 			if !ok {
 				continue
 			}
-			adapter.detached.noteCrossLaneMiss(detachKey, owner, state)
+			adapter.detached.noteCrossLaneMiss(detachKey, owner, originDir, state)
 			detail := map[string]any{
 				"key":         detachKey,
 				"owner_lane":  owner,
@@ -2154,7 +2154,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			// 截断发生数在冻结点记账（与条目之后的移除路径解耦）；
 			// 记 04 标记行给「flood  drain 进缓存」留取证——detached/
 			// detached_attach 之外的第三条脱钩标记。
-			stream.registry.noteTruncated(stream.detachKey)
+			stream.registry.noteTruncated(stream.detachKey, stream.entry)
 			detail := map[string]any{
 				"key":          stream.detachKey,
 				"budget_bytes": detachedMaxBufferedBytes,
@@ -2303,7 +2303,7 @@ func (stream *responseStream) detach(ctx context.Context) {
 					},
 				}) {
 					// 终局错误的追加自身越预算：同一冻结点记账口径。
-					stream.registry.noteTruncated(stream.detachKey)
+					stream.registry.noteTruncated(stream.detachKey, entry)
 				}
 			}
 			// 泵终局按原因记四档：drainCtx 超时是 running TTL 到期，
@@ -2318,7 +2318,7 @@ func (stream *responseStream) detach(ctx context.Context) {
 			case errors.Is(err, io.EOF) && state == detachedCompleted:
 				reason = detachFinishCompleted
 			}
-			stream.registry.noteFinish(stream.detachKey, reason)
+			stream.registry.noteFinish(stream.detachKey, reason, entry)
 			return
 		}
 	}()

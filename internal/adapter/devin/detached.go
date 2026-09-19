@@ -16,12 +16,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // detachedMaxEntries 是完成缓存的容量上限：单条缓冲最坏 ~MB 级，
@@ -280,9 +282,18 @@ type detachedRegistry struct {
 	orphanBuffered    int64 // 孤儿条目脱钩后新产出的事件量合计（浪费量级代理）
 	orphansCrossLane  int64 // 孤儿中消费者来过但去了别门的（sawCrossLaneRetry）
 	crossLaneMisses   int64 // 同键请求到本 lane 但条目在兄弟 lane 的探测命中
-	events            [detachedEventCap]DetachedEvent
-	eventHead         int
-	eventSize         int
+	// ledger/lane 是 detached_events 台账的写出口与归属维：事件环只有
+	// 64 条且随进程死蒸发，而脱钩事件的两侧请求目录都可能缺席（claim
+	// 失败的重试零 payload、origin 标记行在 sqlite 争用中被丢）——台账
+	// 是这类「零足迹」现场的兜底取证层。ledger 为 nil 时只走内存环。
+	ledger *store.Store
+	lane   string
+	// ledgerDrops 记台账写失败数（争用超时/库不可用）——台账存在的目的
+	// 就是兜住争用期的丢痕迹，它自己丢了多少必须有数。
+	ledgerDrops int64
+	events      [detachedEventCap]DetachedEvent
+	eventHead   int
+	eventSize   int
 }
 
 // detachedEventCap 是缓存事件环容量：脱钩/挂接/终局/移除低频，
@@ -433,6 +444,10 @@ type DetachedStats struct {
 	// 级浪费拿不到（真实 token 只在内存事件载荷里），事件量是最接近
 	// 的量级代理：区分「登记即死的孤儿」与「跑了 20 分钟无人认领」。
 	OrphanBufferedEvents int64 `json:"orphan_buffered_events"`
+	// LedgerDrops 是 detached_events 台账写失败计数：台账存在的意义
+	// 就是兜住争用期的丢痕迹，它自身的丢失量必须可观测（sqlite 争用
+	// 风暴期超时写失败时这里涨）。
+	LedgerDrops int64 `json:"ledger_drops"`
 
 	Events []DetachedEvent `json:"events,omitempty"` // 新在前
 }
@@ -464,6 +479,7 @@ func mergeDetachedStats(per map[string]DetachedStats) DetachedStats {
 		merged.OrphanCompleted += s.OrphanCompleted
 		merged.OrphansCrossLane += s.OrphansCrossLane
 		merged.OrphanBufferedEvents += s.OrphanBufferedEvents
+		merged.LedgerDrops += s.LedgerDrops
 		for _, ev := range s.Events {
 			ev.Lane = name
 			merged.Events = append(merged.Events, ev)
@@ -485,9 +501,10 @@ func mergeDetachedStats(per map[string]DetachedStats) DetachedStats {
 	return merged
 }
 
-// newDetachedRegistry 创建空缓存。
-func newDetachedRegistry() *detachedRegistry {
-	return &detachedRegistry{entries: make(map[string]*detachedEntry)}
+// newDetachedRegistry 创建空缓存。ledger 非空时生命周期事件同步落
+// detached_events 台账（每事件一行）；lane 名作为台账的归属维写入。
+func newDetachedRegistry(ledger *store.Store, lane string) *detachedRegistry {
+	return &detachedRegistry{entries: make(map[string]*detachedEntry), ledger: ledger, lane: lane}
 }
 
 // detachedPeersKey 是兄弟 lane 完成缓存登记表在请求 ctx 里的挂接键
@@ -529,6 +546,7 @@ func (registry *detachedRegistry) lookup(key string) *detachedEntry {
 	replayable := entry.state != detachedFailed || entry.replayable
 	truncated := entry.truncated
 	state := entry.state
+	originDir := entry.originDir
 	if !expired && !truncated && replayable {
 		entry.attached = true
 	}
@@ -539,49 +557,50 @@ func (registry *detachedRegistry) lookup(key string) *detachedEntry {
 			cause = detachEvictTruncated
 		}
 		registry.attachMisses++
-		registry.pushEvent(detachedEventMiss, key, cause)
+		registry.pushEvent(detachedEventMiss, key, originDir, cause)
 		registry.evictLocked(key, entry, cause)
 		return nil
 	}
 	if !replayable {
 		registry.attachMisses++
-		registry.pushEvent(detachedEventMiss, key, "unreplayable")
+		registry.pushEvent(detachedEventMiss, key, originDir, "unreplayable")
 		return nil
 	}
 	registry.attaches++
-	registry.pushEvent(detachedEventAttach, key, state.String())
+	registry.pushEvent(detachedEventAttach, key, originDir, state.String())
 	return entry
 }
 
 // peek 是只读的在场探测（跨 lane 挂接 miss 观测用）：条目在场回
-// (state, usable, true)——usable 与 lookup 同判据（未过期 && 未截断 &&
-// (非 failed || 可重放)）。不置 attached（不污染 owner 的孤儿口径）、
+// (state, usable, true, originDir)——usable 与 lookup 同判据（未过期 &&
+// 未截断 && (非 failed || 可重放)），originDir 供探测方的跨 lane miss
+// 台账行回指帧取证目录。不置 attached（不污染 owner 的孤儿口径）、
 // 不惰性逐出、不计数；唯一写入是 sawCrossLaneRetry 置位——owner 侧移除
-// 时据此把孤儿拆出「来错门」一档。缺席回 (_, _, false)（普通首发）。
-func (registry *detachedRegistry) peek(key string) (state detachedState, usable, ok bool) {
+// 时据此把孤儿拆出「来错门」一档。缺席回 (_, _, false, "")（普通首发）。
+func (registry *detachedRegistry) peek(key string) (state detachedState, usable, ok bool, originDir string) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	entry := registry.entries[key]
 	if entry == nil {
-		return 0, false, false
+		return 0, false, false, ""
 	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	usable = !time.Now().After(entry.expiresAt) && !entry.truncated &&
 		(entry.state != detachedFailed || entry.replayable)
 	entry.sawCrossLaneRetry = true
-	return entry.state, usable, true
+	return entry.state, usable, true, entry.originDir
 }
 
 // noteCrossLaneMiss 记一次跨 lane 挂接 miss：同键请求落到本 lane 但
 // 条目在 owner lane——选号让位/删绑把本该挂接的消费者送错了门。计数与
 // 事件环记在本 lane（attach_misses 的对称补全），owner 侧痕迹走
 // sawCrossLaneRetry→orphans_cross_lane 口径。
-func (registry *detachedRegistry) noteCrossLaneMiss(key, owner string, state detachedState) {
+func (registry *detachedRegistry) noteCrossLaneMiss(key, owner, originDir string, state detachedState) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	registry.crossLaneMisses++
-	registry.pushEvent(detachedEventCrossMiss, key, owner+":"+state.String())
+	registry.pushEvent(detachedEventCrossMiss, key, originDir, owner+":"+state.String())
 }
 
 // admit 把条目按 key 登记进缓存并接管其后台泵的生命周期。容量触顶的
@@ -597,6 +616,7 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 	entry.admittedAt = time.Now()
 	entry.expiresAt = entry.admittedAt.Add(detachedRunningTTL)
 	entry.detachIndex = len(entry.events)
+	originDir := entry.originDir
 	entry.mu.Unlock()
 	if old := registry.entries[key]; old != nil {
 		registry.evictLocked(key, old, detachEvictReplaced)
@@ -647,7 +667,7 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 	}
 	registry.entries[key] = entry
 	registry.detaches++
-	registry.pushEvent(detachedEventAdmit, key, "")
+	registry.pushEvent(detachedEventAdmit, key, originDir, "")
 }
 
 // evictLocked 摘出条目：running 条目同时掐后台泵的 drain ctx——泵的
@@ -679,6 +699,7 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 	crossLane := entry.sawCrossLaneRetry
 	completed := entry.state == detachedCompleted
 	bufferedAfterDetach := len(entry.events) - entry.detachIndex
+	originDir := entry.originDir
 	entry.mu.Unlock()
 	if orphan {
 		registry.orphans++
@@ -690,7 +711,7 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 			registry.orphansCrossLane++
 		}
 	}
-	registry.pushEvent(detachedEventEvict, key, cause)
+	registry.pushEvent(detachedEventEvict, key, originDir, cause)
 	if running && drainCancel != nil {
 		drainCancel()
 	}
@@ -722,8 +743,12 @@ func (registry *detachedRegistry) evictByOriginDir(dir string) {
 
 // noteFinish 记一次后台泵终局：被掐死的泵在条目移出后仍会走到这里，
 // 计数按原因四档（detachFinish*）——orphan 口径量「有没有人接」，
-// finish 口径量「泵怎么死的」，两维独立。
-func (registry *detachedRegistry) noteFinish(key, reason string) {
+// finish 口径量「泵怎么死的」，两维独立。entry 供台账行取 origin_dir：
+// 被逐出后才到终局的泵在 map 里已查不到，只能由调用方递进来。
+func (registry *detachedRegistry) noteFinish(key, reason string, entry *detachedEntry) {
+	entry.mu.Lock()
+	originDir := entry.originDir
+	entry.mu.Unlock()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	switch reason {
@@ -736,33 +761,39 @@ func (registry *detachedRegistry) noteFinish(key, reason string) {
 	default:
 		registry.finishedFailed++
 	}
-	registry.pushEvent(detachedEventFinish, key, reason)
+	registry.pushEvent(detachedEventFinish, key, originDir, reason)
 }
 
 // noteTruncated 记一次缓冲截断：append 越字节预算冻结缓冲时由 tee 点
 // 调用——计数挂在截断发生点而非移除路径，截断尸体之后经 lookup 惰性
 // 逐出还是 admit 容量扫描让位都不再重复入账。nil 接收容忍 entry 在场
-// 而缓存未启用的流。
-func (registry *detachedRegistry) noteTruncated(key string) {
+// 而缓存未启用的流。entry 供台账行取 origin_dir（pre-detach 截断时
+// 尚未赋值，落空串）。
+func (registry *detachedRegistry) noteTruncated(key string, entry *detachedEntry) {
 	if registry == nil {
 		return
 	}
+	entry.mu.Lock()
+	originDir := entry.originDir
+	entry.mu.Unlock()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	registry.truncated++
-	registry.pushEvent(detachedEventTruncate, key, "")
+	registry.pushEvent(detachedEventTruncate, key, originDir, "")
 }
 
 // pushEvent 追加一条生命周期事件；调用方须持 mu。key 截前 12 位——
 // 与 04 标记行的全量键前缀对照可认，全键写进快照只是噪音。
-func (registry *detachedRegistry) pushEvent(kind, key, detail string) {
-	if len(key) > 12 {
-		key = key[:12]
-	}
+// ledger 非空时同一事件同步落 detached_events 台账行（全量 key）：
+// 在 mu 内写库保证台账序与环序一致，写上限取 lockedStateStoreTimeout
+// ——争用期超时按写失败记账（ledgerDrops）不阻塞生命周期流程；台账
+// 是内存环之下的持久层，不是替代。
+func (registry *detachedRegistry) pushEvent(kind, key, originDir, detail string) {
+	at := time.Now()
 	registry.events[registry.eventHead] = DetachedEvent{
-		At:     time.Now(),
+		At:     at,
 		Kind:   kind,
-		Key:    key,
+		Key:    detachedRingKey(key),
 		Detail: detail,
 		Label:  detachedEventLabel(kind, detail),
 	}
@@ -770,6 +801,26 @@ func (registry *detachedRegistry) pushEvent(kind, key, detail string) {
 	if registry.eventSize < detachedEventCap {
 		registry.eventSize++
 	}
+	if registry.ledger == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
+	err := registry.ledger.InsertDetachedEvent(ctx, store.DetachedEvent{
+		At: at, Lane: registry.lane, Key: key, OriginDir: originDir, Kind: kind, Detail: detail,
+	})
+	cancel()
+	if err != nil {
+		registry.ledgerDrops++
+		slog.Warn("detached event ledger write failed", "lane", registry.lane, "kind", kind, "key", detachedRingKey(key), "error", err)
+	}
+}
+
+// detachedRingKey 给事件环的 key 截前 12 位。
+func detachedRingKey(key string) string {
+	if len(key) > 12 {
+		return key[:12]
+	}
+	return key
 }
 
 // stats 返回完成缓存快照：在场条目按态分解 + 累计计数 + 事件环
@@ -811,6 +862,7 @@ func (registry *detachedRegistry) stats() DetachedStats {
 	stats.OrphanCompleted = registry.orphanCompleted
 	stats.OrphansCrossLane = registry.orphansCrossLane
 	stats.OrphanBufferedEvents = registry.orphanBuffered
+	stats.LedgerDrops = registry.ledgerDrops
 	for i := 1; i <= registry.eventSize; i++ {
 		stats.Events = append(stats.Events, registry.events[(registry.eventHead-i+detachedEventCap)%detachedEventCap])
 	}

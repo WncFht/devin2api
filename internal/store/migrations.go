@@ -223,6 +223,15 @@ var schemaMigrations = []migration{
 				`ALTER TABLE logs ADD COLUMN upstream_done_ms INTEGER`)
 		},
 	},
+	{
+		// detached_events 是全新表：幂等建表路径（schema.go）已覆盖新库
+		// 与存量库，这里登记版本让 schema_migrations 如实反映演进史
+		//（同 0005_gate_windows / 0008_lane_attempt_causes 先例）。
+		version: "0017_detached_events",
+		apply: func(_ *sql.Tx) error {
+			return nil
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

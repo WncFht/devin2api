@@ -4,6 +4,7 @@ package devin
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -136,7 +137,7 @@ func collectAttached(stream llm.ResponseStream) ([]llm.ResponseEvent, error) {
 // 上游流不取消而是脱钩续命——后台泵把剩余事件喂进缓冲并定态 completed，
 // 挂接方重放出含前缀的完整序列。
 func TestDetachedStreamKeepsPumping(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
@@ -186,7 +187,7 @@ func TestDetachedStreamKeepsPumping(t *testing.T) {
 // Adapter.Stream 里持 mu 的哨兵判定块同样能把流送进缓存——否则那条
 // 路径上既无人脱钩也无人杀泵，孤儿泵随 streamBase 永久泄漏。
 func TestDetachedWatcherPathCoversAbandonedConsumer(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
@@ -228,7 +229,7 @@ func TestDetachedWatcherPathCoversAbandonedConsumer(t *testing.T) {
 // 可续命的泵，「产过内容但未见 stopReason」的失败收尾（midcontent 式
 // 传输截断是其生产形态）若放行会把死流登记进缓存，白占容量与孤儿簿记。
 func TestFinishedStreamNotDetachable(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 99, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 	}}
@@ -266,7 +267,7 @@ func TestFinishedStreamNotDetachable(t *testing.T) {
 // 的生成若准入会继续烧上游至 running TTL，同键重试还会重放尸体。
 // Abort 先置 aborted 位再取消，ctx.Done 可观察时 WasAborted 必真。
 func TestAbortedStreamNotDetachable(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
@@ -299,7 +300,7 @@ func TestAbortedStreamNotDetachable(t *testing.T) {
 // drainCancel（一次性 CancelFunc），后台泵走 ctx.Done 退场并把条目
 // 收成 failed——截断前缀不得误标 completed 重放给同键重试。
 func TestDetachedEvictStopsPump(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
@@ -335,7 +336,7 @@ func TestDetachedEvictStopsPump(t *testing.T) {
 // TestDetachedAttachFollowsLive 钉住 running 挂接：挂接方先重放已缓冲
 // 前缀，然后按下标追新事件直到后台泵读到终态。
 func TestDetachedAttachFollowsLive(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
@@ -392,7 +393,7 @@ func TestDetachedEventMirroredToMeta(t *testing.T) {
 	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, db)
 	t.Cleanup(manager.Close)
 
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
@@ -451,7 +452,7 @@ func TestDetachedPumpStopsFrameWrites(t *testing.T) {
 	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, db)
 	t.Cleanup(manager.Close)
 
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{DeltaText: proto.String(" there")},
@@ -627,7 +628,7 @@ func TestDetachedEntryFinishClassifies(t *testing.T) {
 	}
 	entry.mu.Unlock()
 
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	registry.admit("f1", entry)
 	if got := registry.lookup("f1"); got != entry {
 		t.Fatal("client-fixable failed entry should replay")
@@ -701,7 +702,7 @@ func TestDetachedEntryTruncatesAtByteBudget(t *testing.T) {
 func TestDetachedTruncatedLookupMisses(t *testing.T) {
 	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
 	detachedMaxBufferedBytes = 64
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	entry := &detachedEntry{notify: make(chan struct{})}
 	entry.append(llm.ResponseEvent{Type: llm.ResponseEventTextDelta, Delta: strings.Repeat("a", 128)})
 	registry.admit("t1", entry)
@@ -720,7 +721,7 @@ func TestDetachedTruncatedLookupMisses(t *testing.T) {
 func TestDetachedTruncationStopsPump(t *testing.T) {
 	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
 	detachedMaxBufferedBytes = 4096
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{DeltaText: proto.String(strings.Repeat("x", 8192))},
@@ -769,7 +770,7 @@ func TestDetachedTruncationStopsPump(t *testing.T) {
 func TestDetachedPreTruncatedStreamNotDetachable(t *testing.T) {
 	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
 	detachedMaxBufferedBytes = 4096
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 2, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{DeltaText: proto.String(strings.Repeat("x", 8192))},
@@ -802,7 +803,7 @@ func TestDetachedPreTruncatedStreamNotDetachable(t *testing.T) {
 // TestDetachedRegistryEvictsOldestRunning 钉住容量淘汰序：触顶先逐过期
 // 再逐最老 running，completed 条目不被 running 挤掉。
 func TestDetachedRegistryEvictsOldestRunning(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	completed := &detachedEntry{notify: make(chan struct{}), state: detachedCompleted}
 	registry.admit("done", completed)
 	old := &detachedEntry{notify: make(chan struct{}), state: detachedRunning}
@@ -824,7 +825,7 @@ func TestDetachedRegistryEvictsOldestRunning(t *testing.T) {
 // abort 到达时，被掐死的生成不得留在缓存里供同键重试重放；其它目录的
 // 条目不受影响。
 func TestDetachedEvictByOriginDir(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	drainKilled := make(chan struct{})
 	victim := &detachedEntry{
 		notify:      make(chan struct{}),
@@ -866,7 +867,7 @@ func TestDetachedEvictByOriginDir(t *testing.T) {
 func TestDetachedAdmitCorpseYieldsBeforeRunning(t *testing.T) {
 	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
 	detachedMaxBufferedBytes = 64
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	// 截断尸体：缓冲冻结、态仍 running（泵未及收尾），靠 truncated 位认尸。
 	truncated := &detachedEntry{notify: make(chan struct{})}
 	truncated.append(llm.ResponseEvent{Type: llm.ResponseEventTextDelta, Delta: strings.Repeat("a", 128)})
@@ -903,7 +904,7 @@ func TestDetachedAdmitCorpseYieldsBeforeRunning(t *testing.T) {
 // 全是未过期终态时 admit 逐出最老终态——此前终态永不参与容量淘汰，
 // map 会随 admit 速率×TTL 无界长大（软帽）；兜底把容量关回硬上限。
 func TestDetachedAdmitTerminalFallbackClosesSoftCap(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	for i := 0; i < detachedMaxEntries; i++ {
 		done := &detachedEntry{notify: make(chan struct{})}
 		done.append(llm.ResponseEvent{Type: llm.ResponseEventDone})
@@ -932,7 +933,7 @@ func TestDetachedAdmitTerminalFallbackClosesSoftCap(t *testing.T) {
 func TestDetachedTruncatedCountsAtFreeze(t *testing.T) {
 	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
 	detachedMaxBufferedBytes = 4096
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{DeltaText: proto.String(strings.Repeat("x", 8192))},
@@ -968,7 +969,7 @@ func TestDetachedTruncatedCountsAtFreeze(t *testing.T) {
 // 泵终局计数在各生命周期动作上恰各记一次——runtime-metrics 的
 // detached 组是泵终局与孤儿浪费的唯一观测面，计数错了无处可对。
 func TestDetachedStatsCounters(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 
 	// running 条目挂接命中：attaches+1 且 attached 置位（之后移除不算孤儿）。
 	hit := &detachedEntry{notify: make(chan struct{})}
@@ -1012,8 +1013,8 @@ func TestDetachedStatsCounters(t *testing.T) {
 
 	// 泵终局记账由后台泵调用方负责（detach 的泵 goroutine）——这里
 	// 直记两条覆盖 completed 与 killed 两桶。
-	registry.noteFinish("k1", detachFinishCompleted)
-	registry.noteFinish("k2", detachFinishKilled)
+	registry.noteFinish("k1", detachFinishCompleted, hit)
+	registry.noteFinish("k2", detachFinishKilled, stale)
 
 	stats := registry.stats()
 	// 在场：k1 新条目（running）与 k4（failed）；k2/k3 已逐、k1 旧条目已替换。
@@ -1050,7 +1051,7 @@ func TestDetachedStatsCounters(t *testing.T) {
 // 收口记 finished_completed，被 registry 淘汰掐死记 finished_killed
 // ——两档走真实 detach→泵→finish 路径，与 orphan（有没有人接）正交。
 func TestDetachedPumpFinishAccounting(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("hi")},
 		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
@@ -1103,12 +1104,12 @@ func TestDetachedPumpFinishAccounting(t *testing.T) {
 // 缺席。usable 与 lookup 同判据，但 peek 不置 attached、不惰性逐出、不计
 // attach_misses——它只给 owner 条目盖 sawCrossLaneRetry 章供孤儿拆分。
 func TestDetachedPeek(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 
 	// 在场可用：running 条目 → (running, usable, ok)；attached 不得置位。
 	live := &detachedEntry{notify: make(chan struct{})}
 	registry.admit("p1", live)
-	state, usable, ok := registry.peek("p1")
+	state, usable, ok, _ := registry.peek("p1")
 	if !ok || state != detachedRunning || !usable {
 		t.Fatalf("peek running = (%v,%v,%v), want (running,true,true)", state, usable, ok)
 	}
@@ -1129,7 +1130,7 @@ func TestDetachedPeek(t *testing.T) {
 	}})
 	broken.finish()
 	registry.admit("p2", broken)
-	state, usable, ok = registry.peek("p2")
+	state, usable, ok, _ = registry.peek("p2")
 	if !ok || state != detachedFailed || usable {
 		t.Fatalf("peek unreplayable = (%v,%v,%v), want (failed,false,true)", state, usable, ok)
 	}
@@ -1143,12 +1144,12 @@ func TestDetachedPeek(t *testing.T) {
 	stale.mu.Lock()
 	stale.expiresAt = time.Now().Add(-time.Second)
 	stale.mu.Unlock()
-	if _, usable, ok = registry.peek("p3"); !ok || usable {
+	if _, usable, ok, _ = registry.peek("p3"); !ok || usable {
 		t.Fatalf("peek expired = (?, %v, %v), want (false,true)", usable, ok)
 	}
 
 	// 缺席：普通首发。
-	if _, _, ok := registry.peek("p9"); ok {
+	if _, _, ok, _ := registry.peek("p9"); ok {
 		t.Fatal("peek on absent key must miss")
 	}
 	stats := registry.stats()
@@ -1160,9 +1161,9 @@ func TestDetachedPeek(t *testing.T) {
 // TestDetachedCrossLaneMissBookkeeping 钉住探测侧的记账：本 lane 的
 // crossLaneMisses 递增、事件环收 cross_miss（detail 带 owner:state）。
 func TestDetachedCrossLaneMissBookkeeping(t *testing.T) {
-	registry := newDetachedRegistry()
-	registry.noteCrossLaneMiss("abcdef1234567890", "owner-a", detachedRunning)
-	registry.noteCrossLaneMiss("abcdef1234567890", "owner-a", detachedCompleted)
+	registry := newDetachedRegistry(nil, "")
+	registry.noteCrossLaneMiss("abcdef1234567890", "owner-a", "origin-dir-a", detachedRunning)
+	registry.noteCrossLaneMiss("abcdef1234567890", "owner-a", "origin-dir-a", detachedCompleted)
 	stats := registry.stats()
 	if stats.CrossLaneMisses != 2 {
 		t.Fatalf("cross_lane_misses = %d, want 2", stats.CrossLaneMisses)
@@ -1179,7 +1180,7 @@ func TestDetachedCrossLaneMissBookkeeping(t *testing.T) {
 // TestDetachedOrphansCrossLane 钉住孤儿拆分：sawCrossLaneRetry 置位的孤儿
 // 移除时另记 orphans_cross_lane——「来错门」与「没人来」分开归因。
 func TestDetachedOrphansCrossLane(t *testing.T) {
-	registry := newDetachedRegistry()
+	registry := newDetachedRegistry(nil, "")
 
 	// 来错门：peek 盖过章的孤儿。
 	wrongDoor := &detachedEntry{notify: make(chan struct{})}
@@ -1255,5 +1256,66 @@ func TestMergeDetachedStats(t *testing.T) {
 	})
 	if len(capped.Events) != detachedEventCap {
 		t.Fatalf("merged events = %d, want cap %d", len(capped.Events), detachedEventCap)
+	}
+}
+
+// TestDetachedLedgerWrite 钉住台账漏斗：registry 挂真实库时生命周期事件
+// 经 pushEvent 同步落 detached_events——两侧请求目录缺席（claim 失败、
+// 标记被争用丢弃）时这是唯一的持久取证面，行须带 lane/全量 key/
+// origin_dir/kind/detail 供 sqlite3 直查。
+func TestDetachedLedgerWrite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "detached.db")
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	registry := newDetachedRegistry(db, "lane-a")
+	const key = "keyfull1234567890abcdef"
+	entry := &detachedEntry{notify: make(chan struct{})}
+	entry.mu.Lock()
+	entry.originDir = "20260919-030405"
+	entry.mu.Unlock()
+	registry.admit(key, entry)
+	if registry.lookup(key) != entry {
+		t.Fatal("running entry should attach")
+	}
+	registry.noteFinish(key, detachFinishCompleted, entry)
+	registry.evictLocked(key, entry, detachEvictExpired)
+
+	sqlDB, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=query_only(1)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	rows, err := sqlDB.Query(`SELECT kind, "key", origin_dir, lane, detail FROM detached_events ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query detached_events: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		var kind, k, dir, lane, detail string
+		if err := rows.Scan(&kind, &k, &dir, &lane, &detail); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, kind+"|"+k+"|"+dir+"|"+lane+"|"+detail)
+	}
+	want := []string{
+		"admit|" + key + "|20260919-030405|lane-a|",
+		"attach|" + key + "|20260919-030405|lane-a|running",
+		"finish|" + key + "|20260919-030405|lane-a|completed",
+		"evict|" + key + "|20260919-030405|lane-a|expired",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ledger rows = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("row %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if stats := registry.stats(); stats.LedgerDrops != 0 {
+		t.Fatalf("ledger_drops = %d, want 0", stats.LedgerDrops)
 	}
 }
