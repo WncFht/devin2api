@@ -65,11 +65,11 @@ func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []by
 // first-write-wins：首个失败点最有诊断价值，覆盖语义由调用方表达。
 func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, content []byte) error {
 	stored, usize := EncodePayload(content)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.writeTx(ctx, "PutDebugFileIfAbsent")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer done()
 	res, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
 		dir, name, stored, usize, time.Now().UnixMilli())
@@ -98,11 +98,11 @@ func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, cont
 // 只在是否报告本次真正写入。
 func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []byte) (claimed bool, err error) {
 	stored, usize := EncodePayload(content)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.writeTx(ctx, "ClaimDebugFile")
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer done()
 	res, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
 		dir, name, stored, usize, time.Now().UnixMilli())
