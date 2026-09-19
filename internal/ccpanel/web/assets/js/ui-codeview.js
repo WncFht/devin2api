@@ -325,8 +325,8 @@
   // 全局折叠按钮事件委托（仅绑定一次）。
   // 任何使用 setHighlightedCodeContent 渲染的 pre 都自动支持折叠。
   if (typeof document !== 'undefined' && typeof document.addEventListener === 'function'
-      && !document.__codeFoldDelegated) {
-    document.__codeFoldDelegated = true;
+      && !document.codeFoldDelegated) {
+    document.codeFoldDelegated = true;
     document.addEventListener('click', (e) => {
       const foldBtn = e.target.closest('.code-fold-toggle');
       if (!foldBtn) return;

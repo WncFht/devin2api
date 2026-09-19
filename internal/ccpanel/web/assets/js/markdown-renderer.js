@@ -647,8 +647,8 @@
   }
 
   function bindCopyHandler() {
-    if (window.__markdownRendererCopyBound || typeof document === 'undefined') return;
-    window.__markdownRendererCopyBound = true;
+    if (window.markdownRendererCopyBound || typeof document === 'undefined') return;
+    window.markdownRendererCopyBound = true;
     document.addEventListener('click', (event) => {
       const btn = event.target.closest?.('.chat-code-copy-btn');
       if (!btn) return;

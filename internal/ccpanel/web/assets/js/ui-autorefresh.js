@@ -3,7 +3,7 @@
 // ============================================================
 (function () {
 
-  const AUTO_REFRESH_CACHE_KEY = '__autoRefreshIntervalSec';
+  const AUTO_REFRESH_CACHE_KEY = 'autoRefreshIntervalSec';
 
   const AUTO_REFRESH_CACHE_TTL_MS = 60 * 1000;
 
