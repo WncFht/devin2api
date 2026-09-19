@@ -2,6 +2,7 @@
 package devin
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -768,30 +769,24 @@ func (gate *rateGate) restoreState() {
 	slog.Warn("rate gate latch restored from persisted state", "until", state.LimitedUntil.Format(time.RFC3339))
 }
 
-// persistState 把冷却闩截止时刻写入 runtime_state；写失败只记
-// 日志——持久化是防重启续限的保险，不挡请求路径。
+// persistState 把冷却闩截止时刻排进 runtime_state 异步写队列；入队在
+// mu 内做，FIFO 序承接原锁序——「clear 先跑、persist 后写」的幽灵行
+// 交错在写协程侧天然倒序。丢失在消费者侧记账（store 队列丢数 +
+// WARN）——持久化是防重启续限的保险，不挡请求路径。
 func (gate *rateGate) persistState(until time.Time) {
 	if gate.states == nil || gate.stateKey == "" {
 		return
 	}
 	data, _ := json.Marshal(gateState{LimitedUntil: until})
-	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
-	defer cancel()
-	if err := gate.states.SetState(ctx, gate.stateKey, string(data)); err != nil {
-		slog.Warn("rate gate state persist failed", "error", err)
-	}
+	gate.states.QueueState(gate.stateKey, string(data), false)
 }
 
-// clearState 在解闩后删除状态行；行不存在不算错误（DeleteState 空操作）。
+// clearState 在解闩后排队删除状态行；行不存在不算错误（DELETE 空操作）。
 func (gate *rateGate) clearState() {
 	if gate.states == nil || gate.stateKey == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
-	defer cancel()
-	if err := gate.states.DeleteState(ctx, gate.stateKey); err != nil {
-		slog.Warn("rate gate state delete failed", "error", err)
-	}
+	gate.states.QueueState(gate.stateKey, "", true)
 }
 
 // stats 返回闸门状态快照。顺带惰性结算到期闩与滚动桶：wait 只在有
@@ -916,18 +911,25 @@ func summarizeWaits(samples []gateWaitSample) GateWaitSummary {
 	}
 	slices.Sort(waits)
 	out.MeanMs = sum.Milliseconds() / int64(n)
-	out.P50Ms = waits[int(float64(n-1)*0.5)].Milliseconds()
-	out.P90Ms = waits[int(float64(n-1)*0.9)].Milliseconds()
+	out.P50Ms = quantileAt(waits, 0.5).Milliseconds()
+	out.P90Ms = quantileAt(waits, 0.9).Milliseconds()
 	out.MaxMs = waits[n-1].Milliseconds()
 	if m := len(errs); m > 0 {
 		slices.Sort(errs)
 		out.ErrCount = m
 		out.ErrMeanMs = errSum / int64(m)
-		out.ErrP10Ms = errs[int(float64(m-1)*0.1)]
-		out.ErrP50Ms = errs[int(float64(m-1)*0.5)]
-		out.ErrP90Ms = errs[int(float64(m-1)*0.9)]
+		out.ErrP10Ms = quantileAt(errs, 0.1)
+		out.ErrP50Ms = quantileAt(errs, 0.5)
+		out.ErrP90Ms = quantileAt(errs, 0.9)
 	}
 	return out
+}
+
+// quantileAt 按 nearest-rank 定义取排序样本的分位数：最小的、累计占比
+// ≥q 的元素。int((n-1)*q) 下取整口径在小样本把 p90 读成次高位——
+// 样本环容量小（数百条），低估尾部是常态而非边缘情形。
+func quantileAt[T cmp.Ordered](sorted []T, q float64) T {
+	return sorted[int(math.Ceil(q*float64(len(sorted))))-1]
 }
 
 // gateAdmission 是闸门准入面的窄快照：闩态、可发区间与桶位四元供
@@ -1114,6 +1116,9 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 	class := adapter.RequestClass(ctx)
 	gc := adapter.GateContextFrom(ctx)
 	retry := adapter.GateRetryFrom(ctx)
+	// 让位谓词一次取定：ctx 注值在 wait 全程不变，循环里两处复用
+	// （让位快败评估与长睡眠封顶）不重复掏 ctx map。
+	yield := adapter.GateYieldFrom(ctx)
 	bg := class == adapter.ClassBG
 	sleeping := false // 标记本请求占着一个 waiters 名额
 	// blocked 标记本请求是否曾占过 waiters 名额（真排过队）——wait
@@ -1244,21 +1249,19 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 		// siblingEW 是本次评估让位判定咨询到的兄弟最小期望排队；未咨询
 		//（无谓词或探针未达阈值）保持零值，拒绝行按零值缺席。
 		var siblingEW time.Duration
-		if probeWait > gateEarlyRelease {
-			if yield := adapter.GateYieldFrom(ctx); yield != nil {
+		if probeWait > gateEarlyRelease && yield != nil {
+			gate.mu.Unlock()
+			var free bool
+			siblingEW, free = yield()
+			gate.mu.Lock()
+			if free {
+				gate.rejectYield++
+				gate.winRejectYield++
 				gate.mu.Unlock()
-				var free bool
-				siblingEW, free = yield()
-				gate.mu.Lock()
-				if free {
-					gate.rejectYield++
-					gate.winRejectYield++
-					gate.mu.Unlock()
-					rej := gateRejection(ws.Add(windowPeriod).Sub(now), gateReasonYield)
-					rej.GateProbeMS = probeWait.Milliseconds()
-					rej.GateSiblingEwMS = siblingEW.Milliseconds()
-					return rej
-				}
+				rej := gateRejection(ws.Add(windowPeriod).Sub(now), gateReasonYield)
+				rej.GateProbeMS = probeWait.Milliseconds()
+				rej.GateSiblingEwMS = siblingEW.Milliseconds()
+				return rej
 			}
 		}
 		if now.Add(wait).After(deadline) {
@@ -1289,7 +1292,7 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 		// 「睡到下一窗口」会把可换号的等待盲睡到底（fg 桶满盲睡
 		// 可达 ~56s）。无谓词（单 lane/末位候选）保持原睡眠不加重查。
 		timerWait := wait
-		if adapter.GateYieldFrom(ctx) != nil && timerWait > gateEarlyRelease {
+		if yield != nil && timerWait > gateEarlyRelease {
 			timerWait = gateEarlyRelease
 		}
 		timer := time.NewTimer(timerWait)
@@ -1478,9 +1481,10 @@ func (gate *rateGate) noteUpstreamError(err error) {
 			detail = "extended"
 		}
 		gate.pushEvent(gateEventLatched, until, detail)
-		// 持久化须在锁内：解锁后 persist 可能与并发 release 的 clearState
-		// 交错——clear 先跑、persist 后写，已解闩的截止时刻会作为
-		// 死行残留，重启后复活成幽灵闩。
+		// 入队须在锁内：解锁后 persist 的入队可能与并发 release 的
+		// clearState 乱序——clear 先入队、persist 后入队的交错会把已
+		// 解闩的截止时刻写成死行残留，重启后复活成幽灵闩；锁内入队
+		// 让 FIFO 序承接锁序，乱序在写协程侧天然不可能。
 		gate.persistState(until)
 	}
 	gate.mu.Unlock()
@@ -1501,15 +1505,15 @@ func (gate *rateGate) noteUpstreamSuccess() {
 	gate.mu.Lock()
 	// 首个上游帧即该次发送越过上游准入的证据：限流占比 EMA 记 0
 	// 样本——与 noteUpstreamError 的限流记 1 合成 throttle 读数。
-	gate.throttleEMA += throttleAlpha * (0 - gate.throttleEMA)
+	gate.throttleEMA *= 1 - throttleAlpha
 	gate.throttleSamples++
 	latched := !gate.limitedUntil.IsZero()
 	if latched {
 		gate.pushEvent(gateEventReleased, gate.limitedUntil, "")
 		gate.limitedUntil = time.Time{}
 		gate.nextDrip = time.Time{}
-		// clear 与上闩方的 persist 同锁序化：锁外执行会让「persist 晚于
-		// clear」交错把已解闩的时刻写回状态行。
+		// clear 与上闩方的 persist 同锁序入队：锁外入队会让「persist
+		// 后于 clear 入队」交错把已解闩的时刻写回状态行。
 		gate.clearState()
 	}
 	gate.mu.Unlock()

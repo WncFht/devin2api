@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -1014,11 +1015,11 @@ func (lane *poolLane) noteFailure(err error) {
 	defer lane.authMu.Unlock()
 	lane.lastFailureAt = time.Now()
 	lane.lastFailureCode = failure.Code
-	lane.lastFailureMessage = failure.Message
-	if len(lane.lastFailureMessage) > 300 {
-		lane.lastFailureMessage = lane.lastFailureMessage[:300]
-	}
-	if failure.LocalGate {
+	lane.lastFailureMessage = truncateRunes(failure.Message, 300)
+	if failure.LocalGate || (failure.Code == "" && !failure.RateLimited && !failure.UpstreamFault) {
+		// 本地侧失败不落债：本地闸门未触达上游；无码且非限流非上游
+		// 责任的失败同属本地故障（传输半截/投影异常），lane 的上游
+		// 可用性未被证伪——两类都只持久化 last_failure 证据、不动冷却账。
 		lane.persistCooldownLocked()
 		return
 	}
@@ -1062,9 +1063,9 @@ func (lane *poolLane) noteFailure(err error) {
 // laneStart（本尝试选定 lane 的发送时刻）必须晚于最近一次落债时刻
 // debtSetAt；早于它的成功来自债设立前已发出的在飞请求，证明的是故障
 // 前 lane 能发而非故障后恢复，账目原样保留等真探针或自然到期。持久行
-// 同步删除走同一条件：成功已证 lane 可用，重启后不该复活一笔已被清掉
-// 的旧账。常态路径（本就无账，debtSetAt 零值恒过闸）是纯内存快路径，
-// 不碰状态库。
+// 的删除按同一条件排队入队（锁内）：成功已证 lane 可用，重启后不该复活
+// 一笔已被清掉的旧账。常态路径（本就无账，debtSetAt 零值恒过闸）是纯
+// 内存快路径，不碰状态库。
 func (lane *poolLane) noteSuccess(laneStart time.Time) {
 	lane.authMu.Lock()
 	if !laneStart.After(lane.debtSetAt) {
@@ -1078,10 +1079,14 @@ func (lane *poolLane) noteSuccess(laneStart time.Time) {
 	lane.badUntil = time.Time{}
 	lane.unhealthyUntil = time.Time{}
 	lane.debtSetAt = time.Time{}
-	lane.authMu.Unlock()
 	if settled {
+		// 删除入队也在锁内：写协程的 FIFO 序与内存 mutation 序一致，
+		// 末态行恒等于最后一笔 mutation。锁外入队会让别笔 mutation 的
+		// persist 插队到本次清账与 delete 入队之间——写协程按
+		// [persist, delete] 落库，把晚到的新账抹掉。
 		lane.deleteCooldownState()
 	}
+	lane.authMu.Unlock()
 }
 
 // poolCooldownKey 是池侧冷却在 runtime_state 里的键名约定：poolcool:<name>。
@@ -1101,9 +1106,10 @@ type poolCooldownState struct {
 	LastFailureMessage string `json:"last_failure_message"`
 }
 
-// persistCooldownLocked 把冷却簿记写进 runtime_state；须在 authMu 下
-// 调用——与 ClearCooldown/noteSuccess 的删除同锁序化，否则「删后写回」
-// 交错会把已清掉的冷却复活成幽灵行。写失败只记日志，不挡请求路径。
+// persistCooldownLocked 把冷却簿记排进 runtime_state 异步写队列；须在
+// authMu 下调用——锁内入队让 FIFO 序承接锁序，与 ClearCooldown/
+// noteSuccess 的删除天然保序，「删后写回」交错在写协程侧不可能乱序
+// （幽灵行防线的原锁内直写语义）。丢失由 store 队列记账，不挡请求路径。
 func (lane *poolLane) persistCooldownLocked() {
 	if lane.states == nil {
 		return
@@ -1117,23 +1123,15 @@ func (lane *poolLane) persistCooldownLocked() {
 		LastFailureCode:    lane.lastFailureCode,
 		LastFailureMessage: lane.lastFailureMessage,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
-	defer cancel()
-	if err := lane.states.SetState(ctx, poolCooldownKey(lane.name), string(data)); err != nil {
-		slog.Warn("pool cooldown state persist failed", "account", lane.name, "error", err)
-	}
+	lane.states.QueueState(poolCooldownKey(lane.name), string(data), false)
 }
 
-// deleteCooldownState 删除持久化冷却行；行不存在不算错误。
+// deleteCooldownState 排队删除持久化冷却行；行不存在不算错误。
 func (lane *poolLane) deleteCooldownState() {
 	if lane.states == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
-	defer cancel()
-	if err := lane.states.DeleteState(ctx, poolCooldownKey(lane.name)); err != nil {
-		slog.Warn("pool cooldown state delete failed", "account", lane.name, "error", err)
-	}
+	lane.states.QueueState(poolCooldownKey(lane.name), "", true)
 }
 
 // restoreCooldown 在 lane 构建时从 runtime_state 装载冷却簿记：
@@ -1425,6 +1423,12 @@ func (pool *Pool) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 			lane.noteSuccess(laneStart)
 			return models, nil
 		}
+		if errors.Is(err, adapter.ErrStaleCatalog) {
+			// 陈旧兜底：目录照常下发，lane 的刷新失败证据照记——
+			// 下游拿到的是可用快照，健康簿记拿到的是真实失败。
+			lane.noteFailure(err)
+			return models, nil
+		}
 		lastErr = err
 		lane.noteFailure(err)
 		if ctx.Err() != nil {
@@ -1693,7 +1697,7 @@ func errNoUpstreamAccounts() *llm.Failure {
 // ClearCooldown 清该名 lane 的池侧冷却并立即回候选：两档冷却窗
 // （badUntil 凭据冷却 + unhealthyUntil 短冷却）连同 badTokenHash 判死键
 // 与连败计数一并清掉——语义是人工宣布「已处理，回候选」，token 若仍坏
-// 会在下一次 unauthenticated 重新进冷却。持久行同步删除。保留
+// 会在下一次 unauthenticated 重新进冷却。持久行锁内排队删除。保留
 // lastFailure* 证据，不动 gate 闩（上游推导的真值，本地无权清）。
 // 无该名活 lane 返 false。
 func (pool *Pool) ClearCooldown(name string) bool {
@@ -1707,8 +1711,9 @@ func (pool *Pool) ClearCooldown(name string) bool {
 		lane.unhealthyUntil = time.Time{}
 		lane.failStreak = 0
 		lane.debtSetAt = time.Time{}
-		lane.authMu.Unlock()
+		// 锁内入队：与 noteSuccess 同一排序保证（见该处注释）。
 		lane.deleteCooldownState()
+		lane.authMu.Unlock()
 		return true
 	}
 	return false
@@ -1720,7 +1725,7 @@ func (pool *Pool) ClearCooldown(name string) bool {
 // noteFailure 的 unauthenticated 分支同一套字段：badTokenHash 按当前
 // token 记（空 token 即 tokenHash("")），凭据源补进真 token 哈希即变、
 // authCooldown 自动解禁；badUntil 走同一连败退避档，到期探针若恰逢
-// 文件回填就地复活。持久行同步写，重启不复活死 lane。无该名活 lane
+// 文件回填就地复活。持久行锁内排队写，重启不复活死 lane。无该名活 lane
 // 返 false。
 func (pool *Pool) MarkDegraded(name, reason string) bool {
 	for _, lane := range pool.snapshot() {
@@ -1732,10 +1737,7 @@ func (pool *Pool) MarkDegraded(name, reason string) bool {
 		lane.debtSetAt = now
 		lane.lastFailureAt = now
 		lane.lastFailureCode = "credentials_file_unreadable"
-		lane.lastFailureMessage = reason
-		if len(lane.lastFailureMessage) > 300 {
-			lane.lastFailureMessage = lane.lastFailureMessage[:300]
-		}
+		lane.lastFailureMessage = truncateRunes(reason, 300)
 		lane.badTokenHash = tokenHash(lane.adapter.currentToken())
 		if !now.Before(lane.badUntil) {
 			lane.failStreak++
