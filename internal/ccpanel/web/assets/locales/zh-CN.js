@@ -40,6 +40,8 @@ window.I18N_LOCALES['zh-CN'] = {
   'common.timeHM': '{h}小时{m}分',
   'common.timeMS': '{m}分{s}秒',
   'common.timeS': '{s}秒',
+  'common.selectLanguage': '选择语言',
+  'common.skipToContent': '跳转到主要内容',
 
   // ============================================================
   // 导航
@@ -82,7 +84,7 @@ window.I18N_LOCALES['zh-CN'] = {
   // ============================================================
   // 首页概览
   // ============================================================
-  'index.title': 'Devin2API 代理服务',
+  'index.title': '概览 - Devin2API',
   'index.timeRange.today': '本日',
   'index.timeRange.yesterday': '昨日',
   'index.timeRange.dayBeforeYesterday': '前日',
@@ -501,6 +503,8 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.upstreamStatusRetrying': '重试中',
   'logs.receivedBytes': '已接收 {bytes}',
   'logs.upstreamDetails': '上游详情',
+  'logs.detail': '详情',
+  'logs.clickToCopy': '点击复制',
   'logs.testContent': '测试内容',
   'logs.testContentPlaceholder': '输入测试消息内容',
   'logs.enableStream': '启用流式响应',
@@ -1231,7 +1235,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'accounts.sort.priority': '按优先级',
   'accounts.sort.health': '按健康状态',
   'accounts.filter.only': '仅看 {name}',
-  'accounts.filter.clear': '清除筛选',
   'accounts.filter.missing': '账号 {name} 不存在',
   'accounts.add.credContent': '粘贴 credentials.toml',
   'accounts.add.credContentHint': '粘贴 credentials.toml 全文',

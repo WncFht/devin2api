@@ -599,10 +599,10 @@ function formatRuntimeMetric(metric, stats) {
 
 function renderRuntimeMetricCard(metric, stats) {
   return `
-    <div class="runtime-metric-card">
-      <span class="runtime-metric-label">${escapeHtml(t(metric.labelKey))}</span>
-      <strong class="runtime-metric-value">${escapeHtml(formatRuntimeMetric(metric, stats))}</strong>
-      <code class="runtime-metric-key">${escapeHtml(metric.key)}</code>
+    <div class="kpi-card">
+      <span class="kpi-label">${escapeHtml(t(metric.labelKey))}</span>
+      <strong class="kpi-value">${escapeHtml(formatRuntimeMetric(metric, stats))}</strong>
+      <code class="kpi-key">${escapeHtml(metric.key)}</code>
     </div>`;
 }
 
@@ -622,7 +622,7 @@ function renderRuntimeMetricDomain(domain, payload) {
       </section>`;
   }
   const grid = domain.metrics.length
-    ? `<div class="runtime-metrics-grid">${domain.metrics.map((metric) => renderRuntimeMetricCard(metric, stats)).join('')}</div>`
+    ? `<div class="kpi-grid">${domain.metrics.map((metric) => renderRuntimeMetricCard(metric, stats)).join('')}</div>`
     : '';
   const extra = typeof domain.renderExtra === 'function' ? domain.renderExtra(stats, payload) : '';
   return `
@@ -642,7 +642,7 @@ function renderRuntimeMetricGroup(group, stats) {
       <div class="runtime-metrics-subsection-header">
         <h4>${escapeHtml(t(group.titleKey))}</h4>
       </div>
-      <div class="runtime-metrics-grid">
+      <div class="kpi-grid">
         ${group.metrics.map((metric) => renderRuntimeMetricCard(metric, stats)).join('')}
       </div>
     </section>`;
@@ -652,7 +652,7 @@ function renderRuntimeMetricTable(headers, rowsHtml) {
   return `
     <div class="table-container">
       <table class="modern-table">
-        <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
+        <thead><tr>${headers.map((header) => `<th scope="col">${escapeHtml(header)}</th>`).join('')}</tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
     </div>`;
@@ -711,14 +711,14 @@ function renderRejectsExtra(stats) {
   const cards = ordered
     .filter((reason) => (normalizeRuntimeMetric(byReason[reason]) || 0) > 0)
     .map((reason) => `
-      <div class="runtime-metric-card">
-        <span class="runtime-metric-label">${escapeHtml(labels[reason] || reason)}</span>
-        <strong class="runtime-metric-value">${escapeHtml(formatRuntimeInteger(byReason[reason]))}</strong>
-        <code class="runtime-metric-key">${escapeHtml(reason)}</code>
+      <div class="kpi-card">
+        <span class="kpi-label">${escapeHtml(labels[reason] || reason)}</span>
+        <strong class="kpi-value">${escapeHtml(formatRuntimeInteger(byReason[reason]))}</strong>
+        <code class="kpi-key">${escapeHtml(reason)}</code>
       </div>`);
 
   let html = cards.length
-    ? `<div class="runtime-metrics-grid">${cards.join('')}</div>`
+    ? `<div class="kpi-grid">${cards.join('')}</div>`
     : `<p class="runtime-metrics-note">${escapeHtml(t('settings.runtimeMetrics.rejectsNone'))}</p>`;
 
   const recent = Array.isArray(stats.recent) ? stats.recent.slice(0, 30) : [];
@@ -727,7 +727,7 @@ function renderRejectsExtra(stats) {
       const at = normalizeRuntimeMetric(event.at);
       const ua = event.user_agent ? String(event.user_agent) : '';
       const who = escapeHtml(event.ip || '—')
-        + (event.key_hash ? ` <code class="runtime-metric-key">${escapeHtml(event.key_hash)}</code>` : '')
+        + (event.key_hash ? ` <code class="kpi-key">${escapeHtml(event.key_hash)}</code>` : '')
         + (ua ? `<div title="${escapeHtml(ua)}">${escapeHtml(ua.length > 48 ? ua.slice(0, 48) + '…' : ua)}</div>` : '');
       return `<tr>
         <td>${escapeHtml(at !== null ? new Date(at * 1000).toLocaleString(runtimeMetricsLocale()) : '—')}</td>
@@ -871,11 +871,11 @@ function renderQuotaExtra(stats) {
     const err = typeof lane.last_error === 'string' ? lane.last_error.trim() : '';
     const errText = err ? (err.length > 80 ? err.slice(0, 80) + '…' : err) : '—';
     return `<tr>
-      <td><code class="runtime-metric-key">${escapeHtml(name)}</code></td>
+      <td><code class="kpi-key">${escapeHtml(name)}</code></td>
       <td>${escapeHtml(formatRuntimeInteger(lane.rounds_started))}</td>
       <td>${escapeHtml(formatRuntimeInteger(lane.rounds_fetch_ok))}</td>
       <td>${escapeHtml(formatRuntimeInteger(lane.rounds_persist_ok))}</td>
-      <td>${escapeHtml(formatRuntimeInteger(lane.rounds_failed))} <span class="runtime-metric-key">${escapeHtml(split)}</span></td>
+      <td>${escapeHtml(formatRuntimeInteger(lane.rounds_failed))} <span class="kpi-key">${escapeHtml(split)}</span></td>
       <td>${escapeHtml(formatRuntimeUnixSeconds(lane.last_started_at))}</td>
       <td>${escapeHtml(formatRuntimeUnixSeconds(lane.last_finished_at))}</td>
       <td${err ? ` title="${escapeHtml(err)}"` : ''}>${escapeHtml(errText)}</td>
@@ -913,7 +913,7 @@ function renderStoreExtra(stats) {
     <td>${escapeHtml(formatRuntimeTimestamp(o.at))}</td>
     <td>${escapeHtml(formatRuntimeInteger(o.pid))}</td>
     <td>${escapeHtml(o.build || '—')}</td>
-    <td><code class="runtime-metric-key">${escapeHtml(o.argv || '—')}</code></td>
+    <td><code class="kpi-key">${escapeHtml(o.argv || '—')}</code></td>
   </tr>`).join('');
   html += `
     <div class="runtime-metrics-subsection-header">
@@ -1309,7 +1309,7 @@ function renderEffectiveConfig() {
       ? `<strong>${escapeHtml(t('settings.effectiveConfig.degradedAccounts'))}</strong>` +
         degraded.map((d) => {
           const name = d && d.name ? String(d.name) : '—';
-          const file = d && d.credentials_file ? ` <code class="runtime-metric-key">${escapeHtml(String(d.credentials_file))}</code>` : '';
+          const file = d && d.credentials_file ? ` <code class="kpi-key">${escapeHtml(String(d.credentials_file))}</code>` : '';
           const err = d && d.error ? ` — ${escapeHtml(String(d.error))}` : '';
           return `<div>${escapeHtml(name)}${file}${err}</div>`;
         }).join('')

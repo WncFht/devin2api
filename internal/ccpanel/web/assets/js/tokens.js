@@ -255,17 +255,17 @@
         </colgroup>
         <thead>
           <tr>
-            <th>${t('tokens.table.token')}</th>
-            <th class="tokens-col-calls">${t('tokens.table.callCount')}</th>
-            <th class="tokens-col-success-rate">${t('tokens.table.successRate')}</th>
-            <th class="tokens-col-rpm" title="${t('tokens.table.rpmTitle')}">${t('tokens.table.rpm')}</th>
-            <th class="tokens-col-token-usage">${t('tokens.table.tokenUsage')}</th>
-            <th class="tokens-col-cost">${t('tokens.table.totalCost')}</th>
-            <th class="tokens-col-concurrency">${t('tokens.table.concurrency')}</th>
-            <th class="tokens-col-stream">${t('tokens.table.streamAvg')}</th>
-            <th class="tokens-col-non-stream">${t('tokens.table.nonStreamAvg')}</th>
-            <th>${t('tokens.table.lastUsed')}</th>
-            <th class="tokens-actions-col">${t('tokens.table.actions')}</th>
+            <th scope="col">${t('tokens.table.token')}</th>
+            <th scope="col" class="tokens-col-calls">${t('tokens.table.callCount')}</th>
+            <th scope="col" class="tokens-col-success-rate">${t('tokens.table.successRate')}</th>
+            <th scope="col" class="tokens-col-rpm" title="${t('tokens.table.rpmTitle')}">${t('tokens.table.rpm')}</th>
+            <th scope="col" class="tokens-col-token-usage">${t('tokens.table.tokenUsage')}</th>
+            <th scope="col" class="tokens-col-cost">${t('tokens.table.totalCost')}</th>
+            <th scope="col" class="tokens-col-concurrency">${t('tokens.table.concurrency')}</th>
+            <th scope="col" class="tokens-col-stream">${t('tokens.table.streamAvg')}</th>
+            <th scope="col" class="tokens-col-non-stream">${t('tokens.table.nonStreamAvg')}</th>
+            <th scope="col">${t('tokens.table.lastUsed')}</th>
+            <th scope="col" class="tokens-actions-col">${t('tokens.table.actions')}</th>
           </tr>
         </thead>
       `;
@@ -312,8 +312,8 @@
       const tokensHtml = buildTokensHtml(token);
       const costHtml = buildCostHtml(token.total_cost_usd, token.effective_cost_usd);
       const concurrencyHtml = buildConcurrencyHtml(token.max_concurrency);
-      const streamAvgHtml = buildResponseTimeHtml(token.stream_avg_ttfb, token.stream_count, window.getFirstByteTimingColor);
-      const nonStreamAvgHtml = buildResponseTimeHtml(token.non_stream_avg_rt, token.non_stream_count, window.getDurationTimingColor);
+      const streamAvgHtml = buildResponseTimeHtml(token.stream_avg_ttfb, token.stream_count, window.getFirstByteTimingTone);
+      const nonStreamAvgHtml = buildResponseTimeHtml(token.non_stream_avg_rt, token.non_stream_count, window.getDurationTimingTone);
       const costCellClass = token.total_cost_usd > 0 ? '' : 'mobile-empty-cell';
       const streamCellClass = token.stream_count ? '' : 'mobile-empty-cell';
       const nonStreamCellClass = token.non_stream_count ? '' : 'mobile-empty-cell';
@@ -370,7 +370,7 @@
 
       const usedAt = new Date(value);
       if (Number.isNaN(usedAt.getTime())) {
-        return '<span class="token-value-muted">-</span>';
+        return '<span class="token-value-muted">—</span>';
       }
 
       const dateText = usedAt.toLocaleDateString(locale);
@@ -388,7 +388,7 @@
      */
     function buildCallsHtml(successCount, failureCount, totalCount) {
       if (totalCount === 0) {
-        return '<span class="token-value-muted">-</span>';
+        return '<span class="token-value-muted">—</span>';
       }
 
       let html = '<div class="token-call-stats">';
@@ -428,12 +428,12 @@
 
       // 如果都是0，返回空
       if (peakRPM < 0.01 && avgRPM < 0.01 && recentRPM < 0.01) {
-        return '<span class="token-value-muted">-</span>';
+        return '<span class="token-value-muted">—</span>';
       }
 
       // 格式化RPM值
       const formatRpm = (rpm) => {
-        if (rpm < 0.01) return '-';
+        if (rpm < 0.01) return '—';
         if (rpm >= 1000) return (rpm / 1000).toFixed(1) + 'K';
         if (rpm >= 1) return rpm.toFixed(1);
         return rpm.toFixed(2);
@@ -441,7 +441,7 @@
 
       const peakText = formatRpm(peakRPM);
       const avgText = formatRpm(avgRPM);
-      const recentText = isToday ? formatRpm(recentRPM) : '-';
+      const recentText = isToday ? formatRpm(recentRPM)  : '—';
 
       let rpmClass = 'token-rpm token-rpm--high';
       if (peakRPM < 10) rpmClass = 'token-rpm token-rpm--low';
@@ -458,7 +458,7 @@
      */
     function buildSuccessRateHtml(successRate, totalCount) {
       if (totalCount === 0) {
-        return '<span class="token-value-muted">-</span>';
+        return '<span class="token-value-muted">—</span>';
       }
 
       let className = 'stats-badge';
@@ -479,7 +479,7 @@
                         token.cache_creation_tokens_total > 0;
 
       if (!hasTokens) {
-        return '<span class="token-value-muted">-</span>';
+        return '<span class="token-value-muted">—</span>';
       }
 
       const items = [];
@@ -506,7 +506,7 @@
      */
     function buildCostHtml(totalCostUsd, effectiveCostUsd) {
       if (!totalCostUsd || totalCostUsd <= 0) {
-        return '<span class="token-value-muted">-</span>';
+        return '<span class="token-value-muted">—</span>';
       }
 
       const costStack = buildCostStackHtml(totalCostUsd, effectiveCostUsd);
@@ -553,18 +553,18 @@
     }
 
     /**
-     * 构建响应时间HTML
+     * 构建响应时间HTML；toneFn 产出 tone 名，着色走 .tone-* 共享类。
      */
-    function buildResponseTimeHtml(time, count, colorFn) {
+    function buildResponseTimeHtml(time, count, toneFn) {
       if (!count || count === 0) {
-        return '<span class="token-value-muted">-</span>';
+        return '<span class="token-value-muted">—</span>';
       }
 
       const num = Number(time);
       if (!Number.isFinite(num) || num <= 0) {
-        return '<span class="token-value-muted">-</span>';
+        return '<span class="token-value-muted">—</span>';
       }
-      return `<span class="metric-value" style="color: ${colorFn(num)};">${num.toFixed(2)}s</span>`;
+      return `<span class="metric-value${window.toneClass(toneFn(num))}">${num.toFixed(2)}s</span>`;
     }
 
     function getTokenStatus(token) {

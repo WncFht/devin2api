@@ -8,7 +8,7 @@
   <link rel="apple-touch-icon" href="/web/apple-touch-icon.png">
   <link rel="manifest" href="/web/manifest.json">
   <meta name="theme-color" content="#3b82f6">
-  <title data-i18n="index.title">Devin2API 代理服务</title>
+  <title data-i18n="index.title">概览 - Devin2API</title>
   <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
   <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
   <link rel="stylesheet" href="/web/assets/css/index.css?v=__VERSION__">
@@ -34,7 +34,7 @@
   <div class="app-container">
 
     <!-- 主内容区域 -->
-    <main class="main-content index-main-content">
+    <main id="main" class="main-content index-main-content">
       <div class="content-area">
         <h1 class="visually-hidden" data-i18n="nav.overview">概览</h1>
         <!-- 时间范围选择器 -->
@@ -117,19 +117,19 @@
       </div>
       <div class="channel-metrics">
         <div class="metric-item">
-          <div class="metric-value metric-total" id="type-{{type}}-requests">0</div>
+          <div class="metric-value tone-primary" id="type-{{type}}-requests">0</div>
           <div class="metric-label" data-i18n="index.metrics.totalRequests">总请求</div>
         </div>
         <div class="metric-item">
-          <div class="metric-value metric-success" id="type-{{type}}-success">0</div>
+          <div class="metric-value tone-healthy" id="type-{{type}}-success">0</div>
           <div class="metric-label" data-i18n="index.metrics.success">成功</div>
         </div>
         <div class="metric-item">
-          <div class="metric-value metric-error" id="type-{{type}}-error">0</div>
+          <div class="metric-value tone-critical" id="type-{{type}}-error">0</div>
           <div class="metric-label" data-i18n="index.metrics.failed">失败</div>
         </div>
         <div class="metric-item">
-          <div class="metric-value metric-rate" id="type-{{type}}-rate">0.0%</div>
+          <div class="metric-value" id="type-{{type}}-rate">0.0%</div>
           <div class="metric-label" data-i18n="index.metrics.successRate">成功率</div>
         </div>
       </div>

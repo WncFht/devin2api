@@ -283,8 +283,8 @@ body.web-role-api-token .logs-col-api-key {
   --chat-code-chip-fg: #334155;
   --chat-code-chip-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.04);
   --chat-code-copy-fg: #64748b;
-  --chat-code-copied-border: rgba(16, 185, 129, 0.35);
-  --chat-code-copied-bg: rgba(16, 185, 129, 0.08);
+  --chat-code-copied-border: color-mix(in srgb, var(--success-500) 35%, transparent);
+  --chat-code-copied-bg: color-mix(in srgb, var(--success-500) 8%, transparent);
   --chat-code-copied-fg: var(--success-600);
   --chat-code-text: #243044;
   --chat-syn-command: #0550ae;
@@ -322,8 +322,8 @@ html[data-resolved-theme="dark"] .chat-message {
   --chat-code-chip-fg: #e2e8f0;
   --chat-code-chip-shadow: none;
   --chat-code-copy-fg: #94a3b8;
-  --chat-code-copied-border: rgba(34, 197, 94, 0.35);
-  --chat-code-copied-bg: rgba(34, 197, 94, 0.12);
+  --chat-code-copied-border: color-mix(in srgb, var(--success-500) 35%, transparent);
+  --chat-code-copied-bg: color-mix(in srgb, var(--success-500) 12%, transparent);
   --chat-code-copied-fg: #4ade80;
   --chat-code-text: #dbeafe;
   --chat-syn-command: #79c0ff;
@@ -694,24 +694,11 @@ html[data-resolved-theme="dark"] .chat-message {
 
 
     :root {
+      /* 双主题统一走 warning-* 令牌：暗色下令牌自身翻成琥珀系，不再另起 cyan */
       --logs-pending-row-bg: var(--warning-50);
       --logs-pending-row-hover-bg: var(--warning-100);
       --logs-pending-badge-bg: var(--warning-100);
       --logs-pending-badge-fg: var(--warning-700);
-    }
-
-    html[data-theme="dark"] {
-      --logs-pending-row-bg: rgba(14, 116, 144, 0.16);
-      --logs-pending-row-hover-bg: rgba(14, 116, 144, 0.24);
-      --logs-pending-badge-bg: rgba(14, 116, 144, 0.22);
-      --logs-pending-badge-fg: #67e8f9;
-    }
-
-    html[data-theme="system"][data-resolved-theme="dark"] {
-      --logs-pending-row-bg: rgba(14, 116, 144, 0.16);
-      --logs-pending-row-hover-bg: rgba(14, 116, 144, 0.24);
-      --logs-pending-badge-bg: rgba(14, 116, 144, 0.22);
-      --logs-pending-badge-fg: #67e8f9;
     }
 
     /* API Key 测试按钮样式 */
@@ -817,7 +804,7 @@ html[data-resolved-theme="dark"] .chat-message {
 
     .logs-abort-btn {
       padding: 1px 6px;
-      border: 1px solid var(--error-300, #fca5a5);
+      border: 1px solid var(--error-300);
       border-radius: var(--radius-xs);
       background: transparent;
       color: var(--error-600);
@@ -829,7 +816,7 @@ html[data-resolved-theme="dark"] .chat-message {
     }
 
     .logs-abort-btn:hover:not(:disabled) {
-      background: var(--error-100, #fee2e2);
+      background: var(--error-100);
     }
 
     .logs-abort-btn:disabled {
@@ -857,22 +844,7 @@ html[data-resolved-theme="dark"] .chat-message {
       background: var(--primary-100);
     }
 
-    /* 加载动画 */
-    .loading-spinner {
-      display: inline-block;
-      width: 24px;
-      height: 24px;
-      border: 3px solid var(--neutral-200);
-      border-top-color: var(--primary-500);
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
-
-    @keyframes spin {
-      to {
-        transform: rotate(360deg);
-      }
-    }
+    /* 加载动画复用 styles.css 的 .loading-spinner 与 @keyframes spin */
 
     /* 输入/输出列统一宽度，方便对齐 */
     .token-metric-value {
@@ -1045,7 +1017,7 @@ html[data-resolved-theme="dark"] .chat-message {
 
     .log-source-badge--manual {
       color: var(--success-600);
-      background: #d1fae5;
+      background: var(--success-100);
     }
 
     .log-source-badge--checkin {
@@ -1061,8 +1033,8 @@ html[data-resolved-theme="dark"] .chat-message {
       font-size: 0.72em;
       font-weight: 700;
       line-height: 1.4;
-      color: var(--warning-700, #b45309);
-      background: var(--warning-100, #fef3c7);
+      color: var(--warning-700);
+      background: var(--warning-100);
     }
 
     /* 失败行 error_message：压在人性化标签下的次级小字行；
@@ -1119,9 +1091,9 @@ html[data-resolved-theme="dark"] .chat-message {
     }
 
     .debug-log-status--refreshing {
-      color: var(--info-700, #1d4ed8);
-      background: var(--info-50, #eff6ff);
-      border: 1px solid var(--info-200, #bfdbfe);
+      color: var(--info-700);
+      background: var(--info-50);
+      border: 1px solid var(--info-200);
     }
 
     .debug-log-status--refreshing::before {
@@ -1131,7 +1103,7 @@ html[data-resolved-theme="dark"] .chat-message {
       height: 6px;
       margin-right: 6px;
       border-radius: 50%;
-      background: var(--info-500, #3b82f6);
+      background: var(--info-500);
       animation: none;
     }
 
@@ -1716,20 +1688,20 @@ html[data-resolved-theme="dark"] .chat-message {
       background: var(--logs-pending-row-hover-bg);
     }
 
-    /* 当前总况指标条：复用 runtime-metric 卡片语言，压缩留白贴合列表头区 */
+    /* 当前总况指标条：复用共享 kpi 卡片语言，压缩留白贴合列表头区 */
     .logs-metrics {
       margin-bottom: var(--space-3);
     }
 
-    .logs-metrics .runtime-metric-card {
+    .logs-metrics .kpi-card {
       padding: var(--space-2) var(--space-3);
     }
 
-    .logs-metrics .runtime-metric-label {
+    .logs-metrics .kpi-label {
       min-height: 0;
     }
 
-    .logs-metrics .runtime-metric-value {
+    .logs-metrics .kpi-value {
       margin: var(--space-1) 0;
     }
 
@@ -1844,6 +1816,22 @@ html[data-resolved-theme="dark"] .chat-message {
 
     .logs-dash-faint {
       color: var(--neutral-400);
+    }
+
+    /* 信息列：「详情」是固定入口，已接收字节数是降级副文本 */
+    .logs-bytes-received {
+      margin-left: var(--space-2);
+      color: var(--success-600);
+      font-size: var(--text-xs);
+    }
+
+    /* data-copy 截断值点击复制 */
+    .logs-copyable {
+      cursor: copy;
+    }
+
+    .logs-copyable.logs-copied {
+      color: var(--success-600);
     }
 
     .log-timing-separator {

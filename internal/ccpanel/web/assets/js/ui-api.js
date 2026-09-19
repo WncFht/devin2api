@@ -92,7 +92,9 @@ window.WebAuth = window.WebAuth || {
 
       window.location.href = getLoginUrl();
 
-      throw new Error('Token expired');
+      // 页面正在卸载，永不 settle——避免调用方收到无法处理的 unhandled rejection
+
+      return new Promise(() => {});
 
     }
 
@@ -122,7 +124,7 @@ window.WebAuth = window.WebAuth || {
 
       window.location.href = getLoginUrl();
 
-      throw new Error('Unauthorized');
+      return new Promise(() => {});
 
     }
 

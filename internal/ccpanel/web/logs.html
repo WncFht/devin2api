@@ -43,7 +43,7 @@
 <body>
   <div class="app-container">
     <!-- 主内容区域 -->
-    <main class="main-content">
+    <main id="main" class="main-content">
       <div class="content-area">
         <h1 class="visually-hidden" data-i18n="nav.logs">日志</h1>
         <div data-page-filters="logs"></div>
@@ -76,22 +76,22 @@
               <table class="modern-table logs-table mobile-card-table">
                 <thead>
                   <tr>
-                    <th class="logs-col-time" data-i18n="logs.colTime">时间</th>
-                    <th class="logs-col-ip" data-i18n="logs.colIP">IP</th>
-                    <th class="logs-col-token-desc" data-i18n="logs.colTokenDesc">令牌</th>
-                    <th class="logs-col-api-key" data-i18n="logs.colApiKey">Key 哈希</th>
-                    <th class="logs-col-model" data-i18n="common.model">模型</th>
-                    <th class="logs-col-account" data-i18n="logs.colAccount">账号</th>
-                    <th class="logs-col-status" data-i18n="logs.statusCode">状态码</th>
-                    <th class="logs-col-timing" data-i18n="logs.colTiming">首字/耗时(秒)</th>
-                    <th class="logs-col-speed" data-i18n="logs.colSpeed">速度(tok/s)</th>
-                    <th class="logs-col-input" data-i18n="logs.colInput">输入</th>
-                    <th class="logs-col-output" data-i18n="logs.colOutput">输出</th>
-                    <th class="logs-col-cache-read" data-i18n="logs.colCacheRead">缓存读</th>
-                    <th class="logs-col-cache-write" data-i18n="logs.colCacheWrite">缓存建</th>
-                    <th class="logs-col-cache-util" data-i18n="logs.colCacheUtil">缓存命中%</th>
-                    <th class="logs-col-cost" data-i18n="logs.colCost" data-i18n-title="logs.costTooltipHeader" title="标准成本：单价（美元/百万 Token）× 数量 = 费用">成本</th>
-                    <th class="logs-col-message" data-i18n="logs.colMessage">信息</th>
+                    <th scope="col" scope="col" class="logs-col-time" data-i18n="logs.colTime">时间</th>
+                    <th scope="col" scope="col" class="logs-col-ip" data-i18n="logs.colIP">IP</th>
+                    <th scope="col" scope="col" class="logs-col-token-desc" data-i18n="logs.colTokenDesc">令牌</th>
+                    <th scope="col" scope="col" class="logs-col-api-key" data-i18n="logs.colApiKey">Key 哈希</th>
+                    <th scope="col" scope="col" class="logs-col-model" data-i18n="common.model">模型</th>
+                    <th scope="col" scope="col" class="logs-col-account" data-i18n="logs.colAccount">账号</th>
+                    <th scope="col" scope="col" class="logs-col-status" data-i18n="logs.statusCode">状态码</th>
+                    <th scope="col" scope="col" class="logs-col-timing" data-i18n="logs.colTiming">首字/耗时(秒)</th>
+                    <th scope="col" scope="col" class="logs-col-speed" data-i18n="logs.colSpeed">速度(tok/s)</th>
+                    <th scope="col" scope="col" class="logs-col-input" data-i18n="logs.colInput">输入</th>
+                    <th scope="col" scope="col" class="logs-col-output" data-i18n="logs.colOutput">输出</th>
+                    <th scope="col" scope="col" class="logs-col-cache-read" data-i18n="logs.colCacheRead">缓存读</th>
+                    <th scope="col" scope="col" class="logs-col-cache-write" data-i18n="logs.colCacheWrite">缓存建</th>
+                    <th scope="col" scope="col" class="logs-col-cache-util" data-i18n="logs.colCacheUtil">缓存命中%</th>
+                    <th scope="col" scope="col" class="logs-col-cost" data-i18n="logs.colCost" data-i18n-title="logs.costTooltipHeader" title="标准成本：单价（美元/百万 Token）× 数量 = 费用">成本</th>
+                    <th scope="col" scope="col" class="logs-col-message" data-i18n="logs.colMessage">信息</th>
                   </tr>
                 </thead>
                 <tbody id="tbody">

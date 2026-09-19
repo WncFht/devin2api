@@ -67,7 +67,7 @@
 
 .chat-msg--user {
   align-self: flex-end;
-  background: #4f46e5;
+  background: var(--primary-600);
   color: #fff;
   border-bottom-right-radius: 4px;
 }
@@ -82,7 +82,7 @@
 .chat-msg--error {
   align-self: stretch;
   max-width: 100%;
-  background: rgba(239, 68, 68, 0.08);
+  background: color-mix(in srgb, var(--error-500) 8%, transparent);
   color: var(--error-600);
   border-radius: var(--radius-base);
   font-size: var(--text-13);

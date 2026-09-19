@@ -220,23 +220,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 剩余量四档语义色：muted 无数据，>50 success，>20 warning，其余 error */
-.acct-tone--muted {
-  color: var(--color-text-secondary);
-}
-
-.acct-tone--success {
-  color: var(--success-600);
-}
-
-.acct-tone--warning {
-  color: var(--warning-600);
-}
-
-.acct-tone--error {
-  color: var(--error-600);
-}
-
+/* 剩余量分档色统一走 styles.css 的 .tone-*（none 无数据，>50 healthy，>20 warning，其余 critical）；
+   quota fill 靠 currentColor 随文字色 */
 .acct-rate {
   font-weight: 600;
 }

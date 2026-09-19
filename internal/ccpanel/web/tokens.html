@@ -34,7 +34,7 @@
 </head>
 <body>
   <div class="app-container">
-    <main class="main-content">
+    <main id="main" class="main-content">
       <div class="content-area">
         <header class="mt-2 mb-4">
           <div class="card tokens-hero-card">
@@ -263,11 +263,11 @@
               <table class="inline-table mobile-inline-table allowed-models-table">
                 <thead>
                   <tr class="allowed-models-table-head">
-                    <th class="allowed-model-col-select-head">
+                    <th scope="col" scope="col" class="allowed-model-col-select-head">
                       <input type="checkbox" id="selectAllAllowedModels" data-change-action="toggle-select-all-allowed-models">
                     </th>
-                    <th class="allowed-model-col-name-head" data-i18n="tokens.modelName">模型名称</th>
-                    <th class="allowed-model-col-actions-head"></th>
+                    <th scope="col" scope="col" class="allowed-model-col-name-head" data-i18n="tokens.modelName">模型名称</th>
+                    <th scope="col" scope="col" class="allowed-model-col-actions-head"></th>
                   </tr>
                 </thead>
                 <tbody id="allowedModelsTableBody">

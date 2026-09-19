@@ -12,12 +12,12 @@
 
 .channel-card {
   padding: var(--space-5);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06), 0 1px 4px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-card);
 }
 
 .channel-card:hover {
   transform: none;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1), 0 2px 8px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--shadow-lg);
   border-color: var(--surface-border-strong);
 }
 
@@ -47,7 +47,7 @@
   align-items: center;
   justify-content: center;
   color: white;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-lift);
   flex-shrink: 0;
 }
 
@@ -88,7 +88,6 @@
   display: block;
   font-size: var(--text-xl);
   font-weight: var(--font-bold);
-  color: var(--neutral-800);
   font-family: var(--font-family-mono);
 }
 
@@ -101,12 +100,6 @@
 
 .metric-item {
   text-align: left;
-}
-
-.metric-label {
-  font-size: var(--text-xs);
-  color: var(--neutral-600);
-  font-weight: var(--font-medium);
 }
 
 .token-stats {
@@ -272,17 +265,17 @@
 }
 
 .service-health-rate[data-state="healthy"] {
-  background: rgba(16, 185, 129, 0.14);
+  background: color-mix(in srgb, var(--success-500) 14%, transparent);
   color: var(--success-600);
 }
 
 .service-health-rate[data-state="warning"] {
-  background: rgba(245, 158, 11, 0.14);
+  background: color-mix(in srgb, var(--warning-500) 14%, transparent);
   color: var(--warning-600);
 }
 
 .service-health-rate[data-state="critical"] {
-  background: rgba(239, 68, 68, 0.14);
+  background: color-mix(in srgb, var(--error-500) 14%, transparent);
   color: var(--error-600);
 }
 
@@ -340,7 +333,7 @@
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-lg);
   background: var(--surface-bg-strong);
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.08);
+  box-shadow: var(--shadow-lg);
   color: var(--neutral-700);
   pointer-events: none;
   white-space: nowrap;
@@ -480,35 +473,7 @@
   font-weight: var(--font-medium);
 }
 
-/* ===== 统计卡片语义化颜色 ===== */
-
-.metric-total {
-  color: var(--primary-600);
-}
-
-.metric-success {
-  color: var(--success-500);
-}
-
-.metric-error {
-  color: var(--error-500);
-}
-
-.metric-rate {
-  color: var(--neutral-800);
-}
-
-.metric-rate[data-state="healthy"] {
-  color: var(--success-600);
-}
-
-.metric-rate[data-state="warning"] {
-  color: var(--warning-600);
-}
-
-.metric-rate[data-state="critical"] {
-  color: var(--error-600);
-}
+/* 指标语义色统一走 styles.css 的 .tone-*（metric-value tone-primary/healthy/critical） */
 
 /* ===== 网格系统 ===== */
 

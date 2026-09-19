@@ -82,7 +82,7 @@
   function microUSD(v) {
     const n = Number(v);
     if (!Number.isFinite(n) || n === 0) return null;
-    return '$' + (n / 1e6).toFixed(2);
+    return window.formatCost(n / 1e6);
   }
 
   function boolBadge(v) {
@@ -120,8 +120,8 @@
   }
 
   function toneFor(remaining) {
-    if (remaining === null || remaining === undefined) return 'muted';
-    return remaining > 50 ? 'success' : remaining > 20 ? 'warning' : 'error';
+    if (remaining === null || remaining === undefined) return 'none';
+    return remaining > 50 ? 'healthy' : remaining > 20 ? 'warning' : 'critical';
   }
 
   // ---- pills ----
@@ -235,7 +235,7 @@
     const inner = `<div class="acct-kv-grid">` + [
       kv(t('accounts.f.hitRate'), rate === null
         ? `<span class="text-muted">—</span>`
-        : `<span class="acct-rate acct-tone--${toneFor(rate)}">${Number(rate).toFixed(0)}%</span>`),
+        : `<span class="acct-rate tone-${toneFor(rate)}">${Number(rate).toFixed(0)}%</span>`),
       kv(t('accounts.f.entries'), esc(num(w.entries || 0))),
       kv(t('accounts.f.promoted'), esc(num(w.promoted || 0))),
       kv(t('accounts.f.pings'), esc(num(w.pings_sent || 0)))
@@ -252,8 +252,8 @@
     ].filter(Boolean).join(' · ');
     return `<div class="acct-quota-row">
       <span class="acct-quota-label">${esc(label)}</span>
-      <div class="acct-quota-track"><div class="acct-quota-fill acct-tone--${toneFor(pct)}" style="width:${pct}%;"></div></div>
-      <span class="acct-quota-val acct-tone--${toneFor(pct)}">${pct.toFixed(0)}%</span>
+      <div class="acct-quota-track"><div class="acct-quota-fill tone-${toneFor(pct)}" style="width:${pct}%;"></div></div>
+      <span class="acct-quota-val tone-${toneFor(pct)}">${pct.toFixed(0)}%</span>
       ${sub ? `<div class="acct-quota-sub">${esc(sub)}</div>` : ''}
     </div>`;
   }
@@ -296,7 +296,7 @@
         items.push(kv(t('accounts.m.requests'), esc(num(td.requests) + (td.tokens ? ' · ' + num(td.tokens) + ' tok' : ''))));
       }
       if (td.success_rate !== undefined && td.success_rate !== null) {
-        items.push(kv(t('accounts.m.successRate'), esc(Number(td.success_rate).toFixed(1) + '%')));
+        items.push(kv(t('accounts.m.successRate'), esc(Number(td.success_rate * 100).toFixed(1) + '%')));
       }
       const ttfb = [['avg', u.ttfb_avg], ['p50', u.ttfb_p50], ['p90', u.ttfb_p90]]
         .filter(([, v]) => Number.isFinite(Number(v)))
@@ -304,7 +304,7 @@
         .join(' · ');
       if (ttfb) items.push(kv(t('accounts.m.ttfb'), esc(ttfb)));
       if (u.cache_rate !== undefined && u.cache_rate !== null) {
-        items.push(kv(t('accounts.m.cacheRate'), esc(Number(u.cache_rate).toFixed(0) + '%')));
+        items.push(kv(t('accounts.m.cacheRate'), esc(Number(u.cache_rate * 100).toFixed(0) + '%')));
       }
       if (u.rpm_now !== undefined && u.rpm_now !== null) items.push(kv(t('accounts.m.rpm'), esc(fmtN(u.rpm_now))));
       if (u.tps_now !== undefined && u.tps_now !== null) items.push(kv(t('accounts.m.tps'), esc(fmtN(u.tps_now))));

@@ -121,8 +121,8 @@ a.model-tag.model-link {
 }
 
 a.model-tag.model-link:hover {
-  background: rgba(59, 130, 246, 0.35);
-  border-color: rgba(59, 130, 246, 0.5);
+  background: color-mix(in srgb, var(--primary-500) 35%, transparent);
+  border-color: color-mix(in srgb, var(--primary-500) 50%, transparent);
 }
 
 /* ===== 统计页面专用样式 ===== */
@@ -203,18 +203,6 @@ a.model-tag.model-link:hover {
   color: var(--primary-700);
 }
 
-.stats-value-muted {
-  color: var(--neutral-500);
-}
-
-.stats-value-success {
-  color: var(--success-600);
-}
-
-.stats-value-primary {
-  color: var(--primary-600);
-}
-
 .stats-model-cell {
   position: relative;
   display: flex;
@@ -228,10 +216,6 @@ a.model-tag.model-link:hover {
 .stats-model-cell .model-tag {
   min-width: 0;
   max-width: 100%;
-}
-
-.stats-value-dynamic {
-  color: var(--stats-accent, currentColor);
 }
 
 .stats-timing-separator {
@@ -264,7 +248,6 @@ a.model-tag.model-link:hover {
 }
 
 .stats-rpm-value {
-  color: var(--stats-rpm-color, inherit);
   font-weight: 500;
 }
 

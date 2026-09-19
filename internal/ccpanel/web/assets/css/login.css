@@ -24,7 +24,7 @@
   background: var(--surface-bg-strong);
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-2xl);
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-xl);
   padding: var(--space-10);
   width: 100%;
   max-width: 420px;
@@ -54,7 +54,7 @@
   width: 64px;
   height: 64px;
   border-radius: var(--radius-xl);
-  box-shadow: 0 8px 32px rgba(59, 130, 246, 0.3);
+  box-shadow: 0 8px 32px color-mix(in srgb, var(--primary-500) 30%, transparent);
 }
 
 .login-brand-wordmark {
@@ -81,7 +81,7 @@
   margin-bottom: var(--space-8);
 }
 
-.login-header h2 {
+.login-header h1 {
   font-size: var(--text-xl);
   font-weight: var(--font-semibold);
   color: var(--neutral-900);
@@ -126,8 +126,8 @@
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  background: #DC2626;
-  border: 1px solid #B91C1C;
+  background: var(--error-600);
+  border: 1px solid var(--error-700);
   border-radius: var(--radius-lg);
   padding: var(--space-4);
   margin-bottom: var(--space-6);
@@ -135,7 +135,7 @@
   font-size: var(--text-sm);
   font-weight: var(--font-semibold);
   animation: slideInUp 0.3s ease-out;
-  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.25);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--error-600) 25%, transparent);
 }
 
 .error-icon {
@@ -255,7 +255,7 @@
 .notice-icon {
   width: 20px;
   height: 20px;
-  color: #0284C7;
+  color: var(--info-600);
   flex-shrink: 0;
   margin-top: 2px;
 }

@@ -230,7 +230,7 @@
 
     const trigger = document.createElement('button');
     trigger.className = 'lang-dropdown-trigger';
-    trigger.setAttribute('aria-label', 'Select language');
+    trigger.setAttribute('aria-label', t('common.selectLanguage'));
     trigger.setAttribute('aria-haspopup', 'true');
     trigger.setAttribute('aria-expanded', 'false');
     trigger.innerHTML = `

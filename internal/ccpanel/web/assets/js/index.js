@@ -50,12 +50,6 @@
         : 24;
     }
 
-    function serviceHealthText(key, fallback, params) {
-      if (typeof window.i18nText === 'function') return window.i18nText(key, fallback, params);
-      const translated = typeof window.t === 'function' ? window.t(key, params) : key;
-      return translated === key ? fallback : translated;
-    }
-
     function serviceHealthLocale() {
       return window.i18n && typeof window.i18n.getLocale === 'function' && window.i18n.getLocale() === 'en'
         ? 'en-US'
@@ -97,7 +91,7 @@
       timeElement.textContent = `${formatter.format(new Date(point.ts))} – ${formatter.format(new Date(point.ts + intervalMs))}`;
       successElement.textContent = formatNumber(point.success);
       errorElement.textContent = formatNumber(point.error);
-      rateElement.textContent = point.rate === null ? '--' : `(${(point.rate * 100).toFixed(1)}%)`;
+      rateElement.textContent = point.rate === null ? '—' : `(${(point.rate * 100).toFixed(1)}%)`;
 
       tooltip.hidden = false;
       tooltip.dataset.placement = 'top';
@@ -148,7 +142,7 @@
       grid.onmouseleave = hideServiceHealthTooltip;
 
       const hasData = model.rate !== null;
-      const rate = hasData ? `${(model.rate * 100).toFixed(1)}%` : '--';
+      const rate = hasData ? `${(model.rate * 100).toFixed(1)}%` : '—';
       const period = serviceHealthPeriodText();
       rateElement.textContent = rate;
       rateElement.dataset.state = model.state;
@@ -159,15 +153,15 @@
       if (earlierElement) {
         earlierElement.textContent = model.points.length > 0
           ? timeFormatter.format(new Date(model.points[0].ts))
-          : '--';
+          : '—';
       }
       if (latestElement) {
         latestElement.textContent = model.points.length > 0
           ? timeFormatter.format(new Date(model.points.at(-1).ts))
-          : '--';
+          : '—';
       }
       grid.setAttribute('aria-label', hasData
-        ? serviceHealthText(
+        ? i18nText(
           'index.health.summary',
           `${period}服务成功率 ${rate}，成功 ${model.success} 次，失败 ${model.error} 次`,
           {
@@ -177,7 +171,7 @@
             error: formatNumber(model.error)
           }
         )
-        : serviceHealthText('index.health.noData', `${period}暂无请求数据`, { period }));
+        : i18nText('index.health.noData', `${period}暂无请求数据`, { period }));
       message.hidden = true;
       message.textContent = '';
     }
@@ -186,12 +180,12 @@
       const message = document.getElementById('service-health-message');
       const rateElement = document.getElementById('service-health-rate');
       if (rateElement) {
-        rateElement.textContent = '--';
+        rateElement.textContent = '—';
         rateElement.dataset.state = 'unknown';
       }
       if (message) {
         message.hidden = false;
-        message.textContent = serviceHealthText(
+        message.textContent = i18nText(
           'index.health.unavailable',
           '健康数据暂时无法加载，将在下次刷新时重试。'
         );
@@ -270,22 +264,21 @@
       const errorRequests = data ? (data.error_requests || 0) : 0;
 
       const successRate = totalRequests > 0
-        ? ((successRequests / totalRequests) * 100).toFixed(1)
-        : '0.0';
+        ? ((successRequests / totalRequests) * 100).toFixed(1) + '%'
+        : '—';
 
       // 更新基础统计（总请求、成功、失败、成功率）
       document.getElementById(`type-${type}-requests`).textContent = formatNumber(totalRequests);
       document.getElementById(`type-${type}-success`).textContent = formatNumber(successRequests);
       document.getElementById(`type-${type}-error`).textContent = formatNumber(errorRequests);
       const rateEl = document.getElementById(`type-${type}-rate`);
-      rateEl.textContent = successRate + '%';
+      rateEl.textContent = successRate;
       // 成功率按 service-health 同口径分档（≥95 healthy / ≥80 warning / 其余 critical）；
       // 无请求时不着色，避免 0 流量被误读为故障
+      rateEl.classList.remove('tone-healthy', 'tone-warning', 'tone-critical');
       if (totalRequests > 0) {
         const rate = successRequests / totalRequests;
-        rateEl.dataset.state = rate >= 0.95 ? 'healthy' : rate >= 0.8 ? 'warning' : 'critical';
-      } else {
-        delete rateEl.dataset.state;
+        rateEl.classList.add(rate >= 0.95 ? 'tone-healthy' : rate >= 0.8 ? 'tone-warning' : 'tone-critical');
       }
 
       const inputTokens = data ? (data.total_input_tokens || 0) : 0;
@@ -316,24 +309,20 @@
     let usagePayload = null;
     let quotaPayload = null;
 
-    function usageText(key, fallback, params) {
-      return typeof window.i18nText === 'function' ? window.i18nText(key, fallback, params) : fallback;
-    }
-
-    // 配额剩余量分档配色，与 accounts 页 toneFor 同阈值。
+    // 配额剩余量分档，与 accounts 页 toneFor 同阈值；着色走 styles.css 的 .tone-*。
     function usageTone(pct) {
-      return pct > 50 ? 'var(--success-600)' : pct > 20 ? 'var(--warning-600)' : 'var(--error-600)';
+      return pct > 50 ? 'healthy' : pct > 20 ? 'warning' : 'critical';
     }
 
     // forecast 一行燃烧文案；键位复用 accounts.burn.*（语义完全一致）。
     function quotaBurnLine(f) {
       if (!f || f.burn_per_hour == null) return '';
       const rate = Number(f.burn_per_hour);
-      if (!(rate > 0)) return usageText('accounts.burn.refilled', '窗口内有回充或重置，暂不外推');
-      const burn = usageText('accounts.burn.rate', '燃烧 {rate}%/h', { rate: rate.toFixed(2) });
-      if (f.survives_until_reset) return usageText('accounts.burn.survives', '按当前速率可撑到重置') + ' · ' + burn;
+      if (!(rate > 0)) return i18nText('accounts.burn.refilled', '窗口内有回充或重置，暂不外推');
+      const burn = i18nText('accounts.burn.rate', '燃烧 {rate}%/h', { rate: rate.toFixed(2) });
+      if (f.survives_until_reset) return i18nText('accounts.burn.survives', '按当前速率可撑到重置') + ' · ' + burn;
       if (f.exhausted_at) {
-        return usageText('accounts.burn.exhaust', '约 {h}h 后耗尽', { h: Number(f.hours_left || 0).toFixed(1) }) + ' · ' + burn;
+        return i18nText('accounts.burn.exhaust', '约 {h}h 后耗尽', { h: Number(f.hours_left || 0).toFixed(1) }) + ' · ' + burn;
       }
       return burn;
     }
@@ -341,12 +330,12 @@
     function quotaRowHtml(label, f) {
       const rem = f && f.remaining != null ? Math.max(0, Math.min(100, Number(f.remaining))) : null;
       const width = rem === null ? 0 : rem;
-      const tone = rem === null ? 'var(--color-text-secondary)' : usageTone(rem);
-      const val = rem === null ? '--' : `${rem.toFixed(0)}%`;
+      const tone = rem === null ? 'none' : usageTone(rem);
+      const val = rem === null ? '—' : `${rem.toFixed(0)}%`;
       return `<div class="usage-quota-row">
         <span class="usage-quota-label">${escapeHtml(label)}</span>
-        <div class="usage-quota-track"><div class="usage-quota-fill" style="width:${width}%;background:${tone};"></div></div>
-        <span class="usage-quota-val" style="color:${tone};">${val}</span>
+        <div class="usage-quota-track"><div class="usage-quota-fill tone-bg-${tone}" style="width:${width}%;"></div></div>
+        <span class="usage-quota-val tone-${tone}">${val}</span>
       </div>`;
     }
 
@@ -354,19 +343,19 @@
       const daily = report && report.daily;
       const weekly = report && report.weekly;
       const rem = daily && daily.remaining != null ? Math.max(0, Math.min(100, Number(daily.remaining))) : null;
-      const tone = rem === null ? 'var(--color-text-secondary)' : usageTone(rem);
+      const tone = rem === null ? 'none' : usageTone(rem);
       const sub = quotaBurnLine(daily) || quotaBurnLine(weekly);
       return `<div class="card channel-card">
         <div class="channel-card-header">
           <div class="channel-card-title">${escapeHtml(name)}</div>
           <div class="channel-cost">
-            <span class="cost-label">${escapeHtml(usageText('accounts.f.daily', '日配额'))}</span>
-            <span class="cost-value" style="color:${tone};">${rem === null ? '--' : `${rem.toFixed(0)}%`}</span>
+            <span class="cost-label">${escapeHtml(i18nText('accounts.f.daily', '日配额'))}</span>
+            <span class="cost-value tone-${tone}">${rem === null ? '—' : `${rem.toFixed(0)}%`}</span>
           </div>
         </div>
         <div class="usage-quota-rows">
-          ${quotaRowHtml(usageText('accounts.f.daily', '日配额'), daily)}
-          ${quotaRowHtml(usageText('accounts.f.weekly', '周配额'), weekly)}
+          ${quotaRowHtml(i18nText('accounts.f.daily', '日配额'), daily)}
+          ${quotaRowHtml(i18nText('accounts.f.weekly', '周配额'), weekly)}
         </div>
         ${sub ? `<div class="usage-quota-sub">${escapeHtml(sub)}</div>` : ''}
       </div>`;
@@ -379,7 +368,7 @@
       const last = spr.length ? spr[spr.length - 1] : null;
       const now = new Date();
       const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      if (!last || last.date !== today || last.ratio == null) return '--';
+      if (!last || last.date !== today || last.ratio == null) return '—';
       return `${Number(last.ratio).toFixed(2)}×`;
     }
 
@@ -388,51 +377,52 @@
       if (!t0) return '';
       const req = t0.requests || 0;
       const err = t0.errors || 0;
-      const rate = req > 0 ? (((req - err) / req) * 100).toFixed(1) : '0.0';
+      const rate = req > 0 ? (((req - err) / req) * 100).toFixed(1) + '%' : '—';
       const rateState = req > 0 ? (req - err) / req : null;
-      const rateTone = rateState === null ? '' : ` data-state="${rateState >= 0.95 ? 'healthy' : rateState >= 0.8 ? 'warning' : 'critical'}"`;
+      const rateTone = rateState === null ? '' :
+        window.toneClass(rateState >= 0.95 ? 'healthy' : rateState >= 0.8 ? 'warning' : 'critical');
       const credits = t0.credit_cost || 0;
       return `<div class="card channel-card">
         <div class="channel-card-header">
-          <div class="channel-card-title">${escapeHtml(usageText('index.usage.today', '今日用量'))}</div>
+          <div class="channel-card-title">${escapeHtml(i18nText('index.usage.today', '今日用量'))}</div>
           <div class="channel-cost">
-            <span class="cost-label">${escapeHtml(usageText('index.usage.credits', '计费点数'))}</span>
-            <span class="cost-value">${credits > 0 ? formatNumber(credits) : '--'}</span>
+            <span class="cost-label">${escapeHtml(i18nText('index.usage.credits', '计费点数'))}</span>
+            <span class="cost-value">${credits > 0 ? formatNumber(credits) : '—'}</span>
           </div>
         </div>
         <div class="channel-metrics">
           <div class="metric-item">
-            <div class="metric-value metric-total">${formatNumber(req)}</div>
-            <div class="metric-label">${escapeHtml(usageText('index.metrics.totalRequests', '总请求'))}</div>
+            <div class="metric-value tone-primary">${formatNumber(req)}</div>
+            <div class="metric-label">${escapeHtml(i18nText('index.metrics.totalRequests', '总请求'))}</div>
           </div>
           <div class="metric-item">
-            <div class="metric-value metric-success">${formatNumber(req - err)}</div>
-            <div class="metric-label">${escapeHtml(usageText('index.metrics.success', '成功'))}</div>
+            <div class="metric-value tone-healthy">${formatNumber(req - err)}</div>
+            <div class="metric-label">${escapeHtml(i18nText('index.metrics.success', '成功'))}</div>
           </div>
           <div class="metric-item">
-            <div class="metric-value metric-error">${formatNumber(err)}</div>
-            <div class="metric-label">${escapeHtml(usageText('index.metrics.failed', '失败'))}</div>
+            <div class="metric-value tone-critical">${formatNumber(err)}</div>
+            <div class="metric-label">${escapeHtml(i18nText('index.metrics.failed', '失败'))}</div>
           </div>
           <div class="metric-item">
-            <div class="metric-value metric-rate"${rateTone}>${rate}%</div>
-            <div class="metric-label">${escapeHtml(usageText('index.metrics.successRate', '成功率'))}</div>
+            <div class="metric-value"${rateTone}>${rate}</div>
+            <div class="metric-label">${escapeHtml(i18nText('index.metrics.successRate', '成功率'))}</div>
           </div>
         </div>
         <div class="token-stats">
           <div class="token-item">
-            <span class="token-label">${escapeHtml(usageText('common.input', '输入'))}</span>
+            <span class="token-label">${escapeHtml(i18nText('common.input', '输入'))}</span>
             <span class="token-value">${formatNumber(t0.input_tokens || 0)}</span>
           </div>
           <div class="token-item">
-            <span class="token-label">${escapeHtml(usageText('common.output', '输出'))}</span>
+            <span class="token-label">${escapeHtml(i18nText('common.output', '输出'))}</span>
             <span class="token-value">${formatNumber(t0.output_tokens || 0)}</span>
           </div>
           <div class="token-item">
-            <span class="token-label">${escapeHtml(usageText('common.cacheRead', '缓存读'))}</span>
+            <span class="token-label">${escapeHtml(i18nText('common.cacheRead', '缓存读'))}</span>
             <span class="token-value">${formatNumber(t0.cache_read_tokens || 0)}</span>
           </div>
-          <div class="token-item" title="${escapeHtml(usageText('index.usage.sendsPerRowHint', '闸门放行数 ÷ 日志行：内层重试探针'))}">
-            <span class="token-label">${escapeHtml(usageText('index.usage.sendsPerRow', '发送/请求'))}</span>
+          <div class="token-item" title="${escapeHtml(i18nText('index.usage.sendsPerRowHint', '闸门放行数 ÷ 日志行：内层重试探针'))}">
+            <span class="token-label">${escapeHtml(i18nText('index.usage.sendsPerRow', '发送/请求'))}</span>
             <span class="token-value">${todaySendsRatio(snap)}</span>
           </div>
         </div>
@@ -444,7 +434,7 @@
       if (!keys.length) return '';
       const rows = keys.map(k => {
         const full = String(k.name || '');
-        const short = full.length > 12 ? `${full.slice(0, 12)}…` : full || '--';
+        const short = full.length > 12 ? `${full.slice(0, 12)}…` : full || '—';
         return `<div class="usage-key-row">
           <span class="usage-key-name" title="${escapeHtml(full)}">${escapeHtml(short)}</span>
           <span class="usage-key-req">${formatNumber(k.requests || 0)}</span>
@@ -453,9 +443,9 @@
       }).join('');
       return `<div class="card channel-card">
         <div class="channel-card-header">
-          <div class="channel-card-title">${escapeHtml(usageText('index.usage.topKeys', '高频令牌'))}</div>
+          <div class="channel-card-title">${escapeHtml(i18nText('index.usage.topKeys', '高频令牌'))}</div>
           <div class="channel-cost">
-            <span class="cost-label">${escapeHtml(usageText('index.usage.window', '窗口'))}</span>
+            <span class="cost-label">${escapeHtml(i18nText('index.usage.window', '窗口'))}</span>
             <span class="cost-value">${formatNumber((snap.days || []).length)}d</span>
           </div>
         </div>

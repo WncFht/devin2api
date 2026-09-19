@@ -81,7 +81,7 @@
 }
 
 .setting-data-row--dirty {
-  background: rgba(59, 130, 246, 0.08);
+  background: color-mix(in srgb, var(--primary-500) 8%, transparent);
 }
 
 .settings-save-actions {
@@ -168,7 +168,6 @@
   margin: 4px 0 8px;
 }
 
-.runtime-metric-key,
 .runtime-transcript-details code {
   color: var(--color-text-secondary);
   font-family: var(--font-family-mono);
@@ -204,8 +203,8 @@
 .runtime-transcript-card {
   margin-top: 12px;
   padding: 15px;
-  background: rgba(59, 130, 246, 0.06);
-  border: 1px solid rgba(59, 130, 246, 0.22);
+  background: color-mix(in srgb, var(--primary-500) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary-500) 22%, transparent);
   border-radius: var(--radius-lg);
 }
 
@@ -239,17 +238,17 @@
 
 .runtime-transcript-status--normal {
   color: var(--success-600);
-  background: rgba(16, 185, 129, 0.12);
+  background: color-mix(in srgb, var(--success-500) 12%, transparent);
 }
 
 .runtime-transcript-status--warning {
   color: var(--warning-600);
-  background: rgba(245, 158, 11, 0.14);
+  background: color-mix(in srgb, var(--warning-500) 14%, transparent);
 }
 
 .runtime-transcript-status--exceeded {
   color: var(--error-600);
-  background: rgba(239, 68, 68, 0.13);
+  background: color-mix(in srgb, var(--error-500) 13%, transparent);
 }
 
 .runtime-transcript-status--unavailable {
@@ -291,8 +290,8 @@
   padding: 20px;
   color: var(--error-600);
   text-align: center;
-  background: rgba(239, 68, 68, 0.08);
-  border: 1px solid rgba(239, 68, 68, 0.2);
+  background: color-mix(in srgb, var(--error-500) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--error-500) 20%, transparent);
   border-radius: var(--radius-md);
 }
 
@@ -548,9 +547,9 @@
 }
 
 .custom-rules-error {
-  background: var(--error-50, #fef2f2);
-  color: var(--error-700, #b91c1c);
-  border: 1px solid var(--error-200, #fecaca);
+  background: var(--error-50);
+  color: var(--error-700);
+  border: 1px solid var(--error-200);
   border-radius: var(--radius-sm);
   padding: 8px 12px;
   font-size: var(--text-13);

@@ -80,9 +80,12 @@ function logsErrorStageLabel(stage) {
 }
 
 // 筛选下拉里的人性化标签：「中文（原值）」——原值可搜可见，提交仍是原值。
+// 括号随 locale：zh 用全角，en 用半角。
 function logsErrorStageOptionLabel(stage) {
   const label = logsErrorStageLabel(stage);
-  return label === stage ? label : `${label}（${stage}）`;
+  if (label === stage) return label;
+  const en = window.i18n && typeof window.i18n.getLocale === 'function' && window.i18n.getLocale() === 'en';
+  return en ? `${label} (${stage})` : `${label}（${stage}）`;
 }
 
 function logsResultLabel(result) {
@@ -108,12 +111,13 @@ function humanizeLogMessage(raw) {
   return { text: parts.join(' · '), title: text };
 }
 
-// key_hash 是 16 位十六进制（SHA-256 前 8 字节）：列表截前 8 位，全量进 title。
+// key_hash 是 16 位十六进制（SHA-256 前 8 字节）：列表截前 8 位，
+// 全量进 title + data-copy，点击复制全量（委托处理在文件尾部）。
 function buildKeyHashDisplay(hash) {
   const h = String(hash || '');
-  if (!h) return '<span class="logs-dash">-</span>';
+  if (!h) return '<span class="logs-dash">—</span>';
   const short = h.length > 10 ? `${h.slice(0, 8)}…` : h;
-  return `<code class="logs-api-key-text logs-mono-text" title="${escapeHtml(h)}">${escapeHtml(short)}</code>`;
+  return `<code class="logs-api-key-text logs-mono-text logs-copyable" data-copy="${escapeHtml(h)}" title="${escapeHtml(h)} · ${escapeHtml(t('logs.clickToCopy'))}">${escapeHtml(short)}</code>`;
 }
 
 let currentLogsPage = 1;
@@ -378,21 +382,20 @@ function formatBytes(bytes) {
   return value.toFixed(i > 0 ? 1 : 0) + ' ' + UNITS[i];
 }
 
+// 信息列固定「详情」入口；已接收字节数是进度读数，降为副文本不承担链接职责。
 function buildActiveRequestInfoContent(req) {
   const bytesInfo = formatBytes(req?.bytes_received);
-  const hasBytes = !!bytesInfo;
-  const infoDisplay = hasBytes
-    ? t('logs.receivedBytes', { bytes: bytesInfo })
-    : (req?.debug_log_available ? t('logs.upstreamDetails') : '-');
-  const infoColor = hasBytes ? 'var(--success-600)' : 'var(--neutral-500)';
-  const infoHtml = `<span style="color: ${infoColor};">${escapeHtml(infoDisplay)}</span>`;
+  const bytesHtml = bytesInfo
+    ? `<span class="logs-bytes-received">${escapeHtml(t('logs.receivedBytes', { bytes: bytesInfo }))}</span>`
+    : '';
   const activeRequestId = Number(req?.id);
 
   if (!req?.debug_log_available || !Number.isFinite(activeRequestId) || activeRequestId <= 0) {
-    return infoHtml;
+    return bytesHtml || '<span class="logs-dash">—</span>';
   }
 
-  return `<span class="debug-log-link has-upstream-detail" data-action="open-active-debug" data-active-request-id="${activeRequestId}" title="${escapeHtml(t('logs.debugLogTitle'))}">${infoHtml}</span>`;
+  const link = `<span class="debug-log-link has-upstream-detail" data-action="open-active-debug" data-active-request-id="${activeRequestId}" title="${escapeHtml(t('logs.debugLogTitle'))}">${escapeHtml(t('logs.detail'))}</span>`;
+  return link + bytesHtml;
 }
 
 // IP 地址掩码处理（隐藏最后两段）
@@ -449,7 +452,7 @@ function activeRequestStatusLabel(req) {
     case 'requesting':
       return t('logs.upstreamStatusRequesting');
     default:
-      return '-';
+      return '—';
   }
 }
 
@@ -470,15 +473,15 @@ function buildTimingSeparatorHtml() {
 }
 
 function buildFirstByteTimingHtml(seconds, text) {
-  return `<span class="log-timing-first-byte" style="color: ${window.getFirstByteTimingColor(seconds)};">${text}</span>`;
+  return `<span class="log-timing-first-byte${window.toneClass(window.getFirstByteTimingTone(seconds))}">${text}</span>`;
 }
 
 function buildDurationTimingHtml(seconds, text) {
-  return `<span class="log-timing-duration" style="color: ${window.getDurationTimingColor(seconds)};">${text}</span>`;
+  return `<span class="log-timing-duration${window.toneClass(window.getDurationTimingTone(seconds))}">${text}</span>`;
 }
 
 function buildActiveRequestTimingHtml(req, elapsedRaw, elapsedText) {
-  if (!Number.isFinite(elapsedRaw)) return '-';
+  if (!Number.isFinite(elapsedRaw)) return '—';
 
   const durationDisplay = buildDurationTimingHtml(elapsedRaw, `${elapsedText}s...`);
   if (req.is_streaming && req.client_first_byte_time > 0) {
@@ -524,7 +527,7 @@ function isPrefixOrSuffixVariant(model, actualModel) {
 // （原名仍进 tag 悬浮提示），WS 传输与推理 token 数以角标呈现。
 function buildLogModelDisplay(model, actualModel, reasoningTokens, upstreamWebsocket) {
   if (!model) {
-    return '<span class="logs-dash">-</span>';
+    return '<span class="logs-dash">—</span>';
   }
 
   const redirected = actualModel && actualModel !== model && !isPrefixOrSuffixVariant(model, actualModel);
@@ -612,7 +615,7 @@ function formatLogTokenDescLabel(label) {
 
 function buildLogTokenDescDisplay(label) {
   const text = String(label || '');
-  if (!text) return '<span class="logs-dash">-</span>';
+  if (!text) return '<span class="logs-dash">—</span>';
   return `<span class="logs-token-desc-text" title="${escapeHtml(text)}">${escapeHtml(formatLogTokenDescLabel(text))}</span>`;
 }
 
@@ -857,17 +860,17 @@ function buildLogsMetricsParams() {
 // 速率类数值：>=1000 走 K/M 缩写，小值留两位小数；0/非法显示占位符
 function formatLogsMetricRate(value) {
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return '-';
+  if (!Number.isFinite(n) || n <= 0) return '—';
   if (n >= 1000) return formatNumber(Math.round(n));
   if (n >= 10) return n.toFixed(1);
   return n.toFixed(2);
 }
 
-function logsMetricCard(label, value, sub, title, color) {
-  return `<div class="runtime-metric-card" title="${escapeHtml(title)}">` +
-    `<span class="runtime-metric-label">${escapeHtml(label)}</span>` +
-    `<strong class="runtime-metric-value"${color ? ` style="color:${color};"` : ''}>${escapeHtml(value)}</strong>` +
-    (sub ? `<span class="runtime-metric-sub">${escapeHtml(sub)}</span>` : '') +
+function logsMetricCard(label, value, sub, title, tone) {
+  return `<div class="kpi-card" title="${escapeHtml(title)}">` +
+    `<span class="kpi-label">${escapeHtml(label)}</span>` +
+    `<strong class="kpi-value${window.toneClass(tone)}">${escapeHtml(value)}</strong>` +
+    (sub ? `<span class="kpi-sub">${escapeHtml(sub)}</span>` : '') +
     `</div>`;
 }
 
@@ -882,8 +885,8 @@ function renderLogsMetrics(data) {
 
   // 四张卡的副行统一为短窗均值：10s 与 1m 两个实时窗口（recent 环聚合，
   // 与主值同口径）。窗口内补充信息（峰值/均耗时/读写量）进 tooltip。
-  const fmtSec = (v) => { const n = Number(v); return n > 0 ? n.toFixed(2) + 's' : '-'; };
-  const fmtPct = (v) => { const n = Number(v); return n > 0 ? n.toFixed(1) + '%' : '-'; };
+  const fmtSec = (v) => { const n = Number(v); return n > 0 ? n.toFixed(2) + 's'  : '—'; };
+  const fmtPct = (v) => { const n = Number(v); return n > 0 ? n.toFixed(1) + '%'  : '—'; };
   const winSub = (key, fmt) => i18nText('logs.metricWinSub', '10s {a} · 1m {b}', {
     a: fmt(recent?.s10?.[key]),
     b: fmt(recent?.s60?.[key])
@@ -945,13 +948,13 @@ function renderLogsMetrics(data) {
       : ''
   );
 
-  el.innerHTML = `<div class="runtime-metrics-grid">` +
+  el.innerHTML = `<div class="kpi-grid">` +
     logsMetricCard(
       i18nText('trend.typeRpm', 'RPM'),
       formatLogsMetricRate(avgRpm),
       winSub('rpm', formatLogsMetricRate),
       rpmTitle,
-      avgRpm > 0 ? window.getRpmColor(avgRpm) : ''
+      ''
     ) +
     logsMetricCard(
       i18nText('logs.metricTps', 'TPS'),
@@ -962,14 +965,14 @@ function renderLogsMetrics(data) {
     ) +
     logsMetricCard(
       i18nText('probe.firstByte', '首字'),
-      ttfb > 0 ? ttfb.toFixed(2) + 's' : '-',
+      ttfb > 0 ? ttfb.toFixed(2) + 's'  : '—',
       winSub('ttfb_s', fmtSec),
       ttfbTitle,
-      ttfb > 0 ? window.getFirstByteTimingColor(ttfb) : ''
+      ttfb > 0 ? window.getFirstByteTimingTone(ttfb) : ''
     ) +
     logsMetricCard(
       i18nText('trend.cacheHitRate', '缓存命中率'),
-      cachePct > 0 ? cachePct.toFixed(1) + '%' : '-',
+      cachePct > 0 ? cachePct.toFixed(1) + '%'  : '—',
       winSub('cache_pct', fmtPct),
       cacheTitle,
       ''
@@ -1154,10 +1157,10 @@ function renderActiveRequests(activeRequests) {
       abortingActiveRequests.delete(id);
     }
     const elapsedRaw = startMs ? Math.max(0, (Date.now() - startMs) / 1000) : null;
-    const elapsed = elapsedRaw !== null ? elapsedRaw.toFixed(1) : '-';
+    const elapsed = elapsedRaw !== null ? elapsedRaw.toFixed(1)  : '—';
     const streamFlag = getStreamFlagHtml(req.is_streaming);
 
-    const durationDisplay = startMs ? buildActiveRequestTimingHtml(req, elapsedRaw, elapsed) : '-';
+    const durationDisplay = startMs ? buildActiveRequestTimingHtml(req, elapsedRaw, elapsed)  : '—';
 
     const statusDisplay = buildActiveRequestStatusHtml(req);
     const modelDisplay = buildLogModelDisplay(req.model, '', req.reasoning_tokens, req.upstream_websocket);
@@ -1346,7 +1349,7 @@ function renderLogs(data) {
     // 0. 客户端IP显示（掩码处理，hover显示完整IP）
     const clientIPDisplay = entry.client_ip ?
       `<span title="${escapeHtml(entry.client_ip)}">${escapeHtml(maskIP(entry.client_ip))}</span>` :
-      '<span class="logs-dash-faint">-</span>';
+      '<span class="logs-dash-faint">—</span>';
 
     // 0.5. API访问令牌描述
     const tokenDescDisplay = buildLogTokenDescDisplay(entry.auth_token_description);
@@ -1371,7 +1374,7 @@ function renderLogs(data) {
     const hasDuration = entry.duration !== undefined && entry.duration !== null;
     const durationDisplay = hasDuration ?
       buildDurationTimingHtml(entry.duration, entry.duration.toFixed(2)) :
-      '<span class="logs-dash">-</span>';
+      '<span class="logs-dash">—</span>';
 
     const streamFlag = getStreamFlagHtml(entry.is_streaming);
 
@@ -1380,7 +1383,7 @@ function renderLogs(data) {
       const hasFirstByte = entry.first_byte_time !== undefined && entry.first_byte_time !== null;
       const firstByteDisplay = hasFirstByte ?
         buildFirstByteTimingHtml(entry.first_byte_time, entry.first_byte_time.toFixed(2)) :
-        '<span class="log-timing-first-byte logs-dash">-</span>';
+        '<span class="log-timing-first-byte logs-dash">—</span>';
       responseTimingDisplay = `<span class="log-timing-pair">${firstByteDisplay}${buildTimingSeparatorHtml()}${durationDisplay}</span>${streamFlag}`;
     } else {
       responseTimingDisplay = `<span class="log-timing-pair">${durationDisplay}</span>${streamFlag}`;
@@ -1888,11 +1891,11 @@ function initLogsPageActions() {
 function formatTime(timeStr) {
   try {
     const ts = toUnixMs(timeStr);
-    if (!ts) return '-';
+    if (!ts) return '—';
 
     const d = new Date(ts);
     if (isNaN(d.getTime()) || d.getFullYear() < 2020) {
-      return '-';
+      return '—';
     }
 
     // 手动格式化：MM-DD HH:mm:ss
@@ -1903,7 +1906,7 @@ function formatTime(timeStr) {
     const s = String(d.getSeconds()).padStart(2, '0');
     return `${M}-${D} ${h}:${m}:${s}`;
   } catch (e) {
-    return '-';
+    return '—';
   }
 }
 
@@ -2125,6 +2128,18 @@ window.addEventListener('pageshow', async function (event) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { isPrefixOrSuffixVariant, buildLogModelDisplay, buildCacheCreationDisplay };
+}
+
+// data-copy 委托：表格里截断显示的值（key_hash 等）点击复制全量。
+if (typeof document !== 'undefined') {
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-copy]');
+    if (!el || typeof window.copyToClipboard !== 'function') return;
+    window.copyToClipboard(el.dataset.copy).then(() => {
+      el.classList.add('logs-copied');
+      setTimeout(() => el.classList.remove('logs-copied'), 800);
+    }).catch(() => {});
+  });
 }
 
 if (typeof window !== 'undefined') {

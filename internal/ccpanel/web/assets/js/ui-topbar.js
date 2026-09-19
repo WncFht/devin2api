@@ -1354,6 +1354,12 @@
 
     document.body.appendChild(topbar);
 
+    const skipLink = document.createElement('a');
+    skipLink.className = 'skip-link';
+    skipLink.href = '#main';
+    skipLink.textContent = t('common.skipToContent');
+    document.body.prepend(skipLink);
+
 
 
     // 初始化版本显示

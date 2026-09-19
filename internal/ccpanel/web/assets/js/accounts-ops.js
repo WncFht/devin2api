@@ -299,19 +299,19 @@
     el.innerHTML = `
       <form class="acct-form" data-add>
         <div class="acct-form-row">
-          <input class="acct-form-input" data-f="name" placeholder="${esc(t('accounts.add.name'))}" required maxlength="32" pattern="[A-Za-z0-9_-]{1,32}" spellcheck="false" autocomplete="off">
+          <input class="acct-form-input" data-f="name" placeholder="${esc(t('accounts.add.name'))}" aria-label="${esc(t('accounts.add.name'))}" required maxlength="32" pattern="[A-Za-z0-9_-]{1,32}" spellcheck="false" autocomplete="off">
         </div>
         <div class="acct-form-row">
           <label class="acct-form-radio"><input type="radio" name="acct-kind-${uid}" value="token" checked> ${esc(t('accounts.add.token'))}</label>
           <label class="acct-form-radio"><input type="radio" name="acct-kind-${uid}" value="credFile"> ${esc(t('accounts.add.credFile'))}</label>
           <label class="acct-form-radio"><input type="radio" name="acct-kind-${uid}" value="credContent"> ${esc(t('accounts.add.credContent'))}</label>
         </div>
-        <div class="acct-form-row"><input class="acct-form-input" data-f="token" placeholder="${esc(t('accounts.add.token'))}" required spellcheck="false" autocomplete="off"></div>
-        <div class="acct-form-row"><input class="acct-form-input" data-f="credFile" placeholder="${esc(t('accounts.add.credFile'))}" hidden spellcheck="false" autocomplete="off"></div>
-        <div class="acct-form-row"><textarea class="acct-form-input" data-f="credContent" placeholder="${esc(t('accounts.add.credContentHint'))}" hidden spellcheck="false" autocomplete="off"></textarea></div>
+        <div class="acct-form-row"><input class="acct-form-input" data-f="token" placeholder="${esc(t('accounts.add.token'))}" aria-label="${esc(t('accounts.add.token'))}" required spellcheck="false" autocomplete="off"></div>
+        <div class="acct-form-row"><input class="acct-form-input" data-f="credFile" placeholder="${esc(t('accounts.add.credFile'))}" aria-label="${esc(t('accounts.add.credFile'))}" hidden spellcheck="false" autocomplete="off"></div>
+        <div class="acct-form-row"><textarea class="acct-form-input" data-f="credContent" placeholder="${esc(t('accounts.add.credContentHint'))}" aria-label="${esc(t('accounts.add.credContent'))}" hidden spellcheck="false" autocomplete="off"></textarea></div>
         <div class="acct-form-row acct-form-duo">
-          <input class="acct-form-input" data-f="priority" type="number" min="0" step="1" placeholder="${esc(t('accounts.f.priority'))}" spellcheck="false" autocomplete="off">
-          <input class="acct-form-input" data-f="notes" placeholder="${esc(t('accounts.f.notes'))}" spellcheck="false" autocomplete="off">
+          <input class="acct-form-input" data-f="priority" type="number" min="0" step="1" placeholder="${esc(t('accounts.f.priority'))}" aria-label="${esc(t('accounts.f.priority'))}" spellcheck="false" autocomplete="off">
+          <input class="acct-form-input" data-f="notes" placeholder="${esc(t('accounts.f.notes'))}" aria-label="${esc(t('accounts.f.notes'))}" spellcheck="false" autocomplete="off">
         </div>
         <div class="acct-form-row">
           <label class="acct-form-check"><input type="checkbox" data-f="verify"> ${esc(t('accounts.add.verify'))}</label>

@@ -36,7 +36,7 @@
 <body>
   <div class="app-container">
     <!-- 主内容区域 -->
-    <main class="main-content">
+    <main id="main" class="main-content">
       <div class="content-area">
         <h1 class="visually-hidden" data-i18n="nav.stats">调用统计</h1>
         <div data-page-filters="stats"></div>
@@ -90,50 +90,50 @@
               <table class="modern-table stats-table mobile-card-table">
                 <thead>
                   <tr>
-                    <th class="sortable stats-col-model" tabindex="0" data-column="model">
+                    <th scope="col" scope="col" class="sortable stats-col-model" tabindex="0" data-column="model">
                       <span data-i18n="common.model">模型</span>
                       <span class="sort-indicator"></span>
                     </th>
-                    <th class="sortable stats-col-success stats-header-accent--success" tabindex="0" data-column="success">
+                    <th scope="col" scope="col" class="sortable stats-col-success stats-header-accent--success" tabindex="0" data-column="success">
                       <span data-i18n="common.success">成功</span>
                       <span class="sort-indicator"></span>
                     </th>
-                    <th class="sortable stats-col-error stats-header-accent--error" tabindex="0" data-column="error">
+                    <th scope="col" scope="col" class="sortable stats-col-error stats-header-accent--error" tabindex="0" data-column="error">
                       <span data-i18n="common.failed">失败</span>
                       <span class="sort-indicator"></span>
                     </th>
-                    <th class="sortable stats-col-timing" tabindex="0" data-column="avg_first_byte_time">
+                    <th scope="col" scope="col" class="sortable stats-col-timing" tabindex="0" data-column="avg_first_byte_time">
                       <span data-i18n="stats.avgFirstByte">首字/耗时(秒)</span>
                       <span class="sort-indicator"></span>
                     </th>
-                    <th class="sortable stats-col-speed" tabindex="0" data-column="avg_speed">
+                    <th scope="col" scope="col" class="sortable stats-col-speed" tabindex="0" data-column="avg_speed">
                       <span data-i18n="stats.avgSpeed">Tok/s</span>
                       <span class="sort-indicator"></span>
                     </th>
-                    <th class="sortable stats-col-rpm" tabindex="0" data-column="rpm" data-i18n-title="stats.rpmTitle" title="每分钟请求数(峰值/平均/最近)">
+                    <th scope="col" scope="col" class="sortable stats-col-rpm" tabindex="0" data-column="rpm" data-i18n-title="stats.rpmTitle" title="每分钟请求数(峰值/平均/最近)">
                       <span data-i18n="stats.rpm">RPM(峰/均/近)</span>
                       <span class="sort-indicator"></span>
                     </th>
-                    <th class="sortable stats-col-input" tabindex="0" data-column="total_input_tokens">
+                    <th scope="col" scope="col" class="sortable stats-col-input" tabindex="0" data-column="total_input_tokens">
                       <span data-i18n="stats.inputTokens">输入</span>
                       <span class="sort-indicator"></span>
                     </th>
-                    <th class="sortable stats-col-output" tabindex="0" data-column="total_output_tokens">
+                    <th scope="col" scope="col" class="sortable stats-col-output" tabindex="0" data-column="total_output_tokens">
                       <span data-i18n="stats.outputTokens">输出</span>
                       <span class="sort-indicator"></span>
                     </th>
-                    <th class="sortable stats-col-cache-read stats-header-accent--cache-read" tabindex="0" data-column="total_cache_read">
+                    <th scope="col" scope="col" class="sortable stats-col-cache-read stats-header-accent--cache-read" tabindex="0" data-column="total_cache_read">
                       <span data-i18n="stats.cacheRead">缓存读取</span>
                       <span class="sort-indicator"></span>
                     </th>
-                    <th class="sortable stats-col-cache-create stats-header-accent--cache-create" tabindex="0" data-column="total_cache_creation">
+                    <th scope="col" scope="col" class="sortable stats-col-cache-create stats-header-accent--cache-create" tabindex="0" data-column="total_cache_creation">
                       <span data-i18n="stats.cacheCreation">缓存创建</span>
                       <span class="sort-indicator"></span>
                     </th>
-                    <th class="stats-col-cache-util" data-column="cache_util">
+                    <th scope="col" scope="col" class="stats-col-cache-util" data-column="cache_util">
                       <span data-i18n="stats.cacheUtil">缓存命中</span>
                     </th>
-                    <th class="sortable stats-col-cost stats-header-accent--cost" tabindex="0" data-column="total_cost">
+                    <th scope="col" scope="col" class="sortable stats-col-cost stats-header-accent--cost" tabindex="0" data-column="total_cost">
                       <span data-i18n="stats.costUsd">成本</span>
                       <span class="sort-indicator"></span>
                     </th>
@@ -190,7 +190,7 @@
               <div class="runtime-metrics-subsection-header">
                 <h4 data-i18n="stats.usageFaultsTitle">SLA 归因</h4>
               </div>
-              <div class="runtime-metrics-grid" id="usage-faults-grid"></div>
+              <div class="kpi-grid" id="usage-faults-grid"></div>
             </section>
             <section class="runtime-metrics-subsection" id="usage-latency-block" hidden>
               <div class="runtime-metrics-subsection-header">
@@ -200,13 +200,13 @@
                 <table class="modern-table">
                   <thead>
                     <tr>
-                      <th data-i18n="stats.usageLatencyMetric">指标</th>
-                      <th data-i18n="stats.usageLatencySamples">样本</th>
-                      <th>p50</th>
-                      <th>p90</th>
-                      <th>p95</th>
-                      <th>p99</th>
-                      <th data-i18n="stats.usageLatencyMax">最大</th>
+                      <th scope="col" scope="col" data-i18n="stats.usageLatencyMetric">指标</th>
+                      <th scope="col" scope="col" data-i18n="stats.usageLatencySamples">样本</th>
+                      <th scope="col" scope="col">p50</th>
+                      <th scope="col" scope="col">p90</th>
+                      <th scope="col" scope="col">p95</th>
+                      <th scope="col" scope="col">p99</th>
+                      <th scope="col" scope="col" data-i18n="stats.usageLatencyMax">最大</th>
                     </tr>
                   </thead>
                   <tbody id="usage-latency-tbody"></tbody>
@@ -221,9 +221,9 @@
                 <table class="modern-table">
                   <thead>
                     <tr>
-                      <th data-i18n="stats.usageStageName">阶段</th>
-                      <th data-i18n="stats.usageStageCount">次数</th>
-                      <th data-i18n="stats.usageStageShare">占比</th>
+                      <th scope="col" scope="col" data-i18n="stats.usageStageName">阶段</th>
+                      <th scope="col" scope="col" data-i18n="stats.usageStageCount">次数</th>
+                      <th scope="col" scope="col" data-i18n="stats.usageStageShare">占比</th>
                     </tr>
                   </thead>
                   <tbody id="usage-stages-tbody"></tbody>
@@ -238,9 +238,9 @@
                 <table class="modern-table">
                   <thead>
                     <tr>
-                      <th data-i18n="common.model">模型</th>
-                      <th data-i18n="stats.usageCtxFillPct">填充率</th>
-                      <th data-i18n="stats.usageCtxFillTokens">均占用/窗口</th>
+                      <th scope="col" scope="col" data-i18n="common.model">模型</th>
+                      <th scope="col" scope="col" data-i18n="stats.usageCtxFillPct">填充率</th>
+                      <th scope="col" scope="col" data-i18n="stats.usageCtxFillTokens">均占用/窗口</th>
                     </tr>
                   </thead>
                   <tbody id="usage-ctxfill-tbody"></tbody>
@@ -319,8 +319,8 @@
       <td class="stats-col-rpm" data-mobile-label="{{mobileLabelRpm}}">{{{rpm}}}</td>
       <td class="stats-col-input" data-mobile-label="{{mobileLabelInput}}">{{inputTokens}}</td>
       <td class="stats-col-output" data-mobile-label="{{mobileLabelOutput}}">{{outputTokens}}</td>
-      <td class="stats-col-cache-read" data-mobile-label="{{mobileLabelCacheRead}}"><span class="stats-value-success">{{cacheReadTokens}}</span></td>
-      <td class="stats-col-cache-create" data-mobile-label="{{mobileLabelCacheCreate}}"><span class="stats-value-primary">{{cacheCreationTokens}}</span></td>
+      <td class="stats-col-cache-read" data-mobile-label="{{mobileLabelCacheRead}}"><span class="tone-healthy">{{cacheReadTokens}}</span></td>
+      <td class="stats-col-cache-create" data-mobile-label="{{mobileLabelCacheCreate}}"><span class="tone-primary">{{cacheCreationTokens}}</span></td>
       <td class="stats-col-cache-util" data-mobile-label="{{mobileLabelCacheUtil}}">{{{cacheUtilText}}}</td>
       <td class="stats-col-cost" data-mobile-label="{{mobileLabelCost}}">{{{costText}}}</td>
     </tr>

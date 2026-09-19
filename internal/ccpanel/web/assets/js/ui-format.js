@@ -41,20 +41,28 @@
     return output / tokenDuration;
   }
 
-  function timingColor(seconds, greenThreshold, warningThreshold) {
+  // 耗时/首字分档返回 tone 名（healthy|warning|critical|''），
+  // 由 styles.css 的 .tone-* 共享类着色，调用方拼 class 不写内联色。
+
+  function timingTone(seconds, greenThreshold, warningThreshold) {
     const value = Number(seconds);
-    if (!Number.isFinite(value) || value <= 0) return 'var(--neutral-600)';
-    if (value <= greenThreshold) return 'var(--success-600)';
-    if (value <= warningThreshold) return 'var(--warning-600)';
-    return 'var(--error-600)';
+    if (!Number.isFinite(value) || value <= 0) return '';
+    if (value <= greenThreshold) return 'healthy';
+    if (value <= warningThreshold) return 'warning';
+    return 'critical';
   }
 
-  function getFirstByteTimingColor(seconds) {
-    return timingColor(seconds, 5, 10);
+  function getFirstByteTimingTone(seconds) {
+    return timingTone(seconds, 5, 10);
   }
 
-  function getDurationTimingColor(seconds) {
-    return timingColor(seconds, 30, 60);
+  function getDurationTimingTone(seconds) {
+    return timingTone(seconds, 30, 60);
+  }
+
+  // tone 名 → 可拼进 class 的片段（' healthy'→' tone-healthy'），空 tone 返回 ''。
+  function toneClass(tone) {
+    return tone ? ` tone-${tone}` : '';
   }
 
   /**
@@ -175,25 +183,17 @@
     return `<span class="${classes.join(' ')}"><span class="cost-stack-standard">${format(info.standardCost)}</span><span class="cost-stack-effective">${format(info.effectiveCost)}</span></span>`;
   }
 
-  // 格式化数字显示（通用：K/M缩写）
+  // 格式化数字显示（通用：K/M缩写）；非有限值显 '—'，坏数据不画成 0。
+  // 档位阈值按显示精度进位后取值，避免 999950 渲成 "1000.0K"。
 
   function formatNumber(num) {
     const n = Number(num);
-    if (!Number.isFinite(n)) return '0';
-    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    if (!Number.isFinite(n)) return '—';
+    const abs = Math.abs(n);
+    if (abs >= 999.5e6) return (n / 1e9).toFixed(1) + 'B';
+    if (abs >= 999.5e3) return (n / 1e6).toFixed(1) + 'M';
+    if (abs >= 999.5) return (n / 1e3).toFixed(1) + 'K';
     return Number.isInteger(n) ? String(n) : n.toFixed(2);
-  }
-
-  // RPM 颜色：低流量绿色，中等橙色，高流量红色
-
-  function getRpmColor(rpm) {
-    const n = Number(rpm);
-    if (!Number.isFinite(n)) return 'var(--neutral-600)';
-    if (n < 10) return 'var(--success-600)';
-    if (n < 100) return 'var(--warning-600)';
-    return 'var(--error-600)';
   }
 
   // RPM 数值文本（1000+ 缩写 K、1+ 一位小数、其余两位）；<0.01 的兜底展示由调用方定
@@ -228,10 +228,10 @@
   window.formatCostPair = formatCostPair;
   window.getCostDisplayInfo = getCostDisplayInfo;
   window.buildCostStackHtml = buildCostStackHtml;
-  window.getFirstByteTimingColor = getFirstByteTimingColor;
-  window.getDurationTimingColor = getDurationTimingColor;
+  window.getFirstByteTimingTone = getFirstByteTimingTone;
+  window.getDurationTimingTone = getDurationTimingTone;
+  window.toneClass = toneClass;
   window.formatNumber = formatNumber;
-  window.getRpmColor = getRpmColor;
   window.formatRpmValue = formatRpmValue;
   window.escapeHtml = escapeHtml;
 

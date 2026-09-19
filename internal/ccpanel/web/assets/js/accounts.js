@@ -256,7 +256,7 @@
     chip.hidden = !filterName;
     if (filterName) {
       chip.innerHTML = `<span>${esc(t('accounts.filter.only', { name: filterName }))}</span>` +
-        `<button type="button" class="acct-filter-x" data-clear-filter aria-label="${esc(t('accounts.filter.clear'))}">&times;</button>`;
+        `<button type="button" class="acct-filter-x" data-clear-filter aria-label="${esc(t('common.clear'))}">&times;</button>`;
     }
   }
 
@@ -364,18 +364,18 @@
       if (e.account_switches) switches += e.account_switches;
     }
     const healthy = list.filter((a) => primaryTone(a) === 'ok').length;
-    const card = (label, value, sub, tone) => `<div class="runtime-metric-card">
-      <span class="runtime-metric-label">${esc(label)}</span>
-      <strong class="runtime-metric-value${tone ? ` acct-tone--${tone}` : ''}">${value}</strong>
-      ${sub ? `<span class="runtime-metric-sub">${sub}</span>` : ''}
+    const card = (label, value, sub, tone) => `<div class="kpi-card">
+      <span class="kpi-label">${esc(label)}</span>
+      <strong class="kpi-value${tone ? ` tone-${tone}` : ''}">${value}</strong>
+      ${sub ? `<span class="kpi-sub">${sub}</span>` : ''}
     </div>`;
     grid.innerHTML = [
       card(t('accounts.kpi.lanes'), list.length, null, null),
       card(t('accounts.kpi.healthy'), healthy, list.length ? t('accounts.kpi.of', { n: list.length }) : null,
-        healthy === list.length ? 'success' : 'warning'),
+        healthy === list.length ? 'healthy' : 'warning'),
       card(t('accounts.kpi.requests'), num(requests), matrixErr ? esc(t('accounts.partial')) : null, null),
       card(t('accounts.kpi.errors'), num(errors), rateLimited ? t('accounts.kpi.rlSub', { n: rateLimited }) : null,
-        errors ? 'error' : 'success'),
+        errors ? 'critical' : 'healthy'),
       card(t('accounts.kpi.switches'), num(switches), null, switches ? 'warning' : null)
     ].join('');
   }

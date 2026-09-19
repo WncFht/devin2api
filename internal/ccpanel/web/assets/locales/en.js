@@ -40,6 +40,8 @@ window.I18N_LOCALES['en'] = {
   'common.timeHM': '{h}h {m}m',
   'common.timeMS': '{m}m {s}s',
   'common.timeS': '{s}s',
+  'common.selectLanguage': 'Select language',
+  'common.skipToContent': 'Skip to main content',
 
   // ============================================================
   // Navigation
@@ -82,7 +84,7 @@ window.I18N_LOCALES['en'] = {
   // ============================================================
   // Index Overview
   // ============================================================
-  'index.title': 'Devin2API Proxy Service',
+  'index.title': 'Overview - Devin2API',
   'index.timeRange.today': 'Today',
   'index.timeRange.yesterday': 'Yesterday',
   'index.timeRange.dayBeforeYesterday': 'Day Before',
@@ -502,6 +504,8 @@ window.I18N_LOCALES['en'] = {
   'logs.upstreamStatusRetrying': 'Retrying upstream',
   'logs.receivedBytes': 'Received {bytes}',
   'logs.upstreamDetails': 'Upstream details',
+  'logs.detail': 'Detail',
+  'logs.clickToCopy': 'Click to copy',
   'logs.testContent': 'Test Content',
   'logs.testContentPlaceholder': 'Enter test message content',
   'logs.enableStream': 'Enable streaming response',
@@ -1232,7 +1236,6 @@ window.I18N_LOCALES['en'] = {
   'accounts.sort.priority': 'Priority',
   'accounts.sort.health': 'Sick first',
   'accounts.filter.only': 'Only {name}',
-  'accounts.filter.clear': 'Clear filter',
   'accounts.filter.missing': 'Account {name} not found',
   'accounts.add.credContent': 'Paste credentials.toml',
   'accounts.add.credContentHint': 'Paste the full credentials.toml content',

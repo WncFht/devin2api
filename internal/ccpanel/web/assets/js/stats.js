@@ -296,8 +296,8 @@
       );
     }
 
-    function buildStatsTimingValue(seconds, color) {
-      return `<span class="stats-value-dynamic" style="--stats-accent:${color};">${seconds.toFixed(2)}</span>`;
+    function buildStatsTimingValue(seconds, tone) {
+      return `<span class="${window.toneClass(tone).trim()}">${seconds.toFixed(2)}</span>`;
     }
 
     function buildStatsTimingText(firstByteSeconds, durationSeconds) {
@@ -306,11 +306,11 @@
       const parts = [];
 
       if (firstByte > 0) {
-        parts.push(buildStatsTimingValue(firstByte, window.getFirstByteTimingColor(firstByte)));
+        parts.push(buildStatsTimingValue(firstByte, window.getFirstByteTimingTone(firstByte)));
       }
       if (duration > 0) {
         if (parts.length > 0) parts.push('<span class="stats-timing-separator">/</span>');
-        parts.push(buildStatsTimingValue(duration, window.getDurationTimingColor(duration)));
+        parts.push(buildStatsTimingValue(duration, window.getDurationTimingTone(duration)));
       }
 
       return parts.join('');
@@ -323,12 +323,12 @@
       const denom = i + r + c;
       if (denom <= 0 || r <= 0) return '';
       const pct = (r / denom) * 100;
-      return `<span class="stats-value-success">${pct.toFixed(1)}%</span>`;
+      return `<span class="tone-healthy">${pct.toFixed(1)}%</span>`;
     }
 
     function buildStatsModelDisplay(entry) {
       if (!entry.model) {
-        return `<span class="stats-value-muted">${t('stats.unknownModel')}</span>`;
+        return `<span class="tone-none">${t('stats.unknownModel')}</span>`;
       }
 
       const modelLink = `<a href="#" class="model-tag model-link" data-model="${escapeHtml(entry.model)}" title="${t('stats.viewLogsTitle')}">${escapeHtml(entry.model)}</a>`;
@@ -407,15 +407,15 @@
         const avgSpeed = calculateAverageSpeed(entry);
         const avgSpeedText = avgSpeed === null
           ? ''
-          : `<span class="stats-value-dynamic" style="--stats-accent:var(--neutral-700);">${avgSpeed >= 100 ? avgSpeed.toFixed(0) : avgSpeed.toFixed(1)}</span>`;
+          : `<span>${avgSpeed >= 100 ? avgSpeed.toFixed(0) : avgSpeed.toFixed(1)}</span>`;
 
         // 格式化Token数据
         const inputTokensText = entry.total_input_tokens ? formatNumber(entry.total_input_tokens) : '';
         const outputTokensText = entry.total_output_tokens ? formatNumber(entry.total_output_tokens) : '';
         const cacheReadTokensText = entry.total_cache_read_input_tokens ?
-          `<span class="stats-value-success">${formatNumber(entry.total_cache_read_input_tokens)}</span>` : '';
+          `<span class="tone-healthy">${formatNumber(entry.total_cache_read_input_tokens)}</span>` : '';
         const cacheCreationTokensText = entry.total_cache_creation_input_tokens ?
-          `<span class="stats-value-primary">${formatNumber(entry.total_cache_creation_input_tokens)}</span>` : '';
+          `<span class="tone-primary">${formatNumber(entry.total_cache_creation_input_tokens)}</span>` : '';
         const cacheUtilText = buildCacheUtilRate(
           entry.total_input_tokens,
           entry.total_cache_read_input_tokens,
@@ -531,7 +531,7 @@
       let totalSpeedText = '';
       if (speedOutputTokensSum > 0 && speedGenerationSecondsSum > 0) {
         const speed = speedOutputTokensSum / speedGenerationSecondsSum;
-        totalSpeedText = `<span class="stats-value-dynamic" style="--stats-accent:var(--neutral-700);">${speed >= 100 ? speed.toFixed(0) : speed.toFixed(1)}</span>`;
+        totalSpeedText = `<span>${speed >= 100 ? speed.toFixed(0) : speed.toFixed(1)}</span>`;
       }
 
       const totalRow = TemplateEngine.render('tpl-stats-total', {
@@ -799,41 +799,19 @@
       }
     }
 
-    // 格式化 RPM（每分钟请求数）带颜色
+    // 格式化 RPM（每分钟请求数）。RPM 是负载不是健康度，不上语义色。
     function formatRpm(rpm) {
       if (rpm < 0.01) return '';
-      const color = getRpmColor(rpm);
-      return `<span class="stats-rpm-value" style="--stats-rpm-color:${color};">${formatRpmValue(rpm)}</span>`;
+      return `<span class="stats-rpm-value">${formatRpmValue(rpm)}</span>`;
     }
 
     // 格式化全局RPM（峰值/平均/最近），固定格式，0显示为-
     function formatGlobalRpm(stats, showRecent) {
-      if (!stats) return '-/-' + (showRecent ? '/-' : '');
+      if (!stats) return '—/—' + (showRecent ? '/—' : '');
 
-      const formatVal = (v) => {
-        const text = (v || 0).toFixed(1);
-        return text === '0.0' ? '-' : text;
-      };
-      const peakText = formatVal(stats.peak_rpm);
-      const avgText = formatVal(stats.avg_rpm);
-
-      const parts = [
-        {
-          text: peakText,
-          color: peakText !== '-' ? getRpmColor(stats.peak_rpm) : 'inherit'
-        },
-        {
-          text: avgText,
-          color: avgText !== '-' ? getRpmColor(stats.avg_rpm) : 'inherit'
-        }
-      ];
-
+      const parts = [formatRpmVal(stats.peak_rpm), formatRpmVal(stats.avg_rpm)];
       if (showRecent) {
-        const recentText = formatVal(stats.recent_rpm);
-        parts.push({
-          text: recentText,
-          color: recentText !== '-' ? getRpmColor(stats.recent_rpm) : 'inherit'
-        });
+        parts.push(formatRpmVal(stats.recent_rpm));
       }
 
       return buildCompactRpmDisplay(parts);
@@ -841,40 +819,24 @@
 
     // 格式化每行的RPM（峰值/平均/最近），固定格式，0显示为-
     function formatEntryRpm(entry, showRecent) {
-      const formatVal = (v) => {
-        const text = (v || 0).toFixed(1);
-        return text === '0.0' ? '-' : text;
-      };
-
-      const peakText = formatVal(entry.peak_rpm);
-      const avgText = formatVal(entry.avg_rpm);
-
-      const parts = [
-        {
-          text: peakText,
-          color: peakText !== '-' ? getRpmColor(entry.peak_rpm) : 'inherit'
-        },
-        {
-          text: avgText,
-          color: avgText !== '-' ? getRpmColor(entry.avg_rpm) : 'inherit'
-        }
-      ];
+      const parts = [formatRpmVal(entry.peak_rpm), formatRpmVal(entry.avg_rpm)];
 
       if (showRecent) {
-        const recentText = formatVal(entry.recent_rpm);
-        parts.push({
-          text: recentText,
-          color: recentText !== '-' ? getRpmColor(entry.recent_rpm) : 'inherit'
-        });
+        parts.push(formatRpmVal(entry.recent_rpm));
       }
 
       return buildCompactRpmDisplay(parts);
     }
 
+    function formatRpmVal(v) {
+      const text = (v || 0).toFixed(1);
+      return text === '0.0' ? '—' : text;
+    }
+
     function buildCompactRpmDisplay(parts) {
       const html = parts.map((part, index) => {
         const separator = index === 0 ? '' : '<span class="stats-rpm-separator">/</span>';
-        return `${separator}<span class="stats-rpm-value" style="--stats-rpm-color:${part.color};">${part.text}</span>`;
+        return `${separator}<span class="stats-rpm-value">${part}</span>`;
       }).join('');
 
       return `<span class="stats-rpm-inline">${html}</span>`;
@@ -1154,8 +1116,9 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       const snap = (data.snapshot && typeof data.snapshot === 'object') ? data.snapshot : data;
       const models = Array.isArray(data.models) ? data.models
         : (Array.isArray(snap.models) ? snap.models : []);
+      const ws = String(snap.window_start || '');
       return {
-        windowStart: snap.window_start || '',
+        windowStart: ws.startsWith('0001-01-01') ? '' : ws,
         entries: Number(snap.entries) || 0,
         points: Array.isArray(snap.points) ? snap.points : [],
         days: Array.isArray(snap.days) ? snap.days : [],
@@ -1196,11 +1159,11 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       return (base - (totals.upstream_faults || 0)) / base * 100;
     }
 
-    function usageKpiCard(labelKey, fallback, valueHtml, sub, color) {
-      return `<div class="runtime-metric-card">
-        <span class="runtime-metric-label">${escapeHtml(usageT(labelKey, fallback))}</span>
-        <strong class="runtime-metric-value"${color ? ` style="color:${color};"` : ''}>${valueHtml}</strong>
-        ${sub ? `<span class="runtime-metric-sub">${sub}</span>` : ''}
+    function usageKpiCard(labelKey, fallback, valueHtml, sub, tone) {
+      return `<div class="kpi-card">
+        <span class="kpi-label">${escapeHtml(usageT(labelKey, fallback))}</span>
+        <strong class="kpi-value${window.toneClass(tone)}">${valueHtml}</strong>
+        ${sub ? `<span class="kpi-sub">${sub}</span>` : ''}
       </div>`;
     }
 
@@ -1267,13 +1230,13 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       const grid = document.getElementById('usage-faults-grid');
       if (!block || !grid) return;
       const sla = usageSlaRate(totals);
-      const slaColor = sla === null ? '' :
-        sla >= 99 ? 'var(--success-600)' : sla >= 95 ? 'var(--warning-600)' : 'var(--error-600)';
+      const slaTone = sla === null ? '' :
+        sla >= 99 ? 'healthy' : sla >= 95 ? 'warning' : 'critical';
       grid.innerHTML = [
         usageKpiCard('stats.usageSla', 'SLA 成功率',
           sla === null ? '—' : sla.toFixed(1) + '%',
           escapeHtml(usageT('stats.usageSlaSub', '剔除客户端责任与 429')),
-          slaColor),
+          slaTone),
         usageKpiCard('stats.usageRequests', '请求数',
           formatNumber(totals.requests),
           escapeHtml(usageT('stats.usageRequestsSub', '失败 {errors} · 断连 {disconnected}', {
@@ -1282,7 +1245,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
           }))),
         usageKpiCard('stats.usageUpstreamFaults', '服务端失分',
           formatNumber(totals.upstream_faults), '',
-          totals.upstream_faults > 0 ? 'var(--error-600)' : ''),
+          totals.upstream_faults > 0 ? 'critical' : ''),
         usageKpiCard('stats.usageClientFaults', '客户端责任',
           formatNumber(totals.client_faults), ''),
         usageKpiCard('stats.usageRateLimited', '限流 429',
@@ -1291,22 +1254,22 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       block.hidden = false;
     }
 
-    // 分位行：样本为 0 的指标整行不渲染；阈值着色复用 timingColor 口径
+    // 分位行：样本为 0 的指标整行不渲染；阈值着色复用 timingTone 口径
     //（TTFB 5s/10s，耗时 30s/60s），与统计表首字/耗时列一致。
     function renderUsageLatency(u) {
       const block = document.getElementById('usage-latency-block');
       const tbody = document.getElementById('usage-latency-tbody');
       if (!block || !tbody) return;
-      const row = (labelKey, fallback, st, colorFn) => {
+      const row = (labelKey, fallback, st, toneFn) => {
         if (!st || !(Number(st.samples) > 0)) return '';
         const cells = [st.p50, st.p90, st.p95, st.p99, st.max].map(ms => {
           const sec = (Number(ms) || 0) / 1000;
-          return `<td><span class="stats-value-dynamic" style="--stats-accent:${colorFn(sec)};">${sec.toFixed(2)}s</span></td>`;
+          return `<td><span class="${window.toneClass(toneFn(sec)).trim()}">${sec.toFixed(2)}s</span></td>`;
         }).join('');
         return `<tr><td>${escapeHtml(usageT(labelKey, fallback))}</td><td>${formatNumber(st.samples)}</td>${cells}</tr>`;
       };
-      const html = row('stats.usageLatencyTtfb', '上游首字', u.ttfb, getFirstByteTimingColor) +
-        row('stats.usageLatencyDuration', '总耗时', u.duration, getDurationTimingColor);
+      const html = row('stats.usageLatencyTtfb', '上游首字', u.ttfb, getFirstByteTimingTone) +
+        row('stats.usageLatencyDuration', '总耗时', u.duration, getDurationTimingTone);
       tbody.innerHTML = html;
       block.hidden = !html;
     }
@@ -1336,7 +1299,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
             <div class="runtime-transcript-progress">
               <span class="runtime-transcript-progress-bar runtime-transcript-progress-bar--exceeded" style="width:${pct.toFixed(1)}%"></span>
             </div>
-            <span class="stats-value-dynamic">${pct.toFixed(1)}%</span>
+            <span>${pct.toFixed(1)}%</span>
           </div></td>
         </tr>`;
       }).join('');
@@ -1366,7 +1329,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
             <div class="runtime-transcript-progress">
               <span class="runtime-transcript-progress-bar runtime-transcript-progress-bar--${tone}" style="width:${Math.min(100, pct).toFixed(1)}%"></span>
             </div>
-            <span class="stats-value-dynamic">${pct.toFixed(0)}%</span>
+            <span>${pct.toFixed(0)}%</span>
           </div></td>
           <td>${formatNumber(Math.round(Number(m.avg_context_tokens) || 0))}/${formatNumber(m.context_tokens)}</td>
         </tr>`;
