@@ -1394,9 +1394,10 @@ window.WebAuth = window.WebAuth || {
   function formatNumber(num) {
     const n = Number(num);
     if (!Number.isFinite(n)) return '0';
-    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-    return n.toString();
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return Number.isInteger(n) ? String(n) : n.toFixed(2);
   }
 
   // RPM 颜色：低流量绿色，中等橙色，高流量红色

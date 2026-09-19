@@ -277,13 +277,6 @@
       }
     }
 
-    // 格式化 Token 数量为 M 单位
-    function formatTokenCount(count) {
-      if (!count || count === 0) return '0M';
-      const millions = count / 1000000;
-      return millions.toFixed(2) + 'M';
-    }
-
     /**
      * 使用模板引擎渲染令牌行
      */
@@ -484,7 +477,7 @@
         items.push(
           `<span class="token-usage-item token-usage-item--${variant}" title="${title}">` +
             `<span class="token-usage-label">${label}</span>` +
-            `<span class="token-usage-value">${formatTokenCount(count)}</span>` +
+            `<span class="token-usage-value">${formatNumber(count)}</span>` +
           `</span>`
         );
       };
