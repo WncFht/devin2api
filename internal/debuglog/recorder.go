@@ -2332,6 +2332,11 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 // 目录不再钉座——其 02/03* 照常落库，只是退回独立 gzip 形态。
 const deltaBaseCapBytes = 256 << 20
 
+// deltaBaseMinBytes 是钉基座的体量下限：小请求的残差收益按字节封顶
+// （几 KB 的 02/03* 最多省几 KB），不抵每目录一次 dict 表重建与基座
+// 钉量——该目录全程退回独立 gzip。
+const deltaBaseMinBytes = 8 << 10
+
 // encodeStageFile 按阶段名选入库编码：01 钉脱敏后字节为本目录 delta
 // 基座并走 CAS 切块（跨目录重复前缀按内容寻址共享，切不出 ≥2 块时
 // EncodeCASManifest 回退独立编码）；02 与 03-devin-request*（含
@@ -2342,10 +2347,12 @@ const deltaBaseCapBytes = 256 << 20
 func (recorder *Recorder) encodeStageFile(name string, data []byte) stagedFile {
 	switch {
 	case name == StageHTTPRequest:
-		if recorder.manager.deltaBaseBytes.Add(int64(len(data))) <= deltaBaseCapBytes {
-			recorder.deltaBase = data
-		} else {
-			recorder.manager.deltaBaseBytes.Add(-int64(len(data)))
+		if len(data) >= deltaBaseMinBytes {
+			if recorder.manager.deltaBaseBytes.Add(int64(len(data))) <= deltaBaseCapBytes {
+				recorder.deltaBase = data
+			} else {
+				recorder.manager.deltaBaseBytes.Add(-int64(len(data)))
+			}
 		}
 		// CAS 编码复用本协程的 PayloadEncoder（切块与文件行同 gzip
 		// 口径）——01 也是唯一 CAS 化阶段名。
