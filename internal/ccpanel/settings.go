@@ -94,9 +94,9 @@ type PanelSettings struct {
 	st       *store.Store
 	defs     []settingDef
 	byKey    map[string]*settingDef
-	values   map[string]string // 覆盖值；不设则按 live/def 取生效值
-	updated  map[string]int64  // 各键最近覆盖时刻（unix 秒）
-	defaults atomic.Value      // SettingDefaults；def/reset 只读，atomic 免锁
+	values   map[string]string               // 覆盖值；不设则按 live/def 取生效值
+	updated  map[string]int64                // 各键最近覆盖时刻（unix 秒）
+	defaults atomic.Pointer[SettingDefaults] // def/reset 只读，atomic 免锁
 }
 
 // NewPanelSettings 创建键仓并从 settings 表水合覆盖项；deps
@@ -109,7 +109,7 @@ func NewPanelSettings(st *store.Store, deps SettingsDeps) (*PanelSettings, error
 		values:  map[string]string{},
 		updated: map[string]int64{},
 	}
-	s.defaults.Store(SettingDefaults{
+	s.defaults.Store(&SettingDefaults{
 		Devin:           deps.DevinConfig(),
 		MaxConcurrency:  deps.MaxConcurrency(),
 		QuotaInterval:   deps.QuotaInterval(),
@@ -742,12 +742,12 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 // reload 后由 main 调用——覆盖值不进来，reset 回落目标与 default_value
 // 展示因此始终反映当前文件而非启动态。
 func (s *PanelSettings) ResampleDefaults(d SettingDefaults) {
-	s.defaults.Store(d)
+	s.defaults.Store(&d)
 }
 
 // loadDefaults 读当前默认值快照（def 闭包共用）。
 func (s *PanelSettings) loadDefaults() SettingDefaults {
-	return s.defaults.Load().(SettingDefaults)
+	return *s.defaults.Load()
 }
 
 // ApplyAll 重放全部覆盖项（启动加载后与 config reload 后调用——
@@ -980,13 +980,16 @@ func (h *Handler) adminBatchUpdateSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	keys := make([]string, 0, len(req))
+	h.settings.mu.Lock()
 	for k := range req {
 		if _, ok := h.settings.byKey[k]; !ok {
+			h.settings.mu.Unlock()
 			respondError(w, http.StatusNotFound, fmt.Sprintf("setting not found: %s", k))
 			return
 		}
 		keys = append(keys, k)
 	}
+	h.settings.mu.Unlock()
 	sort.Strings(keys)
 	for _, k := range keys {
 		if err := h.settings.set(k, req[k]); err != nil {

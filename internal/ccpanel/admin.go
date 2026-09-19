@@ -162,7 +162,6 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	data["duration_seconds"] = duration
 	data["is_today"] = isToday
-	data["rpm_stats"] = h.rpmStatsFiltered(r.Context(), since, until, statScope{}, isToday, "")
 
 	// 时间窗覆盖：按 key_hash 聚合格子，逐令牌覆盖累计字段。
 	// 口径对齐 GetAuthTokenStatsInRange：success/failure 计数非 499，
@@ -175,8 +174,16 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 		cost float64
 		peak int64 // 单槽非 499 峰值（peak_rpm 的分子，折算分钟速率）
 	}
+	// 同一遍扫描顺带积出全局 rpm total/peak（含空 key_hash 格——
+	// 全局口径不按令牌过滤），省掉 rpmStatsFiltered 的重扫。
+	var rpmTotal, rpmPeak int64
 	byKH := map[string]*tokenAgg{}
 	h.eachCell(r.Context(), since, until, statScope{}, func(key store.LogCellKey, c store.LogCellTotals) {
+		n := c.Requests - c.Gone
+		rpmTotal += n
+		if n > rpmPeak {
+			rpmPeak = n
+		}
 		if key.KeyHash == "" {
 			return
 		}
@@ -191,6 +198,11 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 			a.peak = n
 		}
 	})
+	data["rpm_stats"] = h.rpmStatsFiltered(r.Context(), since, until, statScope{}, isToday, "", rpmTotal, rpmPeak)
+	var recentByKH map[string]float64
+	if isToday {
+		recentByKH = h.recentRPMByKeyHash(r.Context())
+	}
 	for i, t := range list {
 		ov := &tokens[i]
 		a := byKH[t.KeyHash()]
@@ -219,7 +231,7 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 		ov.AvgRPM = float64(ov.SuccessCount+ov.FailureCount) * 60 / duration
 		ov.RecentRPM = 0
 		if isToday {
-			ov.RecentRPM = h.recentRPM(r.Context(), "", t.KeyHash())
+			ov.RecentRPM = recentByKH[t.KeyHash()]
 			if ov.PeakRPM < ov.RecentRPM {
 				ov.PeakRPM = ov.RecentRPM
 			}
