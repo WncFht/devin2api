@@ -296,9 +296,14 @@ type detachedRegistry struct {
 	// ledgerDrops 记台账写失败数（争用超时/库不可用）——台账存在的目的
 	// 就是兜住争用期的丢痕迹，它自己丢了多少必须有数。
 	ledgerDrops int64
-	events      [detachedEventCap]DetachedEvent
-	eventHead   int
-	eventSize   int
+	// seeded 记开机播种灌回的 completed 条目数；blobDrops 记种子层的
+	// 自身丢失（编码失败/写库失败/坏行解码失败）——持久层的兑现率与
+	// 折损率都从这俩数读，与台账 ledgerDrops 分开记账。
+	seeded    int64
+	blobDrops int64
+	events    [detachedEventCap]DetachedEvent
+	eventHead int
+	eventSize int
 }
 
 // detachedEventCap 是缓存事件环容量：脱钩/挂接/终局/移除低频，
@@ -309,7 +314,9 @@ const detachedEventCap = 64
 // 到场但条目不可用）、cross_miss（同键请求到场但条目在兄弟 lane，
 // detail 记 <owner>:<state>）、evict（移除，detail 记原因）、
 // finish（泵终局，detail 记四档终态）、truncate（缓冲越预算冻结——
-// 04 标记行是尽力而为，事件环给截断留权威痕迹）。
+// 04 标记行是尽力而为，事件环给截断留权威痕迹）、seed（开机从
+// detached_blobs 灌回的条目——与 admit 分列：它没有活泵，只是前
+// 进程完成态的借尸还魂）。
 const (
 	detachedEventAdmit     = "admit"
 	detachedEventAttach    = "attach"
@@ -318,6 +325,7 @@ const (
 	detachedEventEvict     = "evict"
 	detachedEventFinish    = "finish"
 	detachedEventTruncate  = "truncate"
+	detachedEventSeed      = "seed"
 )
 
 // 移除原因（evict 事件的 detail）：expired 是 TTL 到点（lookup 惰性
@@ -401,6 +409,8 @@ func detachedEventLabel(kind, detail string) string {
 		return "泵失败"
 	case detachedEventTruncate:
 		return "缓冲截断"
+	case detachedEventSeed:
+		return "播种"
 	}
 	return kind
 }
@@ -453,6 +463,12 @@ type DetachedStats struct {
 	// 就是兜住争用期的丢痕迹，它自身的丢失量必须可观测（sqlite 争用
 	// 风暴期超时写失败时这里涨）。
 	LedgerDrops int64 `json:"ledger_drops"`
+	// Seeded 是开机从 detached_blobs 灌回的 completed 条目数——交接后
+	// 持久层兑现了几条的直接口径。BlobDrops 是种子层自身丢失计数
+	//（编码/写库/坏行解码失败），与 LedgerDrops 分列：台账丢的是
+	// 取证痕迹，这里丢的是真重放价值。
+	Seeded    int64 `json:"seeded"`
+	BlobDrops int64 `json:"blob_drops"`
 
 	Events []DetachedEvent `json:"events,omitempty"` // 新在前
 }
@@ -486,6 +502,8 @@ func mergeDetachedStats(per map[string]DetachedStats) DetachedStats {
 		merged.OrphansCrossLane += s.OrphansCrossLane
 		merged.OrphanBufferedEvents += s.OrphanBufferedEvents
 		merged.LedgerDrops += s.LedgerDrops
+		merged.Seeded += s.Seeded
+		merged.BlobDrops += s.BlobDrops
 		for _, ev := range s.Events {
 			ev.Lane = name
 			merged.Events = append(merged.Events, ev)
@@ -754,9 +772,14 @@ func (registry *detachedRegistry) evictByOriginDir(dir string) {
 func (registry *detachedRegistry) noteFinish(key, reason string, entry *detachedEntry) {
 	entry.mu.Lock()
 	originDir := entry.originDir
+	// completed 终局的缓冲事件引用一并取出：定态后泵是唯一写者且已
+	// 退场，切片不会再被追加——锁外编码落库（persistBlob）不占双锁。
+	var events []llm.ResponseEvent
+	if reason == detachFinishCompleted {
+		events = entry.events
+	}
 	entry.mu.Unlock()
 	registry.mu.Lock()
-	defer registry.mu.Unlock()
 	switch reason {
 	case detachFinishCompleted:
 		registry.finishedCompleted++
@@ -768,6 +791,10 @@ func (registry *detachedRegistry) noteFinish(key, reason string, entry *detached
 		registry.finishedFailed++
 	}
 	registry.pushEvent(detachedEventFinish, key, originDir, reason)
+	registry.mu.Unlock()
+	if events != nil {
+		registry.persistBlob(key, events, originDir)
+	}
 }
 
 // noteTruncated 记一次缓冲截断：append 越字节预算冻结缓冲时由 tee 点
@@ -786,6 +813,15 @@ func (registry *detachedRegistry) noteTruncated(key string, entry *detachedEntry
 	defer registry.mu.Unlock()
 	registry.truncated++
 	registry.pushEvent(detachedEventTruncate, key, originDir, "")
+}
+
+// noteBlobDrop 记一次种子层丢失：blob 编码失败、写库失败与播种时坏行
+// 解码失败都计入 blobDrops——持久层兑现重放价值的折损必须有数，
+// 事件环不为这类后台损耗产行（台账侧已有 ledgerDrops 同口径先例）。
+func (registry *detachedRegistry) noteBlobDrop() {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.blobDrops++
 }
 
 // pushEvent 追加一条生命周期事件；调用方须持 mu。key 截前 12 位——
@@ -882,6 +918,8 @@ func (registry *detachedRegistry) stats() DetachedStats {
 	stats.OrphansCrossLane = registry.orphansCrossLane
 	stats.OrphanBufferedEvents = registry.orphanBuffered
 	stats.LedgerDrops = registry.ledgerDrops
+	stats.Seeded = registry.seeded
+	stats.BlobDrops = registry.blobDrops
 	for i := 1; i <= registry.eventSize; i++ {
 		stats.Events = append(stats.Events, registry.events[(registry.eventHead-i+detachedEventCap)%detachedEventCap])
 	}

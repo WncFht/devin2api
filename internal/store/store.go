@@ -485,6 +485,11 @@ func (s *Store) Maintain(ctx context.Context, logRowDays int64) error {
 	if _, err := s.PruneQuotaSamples(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	// detached_blobs 与 logs 保留期无关：消费窗口是条目 TTL（分钟级），
+	// 按自有保留界清理。
+	if _, err := s.PruneDetachedBlobs(ctx, time.Now().Add(-detachedBlobRetention).UnixMilli()); err != nil {
+		errs = append(errs, err)
+	}
 	// CAS 的 mark-sweep 放养护而不放淘汰路径：对象是表不是目录，
 	// 且必须先于 vacuum 跑，孤儿页才能进 freelist 被当轮回收。
 	if err := s.ReapOrphanBlobs(ctx); err != nil {

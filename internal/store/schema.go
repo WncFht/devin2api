@@ -306,6 +306,22 @@ var schemaStatements = []string{
 		path TEXT NOT NULL DEFAULT ''
 	)`,
 
+	// detached_blobs：脱钩流完成缓存的跨进程种子——completed 条目
+	// finish 时把缓冲事件序列编成一条 blob 落库，REUSEPORT 交接后新
+	// 进程开机按 lane+TTL 灌回注册表（写方与编解码见 adapter/devin
+	// detached_blob.go）。key 是语义请求哈希全量；finished_at 记 unix
+	// 毫秒，既是播种的 TTL 判据也是同键冲突的新旧仲裁（后完成者胜）。
+	`CREATE TABLE IF NOT EXISTS detached_blobs (
+		"key" TEXT PRIMARY KEY,
+		lane TEXT NOT NULL DEFAULT '',
+		origin_dir TEXT NOT NULL DEFAULT '',
+		finished_at INTEGER NOT NULL,
+		payload BLOB NOT NULL
+	)`,
+	// 保留期清理（PruneDetachedBlobs 按 finished_at 范围删）与开机
+	// 播种扫描的支点。
+	`CREATE INDEX IF NOT EXISTS idx_detached_blobs_finished ON detached_blobs(finished_at)`,
+
 	// runtime_state：键值小状态。gate:<lane> 存冷却闩 JSON；
 	// import_base_done / debug_dirs_imported 是导入进度标记。
 	`CREATE TABLE IF NOT EXISTS runtime_state (

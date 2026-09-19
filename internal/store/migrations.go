@@ -257,6 +257,16 @@ var schemaMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		// detached_blobs 是全新表：幂等建表路径（schema.go）已覆盖新库
+		// 与存量库，这里登记版本让 schema_migrations 如实反映演进史
+		//（同 0017_detached_events 先例）。0018_store_opens 由并行分支
+		// feat/store-open-ledger 占用，本迁移取下一空号。
+		version: "0019_detached_blobs",
+		apply: func(_ *sql.Tx) error {
+			return nil
+		},
+	},
 }
 
 // migrationLockBudget 是整轮迁移等写锁的墙钟预算：BEGIN IMMEDIATE 在

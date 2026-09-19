@@ -290,6 +290,10 @@ func New(config Config) (*Adapter, error) {
 		}
 	}
 	adapter.warm = newCacheWarmer(adapter, config.Warm)
+	// 交接播种：REUSEPORT 双进程重叠期前任完成的脱钩条目经
+	// detached_blobs 灌回本 lane——同键重试在新进程命中即重放，
+	// 不再付一次静默上游再生。台账缺席时空转不拦启动。
+	adapter.detached.seed()
 
 	return adapter, nil
 }
