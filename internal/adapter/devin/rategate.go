@@ -161,6 +161,14 @@ type rateGate struct {
 	pendingWindows  []*store.GateWindow
 	persistFailures int
 	persistDropped  int
+	// persistInFlight/persistDone 是在途窗口持久化协程的计数与落定信号：
+	// persistWindow 交出协程前 +1（>0 时 persistDone 非 nil），协程收尾
+	// （含失败挂回之后）-1，归零时 close 并置 nil。FlushPendingWindows
+	// 凭它在排空时等写协程落定——失败行挂回缓冲后才能被冲刷看见。
+	// 不用 sync.WaitGroup：排空期在途流量仍可能触发 persistWindow 的
+	// Add，与 Wait 并发在空计数上属 misuse（会 panic）。均在 mu 下读写。
+	persistInFlight int
+	persistDone     chan struct{}
 	// 闩迁移事件环：计数器只说发生过几次上闩，事件环回答「什么时候闩的、
 	// 闩了多久、怎么解的」——概览趋势图的闩时段底色与系统页事件表同源。
 	events    [gateEventCap]GateEvent
@@ -598,6 +606,10 @@ func (gate *rateGate) persistWindow(ws time.Time) {
 	pending := gate.pendingWindows
 	gate.pendingWindows = nil
 	rows := append(pending, row)
+	gate.persistInFlight++
+	if gate.persistDone == nil {
+		gate.persistDone = make(chan struct{})
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), gateWindowStoreTimeout)
 		defer cancel()
@@ -605,9 +617,18 @@ func (gate *rateGate) persistWindow(ws time.Time) {
 			if err := gate.states.InsertGateWindow(ctx, r); err != nil {
 				slog.Warn("gate window persist failed", "lane", gate.lane, "error", err)
 				gate.stashWindows(rows[i:])
-				return
+				break
 			}
 		}
+		// 计数落定放在失败挂回之后：FlushPendingWindows 等到落定才取
+		// 缓冲，挂回的行必须赶在它取走前入帐。
+		gate.mu.Lock()
+		gate.persistInFlight--
+		if gate.persistInFlight == 0 {
+			close(gate.persistDone)
+			gate.persistDone = nil
+		}
+		gate.mu.Unlock()
 	}()
 }
 
@@ -623,6 +644,39 @@ func (gate *rateGate) stashWindows(rows []*store.GateWindow) {
 	for len(gate.pendingWindows) > gatePersistRetryCap {
 		gate.pendingWindows = gate.pendingWindows[1:]
 		gate.persistDropped++
+	}
+}
+
+// FlushPendingWindows 在排空起点对未落库的窗口行做最后一轮同步冲刷：
+// 先等在途持久化协程落定（失败行会挂回 pendingWindows，跳过等待直接
+// 取缓冲会漏掉它们），再取走缓冲整批写。全程共用调用方的短 ctx——
+// 排空有时限，写连接卡死不能拖住关停；预算内写不完的行与进程直接
+// 退出一样丢弃（best-effort，不是持久化保证），失败行照常挂回缓冲
+// 并计 persistFailures。
+func (gate *rateGate) FlushPendingWindows(ctx context.Context) {
+	if gate == nil || gate.states == nil {
+		return
+	}
+	gate.mu.Lock()
+	done := gate.persistDone
+	gate.mu.Unlock()
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return
+		}
+	}
+	gate.mu.Lock()
+	rows := gate.pendingWindows
+	gate.pendingWindows = nil
+	gate.mu.Unlock()
+	for i, r := range rows {
+		if err := gate.states.InsertGateWindow(ctx, r); err != nil {
+			slog.Warn("gate window drain flush failed", "lane", gate.lane, "error", err)
+			gate.stashWindows(rows[i:])
+			return
+		}
 	}
 }
 

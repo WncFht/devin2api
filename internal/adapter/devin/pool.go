@@ -1543,6 +1543,21 @@ func (pool *Pool) BeginDrain() {
 	}
 }
 
+// FlushPendingWindows 逐 lane 冲刷闸门窗口行重放缓冲（排空收尾）：全池
+// 并行共享调用方的 ctx 预算——串行逐 lane 会让单 lane 写卡死吃满整份
+// 排空预算。
+func (pool *Pool) FlushPendingWindows(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, lane := range pool.snapshot() {
+		wg.Add(1)
+		go func(adapter *Adapter) {
+			defer wg.Done()
+			adapter.FlushPendingWindows(ctx)
+		}(lane.adapter)
+	}
+	wg.Wait()
+}
+
 // TokenFunc 返回「首 lane 当前凭据」的读取函数：每次求值重解析
 // firstLane——热更摘掉首号或模式切换后，面板 seat/状态类调用
 // 落到当前首 lane 而不是已关闭 lane 的冻结 token。要按号取凭据

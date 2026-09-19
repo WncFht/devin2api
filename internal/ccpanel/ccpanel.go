@@ -157,6 +157,9 @@ type Handler struct {
 	// detachEvictor 按来源调试目录逐出脱钩完成缓存条目：面板 abort 在
 	// Abort 返回 true 后补调，收口 abort-after-detach 残留窗；nil 跳过。
 	detachEvictor func(dir string)
+	// gateFlush 在排空起点冲刷各 lane 闸门窗口行重放缓冲（best-effort
+	// 落库收尾，共享 ctx 预算）；nil 时 BeginDrain 跳过。
+	gateFlush func(ctx context.Context)
 
 	versionMu sync.RWMutex
 	version   string
@@ -363,6 +366,12 @@ func (h *Handler) SetAccountDetachedStats(fn func() map[string]devin.DetachedSta
 // 用：Abort 返回 true 后清掉残留窗落册的条目，被掐死的生成不留缓存重放）。
 func (h *Handler) SetDetachEvictor(fn func(dir string)) {
 	h.detachEvictor = fn
+}
+
+// SetGateFlusher 注入闸门窗口行冲刷口：BeginDrain 在排空起点以短 ctx
+// 调用，把各 lane 重放缓冲里未落库的窗口行做最后一轮同步落库。
+func (h *Handler) SetGateFlusher(fn func(ctx context.Context)) {
+	h.gateFlush = fn
 }
 
 // panelRoute 是路由表的一行：method+pattern 是 chi 挂载键，handler 是含

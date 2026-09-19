@@ -383,6 +383,86 @@ func TestRateGateWindowPersistDrop(t *testing.T) {
 	}
 }
 
+// 排空冲刷把重放缓冲里的挂账行同步落库：进程退出不再丢等待下一窗口
+// 重放的行；冲刷后缓冲清空。
+func TestFlushPendingWindows(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "gate.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	gate := newRateGate(GateConfig{MaxRPM: 10}, db, store.GateStateKey("default"))
+	base := time.Now().Truncate(time.Minute).Unix()
+	gate.mu.Lock()
+	gate.pendingWindows = []*store.GateWindow{
+		{Lane: "default", WindowStart: base - 120, Quota: 10, UsedFg: 3},
+		{Lane: "default", WindowStart: base - 60, Quota: 10, UsedFg: 7},
+	}
+	gate.mu.Unlock()
+	gate.FlushPendingWindows(context.Background())
+	rows, err := db.ListGateWindows(context.Background(), "default", 0, 0)
+	if err != nil {
+		t.Fatalf("ListGateWindows: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 flushed windows", len(rows))
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if len(gate.pendingWindows) != 0 {
+		t.Fatalf("pendingWindows = %d, want empty after flush", len(gate.pendingWindows))
+	}
+}
+
+// 冲刷先等在途持久化协程落定再取缓冲：在途写失败挂回的行必须赶上本轮
+// 冲刷，而不是落定前被跳过、随进程退出丢失。
+func TestFlushPendingWindowsWaitsInflight(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "gate.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	gate := newRateGate(GateConfig{MaxRPM: 10}, db, store.GateStateKey("default"))
+	base := time.Now().Truncate(time.Minute).Unix()
+	// 模拟一笔在途持久化协程：计数 1 + 未关闭的落定信号。
+	gate.mu.Lock()
+	gate.persistInFlight = 1
+	gate.persistDone = make(chan struct{})
+	gate.pendingWindows = []*store.GateWindow{{Lane: "default", WindowStart: base - 60, Quota: 10}}
+	gate.mu.Unlock()
+	flushed := make(chan struct{})
+	go func() {
+		gate.FlushPendingWindows(context.Background())
+		close(flushed)
+	}()
+	// 协程未落定前冲刷必须阻塞——抢先取缓冲会把挂回行丢给进程退出。
+	select {
+	case <-flushed:
+		t.Fatal("flush returned before in-flight persist settled")
+	case <-time.After(50 * time.Millisecond):
+	}
+	// 协程收尾：失败行挂回缓冲后计数归零、关落定信号（与 persistWindow
+	// 协程尾声同序——挂回先于落定，冲刷才看得见）。
+	gate.mu.Lock()
+	gate.pendingWindows = append(gate.pendingWindows, &store.GateWindow{Lane: "default", WindowStart: base - 120, Quota: 10})
+	gate.persistInFlight = 0
+	close(gate.persistDone)
+	gate.persistDone = nil
+	gate.mu.Unlock()
+	select {
+	case <-flushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flush did not return after in-flight settled")
+	}
+	rows, err := db.ListGateWindows(context.Background(), "default", 0, 0)
+	if err != nil {
+		t.Fatalf("ListGateWindows: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (seeded + re-stashed)", len(rows))
+	}
+}
+
 // 续试重发的放行单列进 retry_admits 窗口账：挂 WithGateRetry 的放行
 // 计入 retry_admits，首发不挂不计——两者都照常占 used 配额（used
 // 与 retry_admits 是总数与子集的关系，不是分列口径）。

@@ -287,6 +287,9 @@ func main() {
 	ccPanel.SetAccountLaneStates(devinPool.AccountLaneStates)
 	ccPanel.SetAccountDetachedStats(devinPool.AccountDetachedStats)
 	ccPanel.SetDetachEvictor(devinPool.EvictDetachedByOriginDir)
+	// 排空收尾：面板 BeginDrain 经此把各 lane 闸门窗口行重放缓冲做
+	// 最后一轮同步落库（best-effort，短 ctx 不拖关停）。
+	ccPanel.SetGateFlusher(devinPool.FlushPendingWindows)
 	// 配额探测回灌：面板采样与 test 端点把日/周剩余百分比喂给池侧
 	// 降权簿记（quota_low 阈值判定在 adapter 内）。
 	ccPanel.SetAccountQuotaSignal(devinPool.NoteQuotaSample)

@@ -357,6 +357,12 @@ func (adapter *Adapter) BeginDrain() {
 	adapter.warm.BeginDrain()
 }
 
+// FlushPendingWindows 冲刷闸门窗口行重放缓冲（排空收尾的 best-effort
+// 落库）：同步直写，ctx 预算内写不完的行随进程退出丢弃。
+func (adapter *Adapter) FlushPendingWindows(ctx context.Context) {
+	adapter.gate.FlushPendingWindows(ctx)
+}
+
 // currentToken 返回当前生效的上游凭据：minted（APIKey 铸出的 session
 // token）非空时优先，否则回落声明侧 token。
 func (adapter *Adapter) currentToken() string {

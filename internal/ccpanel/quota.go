@@ -92,6 +92,11 @@ func (h *Handler) QuotaInterval() time.Duration {
 	return h.quotaInterval
 }
 
+// gateDrainFlushTimeout 是排空起点闸门窗口行冲刷的总预算：全部 lane
+// 共享——写连接被批量事务占压时超时返回，进程关停不被拖住；预算内
+// 写不完的行与今日一样随退出丢弃。
+const gateDrainFlushTimeout = 5 * time.Second
+
 // BeginDrain 实现 app 排空钩子（可选接口，App.BeginDrain 经断言调用）：
 // 停掉配额采样协程——采样每轮对每个 lane 打一次上游并写 quota_samples，
 // 是排空语义「不再制造新上游工作」该收的后台生产者；在途轮次随 ctx
@@ -99,13 +104,22 @@ func (h *Handler) QuotaInterval() time.Duration {
 // 回读仍应反映配置而非「被排空归零」。幂等。quotaDrained 闩置位后
 // 不可逆：排空窗口内的 config reload 与设置写入仍走 SetQuotaInterval，
 // 闩保证它们只记账、不把已收束的上游生产者重新武装。
+// 顺带冲刷闸门窗口行重放缓冲：写失败的挂账行平时等下一窗口翻页重放，
+// 进程退出即丢——排空起点给它们最后一轮同步落库机会（best-effort，
+// gateDrainFlushTimeout 内写不完照样丢）。冲刷放在 quotaMu 外：同步
+// 落库可能吃满整份预算，持锁会堵排空窗口内 SetQuotaInterval 的簿记。
 func (h *Handler) BeginDrain() {
 	h.quotaMu.Lock()
-	defer h.quotaMu.Unlock()
 	h.quotaDrained = true
 	if h.quotaCancel != nil {
 		h.quotaCancel()
 		h.quotaCancel = nil
+	}
+	h.quotaMu.Unlock()
+	if h.gateFlush != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), gateDrainFlushTimeout)
+		defer cancel()
+		h.gateFlush(ctx)
 	}
 }
 
