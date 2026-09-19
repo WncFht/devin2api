@@ -219,7 +219,8 @@
       kv(t('accounts.f.waiters'), esc(num(g.waiters || 0))),
       kv(t('accounts.f.latchCount'), esc(num(g.latch_count || 0))),
       kv(t('accounts.f.drip'), esc(num(g.drip_count || 0))),
-      kv(t('accounts.f.rejects'), esc(num((g.reject_latched_count || 0) + (g.reject_budget_count || 0))))
+      kv(t('accounts.f.rejects'), esc(num((g.reject_latched_count || 0) + (g.reject_budget_count || 0)))),
+      kv(t('accounts.f.pendingWindows'), esc(num(g.pending_windows || 0)))
     ].join('') + `</div>`;
     return sec('accounts.sec.gate', inner);
   }

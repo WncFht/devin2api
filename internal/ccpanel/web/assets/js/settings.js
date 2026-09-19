@@ -309,7 +309,8 @@ const runtimeMetricDomains = [
       { key: 'reject_latched_count', labelKey: 'settings.runtimeMetrics.metric.gateRejectLatched' },
       { key: 'reject_budget_count', labelKey: 'settings.runtimeMetrics.metric.gateRejectBudget' },
       { key: 'reject_yield_count', labelKey: 'settings.runtimeMetrics.metric.gateRejectYield' },
-      { key: 'window_next', labelKey: 'settings.runtimeMetrics.metric.gateWindowNext', format: 'isoTime' }
+      { key: 'window_next', labelKey: 'settings.runtimeMetrics.metric.gateWindowNext', format: 'isoTime' },
+      { key: 'pending_windows', labelKey: 'settings.runtimeMetrics.metric.gatePendingWindows' }
     ],
     renderExtra: renderGateExtra
   },
@@ -360,6 +361,22 @@ const runtimeMetricDomains = [
     renderExtra: renderDebuglogExtra
   },
   {
+    sourceKey: 'quota',
+    titleKey: 'settings.runtimeMetrics.group.quota',
+    descriptionKey: 'settings.runtimeMetrics.quotaNote',
+    metrics: [
+      { key: 'persist_failures', labelKey: 'settings.runtimeMetrics.metric.quotaPersistFailures' },
+      { key: 'persist_dropped', labelKey: 'settings.runtimeMetrics.metric.quotaPersistDropped' },
+      { key: 'persist_replayed', labelKey: 'settings.runtimeMetrics.metric.quotaPersistReplayed' },
+      { key: 'pending_samples', labelKey: 'settings.runtimeMetrics.metric.quotaPendingSamples' },
+      { key: 'rounds_started', labelKey: 'settings.runtimeMetrics.metric.quotaRoundsStarted' },
+      { key: 'rounds_aborted', labelKey: 'settings.runtimeMetrics.metric.quotaRoundsAborted' },
+      { key: 'last_round_started_at', labelKey: 'settings.runtimeMetrics.metric.quotaLastRoundStarted', format: 'unixSeconds' },
+      { key: 'last_round_finished_at', labelKey: 'settings.runtimeMetrics.metric.quotaLastRoundFinished', format: 'unixSeconds' }
+    ],
+    renderExtra: renderQuotaExtra
+  },
+  {
     sourceKey: 'storage',
     titleKey: 'settings.runtimeMetrics.group.storage',
     descriptionKey: 'settings.runtimeMetrics.storageNote',
@@ -372,6 +389,19 @@ const runtimeMetricDomains = [
       { key: 'analytics_reads_primary', labelKey: 'settings.runtimeMetrics.metric.analyticsReadsPrimary', format: 'boolean' },
       { key: 'primary_sync_last_success_unix_ms', labelKey: 'settings.runtimeMetrics.metric.primarySyncLastSuccess', format: 'unixMilliseconds' }
     ]
+  },
+  {
+    // 读失败（老库无表/表被污染）时服务端省略整组——optional 收起而非
+    // 报错，与 storeOpensView 的 fail-soft 口径一致。
+    sourceKey: 'store',
+    titleKey: 'settings.runtimeMetrics.group.store',
+    descriptionKey: 'settings.runtimeMetrics.storeNote',
+    optional: true,
+    metrics: [
+      { key: 'opens_total', labelKey: 'settings.runtimeMetrics.metric.storeOpensTotal' },
+      { key: 'opens_distinct_pids_24h', labelKey: 'settings.runtimeMetrics.metric.storeDistinctPids' }
+    ],
+    renderExtra: renderStoreExtra
   },
   {
     sourceKey: 'warm',
@@ -1262,6 +1292,15 @@ function formatRuntimeTimestamp(value) {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(runtimeMetricsLocale());
 }
 
+// quota 组的采样轮时刻是 unix 秒（store_opens.at 是毫秒、gate 时刻是
+// RFC3339——三个时刻源三种刻度，各自专用 formatter）。
+function formatRuntimeUnixSeconds(value) {
+  const numeric = normalizeRuntimeMetric(value);
+  if (numeric === null || numeric <= 0) return '—';
+  const date = new Date(numeric * 1000);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(runtimeMetricsLocale());
+}
+
 function formatRuntimePercent(value) {
   const numeric = normalizeRuntimeMetric(value);
   if (numeric === null) return '—';
@@ -1314,6 +1353,7 @@ function formatRuntimeMetric(metric, stats) {
   if (metric.format === 'decimal') return formatRuntimeNumber(stats[metric.key]);
   if (metric.format === 'boolean') return formatRuntimeBoolean(stats[metric.key]);
   if (metric.format === 'unixMilliseconds') return formatRuntimeTimestamp(stats[metric.key]);
+  if (metric.format === 'unixSeconds') return formatRuntimeUnixSeconds(stats[metric.key]);
   if (metric.format === 'isoTime') return formatRuntimeISOTime(stats[metric.key]);
   if (metric.format === 'text') {
     const value = stats[metric.key];
@@ -1573,6 +1613,84 @@ function renderDebuglogExtra(stats) {
     holder: failure.holder || '—',
     time: formatRuntimeISOTime(failure.last_at)
   }))}</div>`;
+}
+
+// 配额采样逐 lane 阶段账（quota.lanes）：fetch_ok 涨而 persist_ok 与
+// failed 都不动即 fetch→persist 之间静默丢点；failed 列内嵌
+// fetch/no_plan/persist 分原因小计。last_error 是服务端粘滞字段——
+// 跨成功保留、恢复后仍可溯源；按 rejects UA 同款惯例截断、全文进
+// title（错误文本可能携带上游/SQLite 细节，转义同其它列）。
+function renderQuotaExtra(stats) {
+  const lanes = stats.lanes && typeof stats.lanes === 'object' && !Array.isArray(stats.lanes)
+    ? stats.lanes : {};
+  const names = Object.keys(lanes).sort();
+  if (!names.length) return '';
+  const rows = names.map((name) => {
+    const lane = lanes[name] && typeof lanes[name] === 'object' && !Array.isArray(lanes[name])
+      ? lanes[name] : {};
+    const failures = lane.failures && typeof lane.failures === 'object' && !Array.isArray(lane.failures)
+      ? lane.failures : {};
+    const split = ['fetch', 'no_plan', 'persist']
+      .map((k) => normalizeRuntimeMetric(failures[k]) || 0)
+      .join('/');
+    const err = typeof lane.last_error === 'string' ? lane.last_error.trim() : '';
+    const errText = err ? (err.length > 80 ? err.slice(0, 80) + '…' : err) : '—';
+    return `<tr>
+      <td><code class="runtime-metric-key">${escapeHtml(name)}</code></td>
+      <td>${escapeHtml(formatRuntimeInteger(lane.rounds_started))}</td>
+      <td>${escapeHtml(formatRuntimeInteger(lane.rounds_fetch_ok))}</td>
+      <td>${escapeHtml(formatRuntimeInteger(lane.rounds_persist_ok))}</td>
+      <td>${escapeHtml(formatRuntimeInteger(lane.rounds_failed))} <span class="runtime-metric-key">${escapeHtml(split)}</span></td>
+      <td>${escapeHtml(formatRuntimeUnixSeconds(lane.last_started_at))}</td>
+      <td>${escapeHtml(formatRuntimeUnixSeconds(lane.last_finished_at))}</td>
+      <td${err ? ` title="${escapeHtml(err)}"` : ''}>${escapeHtml(errText)}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <div class="runtime-metrics-subsection-header">
+      <h4>${escapeHtml(t('settings.runtimeMetrics.quotaLanes'))}</h4>
+    </div>
+    ${renderRuntimeMetricTable([
+      t('settings.runtimeMetrics.quotaColLane'),
+      t('settings.runtimeMetrics.quotaColStarted'),
+      t('settings.runtimeMetrics.quotaColFetchOk'),
+      t('settings.runtimeMetrics.quotaColPersistOk'),
+      t('settings.runtimeMetrics.quotaColFailed'),
+      t('settings.runtimeMetrics.quotaColLastStarted'),
+      t('settings.runtimeMetrics.quotaColLastFinished'),
+      t('settings.runtimeMetrics.quotaColLastError')
+    ], rows)}`;
+}
+
+// store_opens 台账投影：opens_recent 里出现第二个 pid/build 即有别处
+// 进程附着同一状态库（reuseport 交接残留曾静默持锁三天）——distinct
+// pid>1 时先出警告横幅再上最近行表。argv 服务端已截到 200 rune，
+// 这里只做转义；at 是 unix 毫秒。
+function renderStoreExtra(stats) {
+  let html = '';
+  const distinct = normalizeRuntimeMetric(stats.opens_distinct_pids_24h);
+  if (distinct !== null && distinct > 1) {
+    html += `<div class="custom-rules-error" role="alert">${escapeHtml(t('settings.runtimeMetrics.storeMultiPid', { count: distinct }))}</div>`;
+  }
+  const recent = Array.isArray(stats.opens_recent) ? stats.opens_recent : [];
+  if (!recent.length) return html;
+  const rows = recent.map((o) => `<tr>
+    <td>${escapeHtml(formatRuntimeTimestamp(o.at))}</td>
+    <td>${escapeHtml(formatRuntimeInteger(o.pid))}</td>
+    <td>${escapeHtml(o.build || '—')}</td>
+    <td><code class="runtime-metric-key">${escapeHtml(o.argv || '—')}</code></td>
+  </tr>`).join('');
+  html += `
+    <div class="runtime-metrics-subsection-header">
+      <h4>${escapeHtml(t('settings.runtimeMetrics.storeOpensRecent'))}</h4>
+    </div>
+    ${renderRuntimeMetricTable([
+      t('settings.runtimeMetrics.eventColTime'),
+      t('settings.runtimeMetrics.storeColPid'),
+      t('settings.runtimeMetrics.storeColBuild'),
+      t('settings.runtimeMetrics.storeColArgv')
+    ], rows)}`;
+  return html;
 }
 
 function renderTranscriptUsage(stats) {
@@ -1966,6 +2084,25 @@ function renderEffectiveConfig() {
         <span class="quota-kv-k">${escapeHtml(t(labelKey))}</span>
         <span class="quota-kv-v">${escapeHtml(value === null || value === undefined || value === '' ? '—' : String(value))}</span>
       </div>`).join('');
+  }
+
+  // degraded_accounts：加载期 credentials_file 解不出的账号证据
+  // （name/文件路径/LoadError 文案）——有这些号时 lane 已降级或靠
+  // 其它凭据服役，文件回填即自愈。error 是 Go 错误原文（含路径与
+  // OS 错误），按全文展示+转义，与 staleBanner 同级的告警样式。
+  const degradedEl = document.getElementById('effective-config-degraded');
+  if (degradedEl) {
+    const degraded = Array.isArray(data.degraded_accounts) ? data.degraded_accounts : [];
+    degradedEl.hidden = !degraded.length;
+    degradedEl.innerHTML = degraded.length
+      ? `<strong>${escapeHtml(t('settings.effectiveConfig.degradedAccounts'))}</strong>` +
+        degraded.map((d) => {
+          const name = d && d.name ? String(d.name) : '—';
+          const file = d && d.credentials_file ? ` <code class="runtime-metric-key">${escapeHtml(String(d.credentials_file))}</code>` : '';
+          const err = d && d.error ? ` — ${escapeHtml(String(d.error))}` : '';
+          return `<div>${escapeHtml(name)}${file}${err}</div>`;
+        }).join('')
+      : '';
   }
 
   const view = data.config && typeof data.config === 'object'
