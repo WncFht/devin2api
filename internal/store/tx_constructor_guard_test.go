@@ -54,11 +54,7 @@ var txCtorAllowlist = map[string]string{
 	"seedPayloadBytesAsync": "conn.BeginTx(ReadOnly) 只读快照：后台聚合不升级写锁，BUSY_SNAPSHOT 类不适用",
 	"CellsAudit":            "s.ro 读池上手工 BEGIN 只读事务：水位与计数须共享同一读快照，非写路径",
 	"BackfillCells":         "手工 BEGIN IMMEDIATE：committed 标记与守卫/审计/重写交错步骤，helper 形态装不下",
-	// 临时条目——下列宿主在 main 上仍是裸构造，对应修复分支并入后
-	// 构造点消失、条目 stale，按测试点名删除即可：
-	"applyMigrations":      "裸 db.Begin 待 migrations-immediate 分支并入后走 immediateTx",
-	"PutDebugFileIfAbsent": "裸 BeginTx 待 claim-tx-instrument 并入后走 writeTx",
-	"ClaimDebugFile":       "裸 BeginTx 待 claim-tx-instrument 并入后走 writeTx",
+	"immediateTx":           "BEGIN IMMEDIATE helper 本体：抢占写锁事务的单一构造点",
 }
 
 // TestTxConstructorGuard 扫描全部受闸目录：任何不在白名单的裸事务
