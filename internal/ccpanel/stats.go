@@ -148,6 +148,11 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		cost float64
 		peak int64 // 单槽非 499 峰值（per-model peak_rpm 的分子）
 	}
+	// 一遍格子扫描喂三类累加器：per-model 聚合、全局 rpm total/peak、
+	// 健康时间线桶（healthStart 下界由 covers 判——等价于独立扫描
+	// eachCell(healthStart,until) 的重叠计入口径）。
+	health := newHealthBuckets(since, until, isToday, prices)
+	var rpmTotal, rpmPeak int64
 	aggs := map[string]*modelAgg{}
 	h.eachCell(ctx, since, until, scope, func(key store.LogCellKey, c store.LogCellTotals) {
 		a := aggs[key.Model]
@@ -157,8 +162,16 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		}
 		a.t = addCells(a.t, c)
 		a.cost += cellCost(key, c, prices)
-		if n := c.Requests - c.Gone; n > a.peak {
+		n := c.Requests - c.Gone
+		if n > a.peak {
 			a.peak = n
+		}
+		rpmTotal += n
+		if n > rpmPeak {
+			rpmPeak = n
+		}
+		if health.covers(key.Slot) {
+			health.add(key, c)
 		}
 	})
 
@@ -169,7 +182,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(models)
 
-	perModel := h.healthTimelines(ctx, since, until, isToday, scope, prices)
+	perModel := health.finalize()
 
 	entries := make([]statsEntry, 0, len(models))
 	for _, m := range models {
@@ -243,15 +256,33 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		}
 		entries = append(entries, e)
 	}
-	respond(entries, h.rpmStatsFiltered(ctx, since, until, scope, isToday, scope.model))
+	respond(entries, h.rpmStatsFiltered(ctx, since, until, scope, isToday, scope.model, rpmTotal, rpmPeak))
 }
 
-// healthTimelines 复刻 ccLoad fillHealthTimeline 的 per-model 部分：
-// isToday 取最近 4h 按 5min×48 桶，否则按 range/48 桶。
-// 格子分辨率 10min：今日档一个格子跨两个桶，按重叠秒数比例分摊计数
-// （成功率/均值不变，计数为区间估计）。单上游无渠道聚合时间线。
-func (h *Handler) healthTimelines(ctx context.Context, since, until time.Time, isToday bool, scope statScope, prices map[string]CatalogPrice) map[string][]healthPoint {
-	const numBuckets = 48
+// healthNumBuckets 是健康时间线的桶数（ccLoad fillHealthTimeline
+// 同款 48 点列）。
+const healthNumBuckets = 48
+
+// healthBuckets 把与 [healthStart,until) 重叠的格子按重叠秒数份额
+// 分摊进 48 桶，finalize 出 per-model 时间线——累加器形态供宿主
+// 扫描一遍喂多个聚合，语义与原 eachCell 独立扫描一致：格子是全
+// 槽聚合，跨桶界按比例分账（成功率/均值不变，计数为区间估计）。
+// isToday 取最近 4h 按 5min 桶，否则按 range/48 桶。
+type healthBuckets struct {
+	startUnix int64
+	bucketSec int64
+	prices    map[string]CatalogPrice
+	perModel  map[string][]healthBucketCell
+}
+
+// healthBucketCell 是单桶的份额累加（float 因为分摊产生小数）。
+type healthBucketCell struct {
+	succ, err, lim                 float64
+	inT, outT, cr, cw, cost        float64
+	durSum, durN, firstSum, firstN float64
+}
+
+func newHealthBuckets(since, until time.Time, isToday bool, prices map[string]CatalogPrice) *healthBuckets {
 	var healthStart time.Time
 	var bucketSec int64
 	if isToday {
@@ -261,85 +292,96 @@ func (h *Handler) healthTimelines(ctx context.Context, since, until time.Time, i
 			healthStart = since
 		}
 	} else {
-		bucketSec = int64(until.Sub(since).Seconds()) / numBuckets
+		bucketSec = int64(until.Sub(since).Seconds()) / healthNumBuckets
 		if bucketSec < 1 {
 			bucketSec = 1
 		}
 		healthStart = since
 	}
-	startUnix := healthStart.Unix()
-
-	type fBucket struct {
-		succ, err, lim                 float64
-		inT, outT, cr, cw, cost        float64
-		durSum, durN, firstSum, firstN float64
+	return &healthBuckets{
+		startUnix: healthStart.Unix(),
+		bucketSec: bucketSec,
+		prices:    prices,
+		perModel:  map[string][]healthBucketCell{},
 	}
-	perModelF := map[string]*[numBuckets]fBucket{}
-	h.eachCell(ctx, healthStart, until, scope, func(key store.LogCellKey, c store.LogCellTotals) {
-		fb := perModelF[key.Model]
-		if fb == nil {
-			fb = &[numBuckets]fBucket{}
-			perModelF[key.Model] = fb
-		}
-		cellStart, cellEnd := key.Slot, key.Slot+rollupSlotSeconds
-		cost := cellCostNG(key, c, prices)
-		i0 := int((cellStart - startUnix) / bucketSec)
-		i1 := int((cellEnd - 1 - startUnix) / bucketSec)
-		for i := i0; i <= i1 && i < numBuckets; i++ {
-			if i < 0 {
-				continue
-			}
-			bs := startUnix + int64(i)*bucketSec
-			ov := min(cellEnd, bs+bucketSec) - max(cellStart, bs)
-			if ov <= 0 {
-				continue
-			}
-			share := float64(ov) / rollupSlotSeconds
-			b := &fb[i]
-			b.succ += float64(c.OK) * share
-			b.err += float64(c.Requests-c.OK-c.Gone) * share
-			b.lim += float64(c.Limited) * share
-			b.inT += float64(c.InTokNG) * share
-			b.outT += float64(c.OutTokNG) * share
-			b.cr += float64(c.CacheReadNG) * share
-			b.cw += float64(c.CacheWriteNG) * share
-			b.cost += cost * share
-			b.durSum += float64(c.SumDurOKMS) * share
-			b.durN += float64(c.NDurOK) * share
-			b.firstSum += float64(c.SumFirstOKMS) * share
-			b.firstN += float64(c.NFirstOK) * share
-		}
-	})
+}
 
-	finalize := func(i int, b fBucket) healthPoint {
+// covers 报告格子是否与 [healthStart,until) 重叠——复刻 eachCell 的
+// 下界判据（slot+slotSec>since）；上界 slot<until 由宿主扫描的
+// [since,until) 区间天然满足。
+func (b *healthBuckets) covers(slot int64) bool {
+	return slot+rollupSlotSeconds > b.startUnix
+}
+
+// add 把一个重叠格子按桶界份额分摊进各桶。
+func (b *healthBuckets) add(key store.LogCellKey, c store.LogCellTotals) {
+	fb := b.perModel[key.Model]
+	if fb == nil {
+		fb = make([]healthBucketCell, healthNumBuckets)
+		b.perModel[key.Model] = fb
+	}
+	cellStart, cellEnd := key.Slot, key.Slot+rollupSlotSeconds
+	cost := cellCostNG(key, c, b.prices)
+	i0 := int((cellStart - b.startUnix) / b.bucketSec)
+	i1 := int((cellEnd - 1 - b.startUnix) / b.bucketSec)
+	for i := i0; i <= i1 && i < healthNumBuckets; i++ {
+		if i < 0 {
+			continue
+		}
+		bs := b.startUnix + int64(i)*b.bucketSec
+		ov := min(cellEnd, bs+b.bucketSec) - max(cellStart, bs)
+		if ov <= 0 {
+			continue
+		}
+		share := float64(ov) / rollupSlotSeconds
+		cell := &fb[i]
+		cell.succ += float64(c.OK) * share
+		cell.err += float64(c.Requests-c.OK-c.Gone) * share
+		cell.lim += float64(c.Limited) * share
+		cell.inT += float64(c.InTokNG) * share
+		cell.outT += float64(c.OutTokNG) * share
+		cell.cr += float64(c.CacheReadNG) * share
+		cell.cw += float64(c.CacheWriteNG) * share
+		cell.cost += cost * share
+		cell.durSum += float64(c.SumDurOKMS) * share
+		cell.durN += float64(c.NDurOK) * share
+		cell.firstSum += float64(c.SumFirstOKMS) * share
+		cell.firstN += float64(c.NFirstOK) * share
+	}
+}
+
+// finalize 把分摊桶折算成 per-model 点列；只有 add 到格子的模型
+// 出列，与原独立扫描同口径。
+func (b *healthBuckets) finalize() map[string][]healthPoint {
+	finalize := func(i int, bc healthBucketCell) healthPoint {
 		p := healthPoint{
-			Ts:          time.Unix(startUnix+int64(i)*bucketSec, 0),
+			Ts:          time.Unix(b.startUnix+int64(i)*b.bucketSec, 0),
 			SuccessRate: -1,
-			Success:     int64(math.Round(b.succ)),
-			Error:       int64(math.Round(b.err)),
-			RateLimited: int64(math.Round(b.lim)),
+			Success:     int64(math.Round(bc.succ)),
+			Error:       int64(math.Round(bc.err)),
+			RateLimited: int64(math.Round(bc.lim)),
 		}
 		if p.Success+p.Error > 0 {
 			p.SuccessRate = float64(p.Success) / float64(p.Success+p.Error)
 		}
-		if b.durN > 0 {
-			p.AvgDuration = b.durSum / b.durN / 1000
+		if bc.durN > 0 {
+			p.AvgDuration = bc.durSum / bc.durN / 1000
 		}
-		if b.firstN > 0 {
-			p.AvgFirstByteTime = b.firstSum / b.firstN / 1000
+		if bc.firstN > 0 {
+			p.AvgFirstByteTime = bc.firstSum / bc.firstN / 1000
 		}
-		p.InputTokens = int64(math.Round(b.inT))
-		p.OutputTokens = int64(math.Round(b.outT))
-		p.CacheReadTokens = int64(math.Round(b.cr))
-		p.CacheWriteTokens = int64(math.Round(b.cw))
-		p.Cost = b.cost
-		p.EffectiveCost = b.cost
+		p.InputTokens = int64(math.Round(bc.inT))
+		p.OutputTokens = int64(math.Round(bc.outT))
+		p.CacheReadTokens = int64(math.Round(bc.cr))
+		p.CacheWriteTokens = int64(math.Round(bc.cw))
+		p.Cost = bc.cost
+		p.EffectiveCost = bc.cost
 		return p
 	}
 
-	perModel := make(map[string][]healthPoint, len(perModelF))
-	for m, fb := range perModelF {
-		pts := make([]healthPoint, numBuckets)
+	perModel := make(map[string][]healthPoint, len(b.perModel))
+	for m, fb := range b.perModel {
+		pts := make([]healthPoint, healthNumBuckets)
 		for i := range pts {
 			pts[i] = finalize(i, fb[i])
 		}
@@ -348,20 +390,13 @@ func (h *Handler) healthTimelines(ctx context.Context, since, until time.Time, i
 	return perModel
 }
 
-// rpmStatsFiltered 由 10 分钟格子推导 RPM/QPS：计数口径非 499
-// （ccLoad GetRPMStats 的 WHERE status_code != 499），peak 取单槽
-// 峰值折算分钟速率。recent_rpm 仅 isToday 有效，取最近 60s 的真实
-// 完成计数，并按 ccLoad 口径把 peak 抬到不低于 recent（格子折算的
-// 峰值会低估瞬时峰值）；recentModel/scope.kh 分别按模型与令牌收敛。
-func (h *Handler) rpmStatsFiltered(ctx context.Context, since, until time.Time, scope statScope, isToday bool, recentModel string) map[string]any {
-	var total, peak int64
-	h.eachCell(ctx, since, until, scope, func(_ store.LogCellKey, c store.LogCellTotals) {
-		n := c.Requests - c.Gone
-		total += n
-		if n > peak {
-			peak = n
-		}
-	})
+// rpmStatsFiltered 把宿主扫描预积出的 total/peak（非 499 计数口径，
+// 单槽峰值）折算成 rpm_stats 响应件——格子扫描由调用方一遍完成，
+// 不再为 total/peak 单独重扫。recent_rpm 仅 isToday 有效，取最近
+// 60s 的真实完成计数，并按 ccLoad 口径把 peak 抬到不低于 recent
+// （格子折算的峰值会低估瞬时峰值）；recentModel/scope.kh 分别按
+// 模型与令牌收敛。
+func (h *Handler) rpmStatsFiltered(ctx context.Context, since, until time.Time, scope statScope, isToday bool, recentModel string, total, peak int64) map[string]any {
 	minutes := until.Sub(since).Minutes()
 	if minutes < 1 {
 		minutes = 1

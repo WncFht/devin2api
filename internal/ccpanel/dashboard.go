@@ -92,12 +92,18 @@ func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 
 	byAPI := map[string]*endpointStat{}
 	var grand endpointStat
+	var rpmPeak int64
 	if !excluded {
 		h.eachCell(ctx, since, until, scope, func(key store.LogCellKey, c store.LogCellTotals) {
 			stat := byAPI[key.API]
 			if stat == nil {
 				stat = &endpointStat{API: key.API}
 				byAPI[key.API] = stat
+			}
+			// grand.TotalRequests 与 rpm total 同口径（非 499 合计），
+			// 顺带取单槽峰值，省掉 rpmStatsFiltered 的重扫。
+			if n := c.Requests - c.Gone; n > rpmPeak {
+				rpmPeak = n
 			}
 			cost := cellCost(key, c, prices)
 			for _, dst := range []*endpointStat{stat, &grand} {
@@ -125,7 +131,7 @@ func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	rpm := zeroRPMStats()
 	if !excluded {
-		rpm = h.rpmStatsFiltered(ctx, since, until, scope, isToday, "")
+		rpm = h.rpmStatsFiltered(ctx, since, until, scope, isToday, "", grand.TotalRequests, rpmPeak)
 	}
 	respondOK(w, map[string]any{
 		"total_requests":   grand.TotalRequests,
