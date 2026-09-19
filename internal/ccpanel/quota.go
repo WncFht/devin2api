@@ -167,6 +167,9 @@ func (h *Handler) quotaAccounts() []quotaAccount {
 	}
 	funcs := h.poolTokenFuncs()
 	if len(funcs) == 0 {
+		// 空池整轮跳过必须留声——静默曾让一次空池故障三天零样本零告警；
+		// 每轮复述即信号本身，刻意不去重。
+		slog.Warn("quota round skipped: no samplable lanes")
 		return nil
 	}
 	names := make([]string, 0, len(funcs))

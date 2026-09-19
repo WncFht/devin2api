@@ -2,10 +2,12 @@
 package ccpanel
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -381,10 +383,18 @@ func TestQuotaAccountsStates(t *testing.T) {
 		t.Fatalf("unwired fallback = %+v", got)
 	}
 
-	// 已接线但空池：空清单整轮跳过。
+	// 已接线但空池：空清单整轮跳过——采样器唯一的整轮静默分支，
+	// WARN 必须在场（不去重，每轮复述即信号）。
+	var warnBuf bytes.Buffer
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&warnBuf, nil)))
 	h = &Handler{poolTokenFuncs: func() map[string]func() string { return map[string]func() string{} }}
 	if got := h.quotaAccounts(); len(got) != 0 {
 		t.Fatalf("empty pool = %+v, want empty", got)
+	}
+	slog.SetDefault(defaultLogger)
+	if !strings.Contains(warnBuf.String(), "no samplable lanes") {
+		t.Fatalf("empty-pool WARN missing, got %q", warnBuf.String())
 	}
 
 	// 有号：按名序输出，token 取各 lane 当前凭据。
