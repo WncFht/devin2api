@@ -337,10 +337,28 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 			RateLimited:     e.RateLimited,
 		})
 	}
+	// cells 是服务端 (slot,account) 分桶：高流量下 entries 被
+	// requestsFetchCap 截断只覆盖窗尾，健康条改由它供数才不失真。
+	// slot 是桶宽秒数，缺省 1800，钳 [60,86400]。
+	slotSec := int64(1800)
+	if v, err := strconv.ParseInt(r.URL.Query().Get("slot"), 10, 64); err == nil && v >= 60 && v <= 86400 {
+		slotSec = v
+	}
+	var cells []store.MatrixCell
+	if !excluded {
+		var err error
+		cells, err = h.store.LogMatrixCells(r.Context(), lq, slotSec)
+		if err != nil {
+			slog.Warn("ccpanel: logs matrix cells query failed", "error", err)
+			respondError(w, http.StatusInternalServerError, "logs query failed")
+			return
+		}
+	}
 	// 截断判定简化为「命中总数超过返回条数」：SQL 计数精确，不再存在
 	// 尾部窗边界漏读的情形。
 	respondOK(w, map[string]any{
 		"entries":   entries,
+		"cells":     cells,
 		"total":     total,
 		"truncated": total > int64(len(entries)),
 	})

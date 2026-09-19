@@ -392,6 +392,56 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 	return rows, total, nil
 }
 
+// MatrixCell 是按 (slot, account) 聚合的健康矩阵桶：账号页 48×30min
+// 健康条的服务端口径——entries 被 requestsFetchCap 截断时格子仍覆盖
+// 全窗。分类对齐 debuglog.ErrorOwner 的失败责任归因：rl 是限流语义
+// 终结（429 或 rate_limited 标记），err 是上游责任失败（失败且非客户
+// 端断连/中断/读写阶段错），ok 是其余（成功 + 客户端责任——lane 已尽
+// 责送达，断连不归 lane 失分）；sw 是 account_switches 合计。
+type MatrixCell struct {
+	Slot    int64  `json:"slot"`    // 桶起点 unix 秒
+	Account string `json:"account"` // 读侧折叠名（logAccountExpr）
+	OK      int64  `json:"ok"`
+	Err     int64  `json:"err"`
+	RL      int64  `json:"rl"`
+	SW      int64  `json:"sw"`
+}
+
+// LogMatrixCells 把 q 筛选窗口内的日志行聚合成 (slotSec 秒槽, 折叠
+// account) 桶，供健康条逐格分色；与 SearchLogs 共享 where 编译，
+// rejected 行同口径剔除。
+func (s *Store) LogMatrixCells(ctx context.Context, q LogQuery, slotSec int64) ([]MatrixCell, error) {
+	if slotSec < 1 {
+		return nil, nil
+	}
+	where, args := q.where()
+	sqlRows, err := s.ro.QueryContext(ctx,
+		fmt.Sprintf(`SELECT slot, acct, tot-err-rl AS ok, err, rl, sw FROM (
+			SELECT time/%d*%d AS slot, %s AS acct, COUNT(*) AS tot,
+				SUM(rate_limited = 0 AND status_code != 429
+					AND (status_code >= 400 OR result = 'failed')
+					AND result NOT IN ('disconnected','aborted')
+					AND error_stage NOT IN ('http_read','http_decode')) AS err,
+				SUM(status_code = 429 OR rate_limited != 0) AS rl,
+				SUM(account_switches) AS sw
+				FROM logs%s GROUP BY slot, acct)`,
+			slotSec*1000, slotSec, logAccountExpr, where),
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = sqlRows.Close() }()
+	var cells []MatrixCell
+	for sqlRows.Next() {
+		var c MatrixCell
+		if err := sqlRows.Scan(&c.Slot, &c.Account, &c.OK, &c.Err, &c.RL, &c.SW); err != nil {
+			return nil, err
+		}
+		cells = append(cells, c)
+	}
+	return cells, sqlRows.Err()
+}
+
 // ExistsLogBefore 报告在 q 的筛选口径下是否仍存在 time 早于
 // q.SinceMS 的行（has_more 的「窗口下界之外仍有更早历史」投影）。
 // 沿用同一 where 编译——不带筛选的无条件探测会让过滤翻页窗外无命中
