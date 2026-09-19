@@ -24,7 +24,10 @@ command -v systemctl >/dev/null || {
 	exit 1
 }
 
-UNIT="devin-2api.service"
+# 服务名默认 devin-2api；需要固定名（侧实例、隔离测试）时可用
+# DEVIN2API_LABEL 覆盖——与 macOS 版同名约定，派生 unit 与 logrotate 名。
+SERVICE_BASE="${DEVIN2API_LABEL:-devin-2api}"
+UNIT="${SERVICE_BASE}.service"
 UNIT_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 BIN_DIR="${DEVIN2API_BIN_DIR:-${HOME}/.local/bin}"
 CONFIG_DIR="${DEVIN2API_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/devin-2api}"
@@ -67,8 +70,8 @@ EOF
 
 # 日志轮转走独立的 oneshot service + daily timer——oneshot 无状态，
 # enable --now 与重载都不影响主服务在途请求。
-LOGROTATE_SERVICE="devin-2api-logrotate.service"
-LOGROTATE_TIMER="devin-2api-logrotate.timer"
+LOGROTATE_SERVICE="${SERVICE_BASE}-logrotate.service"
+LOGROTATE_TIMER="${SERVICE_BASE}-logrotate.timer"
 
 logrotate_service_content() {
 	cat <<EOF
@@ -161,6 +164,16 @@ if [[ "${CHECK}" == "1" ]]; then
 fi
 
 preflight_deploy
+
+# PrivateTmp 把 /tmp 换成私有 tmpfs，ReadWritePaths 再绑 /tmp 下的源时
+# 新命名空间里该路径已不存在——unit 启动即 status=226/NAMESPACE 崩环
+#（STATE_DIR 入 /tmp|/var/tmp 的实测事故）。bin 侧只读不受影响。
+case "${STATE_DIR}" in
+/tmp/* | /var/tmp/* | /tmp | /var/tmp)
+	die "STATE_DIR=${STATE_DIR} 在 tmp 下——与 unit 的 PrivateTmp+ReadWritePaths 冲突，换 HOME 下路径（如 ~/.local/state/devin-2api）"
+	;;
+esac
+
 detect_port 8080
 check_port_available "${MANAGED_PID:-0}"
 
@@ -188,12 +201,17 @@ elif ! unit_content | cmp -s - "${UNIT_DIR}/${UNIT}"; then
 	unit_content >"${UNIT_DIR}/${UNIT}"
 	UNIT_RELOAD=1
 fi
-if ! systemctl --user cat "${UNIT}" >/dev/null 2>&1; then
+# systemctl cat 直接读盘上文件，未 daemon-reload 也能命中——原判断让
+# 首装绕过 enable --now 走交接路径，unit 永远停在 disabled（开机/常驻
+# 不自启）。按「是否在跑」分流：未运行（含从未加载）→ enable --now
+# 拉起新二进制；在跑 → 幂等 enable 补常驻链，交接路径负责热切换。
+if ! systemctl --user is-active --quiet "${UNIT}" 2>/dev/null; then
 	systemctl --user daemon-reload
 	systemctl --user enable --now "${UNIT}"
 	FRESH_BOOT=1
-elif [[ "${UNIT_RELOAD}" == "1" ]]; then
-	systemctl --user daemon-reload
+else
+	systemctl --user enable "${UNIT}" >/dev/null 2>&1 || true
+	[[ "${UNIT_RELOAD}" == "1" ]] && systemctl --user daemon-reload
 fi
 sync_logrotate_timer
 

@@ -197,6 +197,9 @@ smoke_version() {
 # 符号链接指向 STATE_DIR/logs，排障路径与 AGENTS.md 约定一致。
 install_binary() {
 	mkdir -p "${BIN_DIR}" "${CONFIG_DIR}" "${STATE_DIR}/logs"
+	# 被替换的二进制留 .backup 副本——新版本有致命回归时可 cp 回去再
+	# systemctl --user restart 兜底（干净回滚仍走 --release <旧 tag>）。
+	[[ -f "${BIN_DIR}/devin-2api" ]] && cp "${BIN_DIR}/devin-2api" "${BIN_DIR}/devin-2api.backup"
 	mv "$1" "${BIN_DIR}/devin-2api"
 	if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
 		warn "${CONFIG_DIR}/config.yaml 缺失——从仓库副本恢复"
@@ -333,7 +336,9 @@ ensure_config() {
 	fi
 	# accounts 是列表嵌套块，set_yaml_scalar 只能写标量——awk 在 devin:
 	# 行后整体插入（map 内键序无关）。token 用 yaml 单引号包裹。
-	[[ -n "${token}" ]] &&
+	# 不能留 `&&` 尾句：token 为空时条件为假、函数以状态 1 返回，set -e
+	# 会把首装静默掐死在 ensure_config 里。
+	if [[ -n "${token}" ]]; then
 		awk -v tok="${token}" '
 			{ print }
 			!done && /^devin:/ {
@@ -342,7 +347,8 @@ ensure_config() {
 				print "      token: '"'"'" tok "'"'"'";
 				done=1
 			}' config.yaml >config.yaml.tmp &&
-		mv config.yaml.tmp config.yaml
+			mv config.yaml.tmp config.yaml
+	fi
 }
 
 # token_source_desc 描述启动时凭据将来自何处；无处可寻返回空。
@@ -798,7 +804,7 @@ check_versions() {
 remove_installed_binary() {
 	local removed=1
 	if [[ -f "${BIN_DIR}/devin-2api" ]]; then
-		rm -f "${BIN_DIR}/devin-2api"
+		rm -f "${BIN_DIR}/devin-2api" "${BIN_DIR}/devin-2api.backup"
 		echo "==> removed ${BIN_DIR}/devin-2api"
 		removed=0
 	fi

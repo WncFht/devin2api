@@ -10,7 +10,7 @@
 
 二进制的路径解析链（服务定义里全部显式传 flag，链只对裸跑生效）：配置文件 `-config` flag → `DEVIN2API_CONFIG` env → `./config.yaml`（存在才选，仓库开发/Windows 解压即跑）→ 上表平台默认；状态目录 `-state-dir` flag → `DEVIN2API_STATE_DIR` env → 上表平台默认。启动日志 `paths resolved` 一行打出实际生效的两个路径。
 
-三个 deploy 脚本（macOS/Linux 共用 `scripts/deploy/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `dashboard.password`，tty 下提示粘贴 token；下游 /v1 令牌不入配置，到面板 /web/tokens.html 创建）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突、生效 config 里死引用的 `credentials_file`（9-18 断流根因；加载期现已改判该 lane 降级带病服役而非拒载，带病起跑照样拦下）；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
+三个 deploy 脚本（macOS/Linux 共用 `scripts/deploy/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `dashboard.password`，tty 下提示粘贴 token；下游 /v1 令牌不入配置，到面板 /web/tokens.html 创建）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突、生效 config 里死引用的 `credentials_file`（9-18 断流根因；加载期现已改判该 lane 降级带病服役而非拒载，带病起跑照样拦下）；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：Linux 免 clone 免 root 走 `scripts/install.sh` 一行（`curl -sSL .../install.sh | bash`——薄引导层按目标 tag 拉 deploy 管线到临时 staging 再转交，install/upgrade/rollback/status/list-versions/uninstall 同语义）；macOS 或要从检出驱动时 clone 仓库 → `deploy*.sh --release latest`。
 
 开发机侧曾有远程驱动 `scripts/attic/deploy-remote.sh`（SSH 到生产机执行 `deploy.sh`，worktree 推送模式），2026-09-18 随 Mac 生产实例退役、仅留档（运行即 exit 1）；机制细节见 `toolchain.md` §6。部署后的验证步骤（healthz 版本确认 + 面板套件冒烟）见 `post-deploy-verify.md`。
 
