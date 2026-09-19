@@ -135,7 +135,13 @@ func (d *DriverDeps) Drive() {
 			slog.Error("selfupdate: takeover timed out; orchestrator stays serving")
 			return
 		}
-		time.Sleep(500 * time.Millisecond)
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 
