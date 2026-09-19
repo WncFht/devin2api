@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -150,12 +152,55 @@ func (s *Store) deleteRowsChunked(ctx context.Context, table, pred string, args 
 	}
 }
 
+// buildStamp 返回本进程二进制的构建标识：module version（go install
+// module@version 装的）优先，其次 VCS 短 sha——dirty 尾缀标记未提交
+// 工作区，是手搓/树外二进制与部署二进制的区分信号。无构建信息
+// （-buildvcs=false、树外脚本构建）回 "unknown"。
+func buildStamp() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	var rev, modified string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	if rev == "" {
+		return "unknown"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if modified == "true" {
+		rev += "-dirty"
+	}
+	return rev
+}
+
 // Open 打开（或创建）path 处的库。schema 幂等，重复打开只做
 // CREATE IF NOT EXISTS；是否跑 ImportLegacy 由导入器按源文件
 // 存在性自判，Open 不报告 created。
 func Open(path string) (*Store, error) {
 	openStart := time.Now()
 	stageStart := openStart
+	// 开库留痕打在干活之前：stderr 落点由调用方的 shell 决定——systemd
+	// 实例与 deploy 交接进程汇聚进 stderr.log，probe/census/手搓二进制
+	// 落各自终端——凡经 Open 碰库的进程都留一条「谁（argv 含二进制名
+	// 与 flag 级 subcommand）、开哪个库（绝对路径）、什么构建」；打开
+	// 中途挂死也有这条线在，与结尾的 "store opened" 成对夹住全程。
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		absPath = path
+	}
+	slog.Info("store opening", "path", absPath, "argv", os.Args, "build", buildStamp())
 	// synchronous=NORMAL：WAL 下 commit 不再逐次 fsync（帧留在 OS 页缓存，
 	// 进程崩溃不丢，仅断电/内核崩可能丢尾部事务，不产生损坏）。本库
 	// 装的是可重建的观测与面板状态，用这丁点断电尾部风险换 commit 风暴
