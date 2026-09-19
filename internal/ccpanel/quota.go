@@ -171,7 +171,8 @@ func (h *Handler) quotaAccounts() []quotaAccount {
 }
 
 // sampleAccountQuota 拉取一个账号的状态并写入一行配额快照；ctx 挂在
-// 采样协程生命周期上，单号上限 120s。
+// 采样协程生命周期上，单号上限 120s——只约束上游拉取与投影，落库
+// 在 persistQuotaSample 里自带独立预算，不分享这段余额。
 func (h *Handler) sampleAccountQuota(ctx context.Context, account, token string) {
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
@@ -238,7 +239,7 @@ func (h *Handler) captureAccountQuota(ctx context.Context, account, token string
 		point.TopUpEnabled = boolAny(tu["enabled"])
 		point.TopUpTransactionStatus = strAny(tu["transaction_status"])
 	}
-	h.persistQuotaSample(ctx, point)
+	h.persistQuotaSample(point)
 	h.noteAccountQuotaSignal(account, plan)
 	return user, plan, nil
 }
@@ -249,18 +250,31 @@ func (h *Handler) captureAccountQuota(ctx context.Context, account, token string
 // 价值已衰减的陈旧点，溢出丢最老点并告警。
 const quotaPersistRetryCap = 4
 
+// quotaPersistBudget 是落库（含重放积压批）的独立预算，与上游拉取
+// 分账：历史上 fetch 与写共享 120s 单号预算，慢 fetch 把预算耗尽后
+// 写死于 context deadline exceeded（2026-09-19 02:02 randall 丢点
+// 事故）。无竞争时单行 INSERT 毫秒级；15s 覆盖 quotaPersistRetryCap+1
+// 行重放批与常规写锁排队仍宽裕，更长也堵不住分钟级争用窗——那部分
+// 归挂账重放管。与 debuglog storeCtx/modelreg storeOpTimeout 同款
+// 约定：写库拿 Background 派生的独立死线，不随调用方生命周期陪葬。
+const quotaPersistBudget = 15 * time.Second
+
 // persistQuotaSample 落一个新配额点并把上轮写失败挂账的点一并重放
 // （取走即清，点集独占移交本调用；首个失败即停手，剩余尾部整段挂回
 // 缓冲等下一轮——争用期里同批后续点大概率同病）。(account,at) 唯一
 // 索引 + INSERT OR IGNORE 使重放幂等：上轮看似失败实则落库的点重放
 // 时静默跳过，不写双份。定时采样与手动刷新共用本路径——刷新也是
-// 争用期内的恢复通道。
-func (h *Handler) persistQuotaSample(ctx context.Context, point *store.QuotaSample) {
+// 争用期内的恢复通道。写库不继承调用方 ctx：采样侧的 120s 可能已被
+// 慢 fetch 耗尽，refresh 侧的 request ctx 可能随操作者断连取消，
+// 已取回的数据点不该为这些生命周期陪葬。
+func (h *Handler) persistQuotaSample(point *store.QuotaSample) {
 	h.quotaPendingMu.Lock()
 	pending := h.pendingQuotaSamples
 	h.pendingQuotaSamples = nil
 	h.quotaPendingMu.Unlock()
 	rows := append(pending, point)
+	ctx, cancel := context.WithTimeout(context.Background(), quotaPersistBudget)
+	defer cancel()
 	for i, r := range rows {
 		if err := h.store.InsertQuotaSample(ctx, r); err != nil {
 			slog.Warn("quota sample persist failed", "account", r.Account, "error", err)

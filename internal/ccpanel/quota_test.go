@@ -3,6 +3,7 @@ package ccpanel
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -262,7 +263,7 @@ func TestQuotaSamplePersistRetry(t *testing.T) {
 	h := &Handler{store: st}
 	_ = st.Close() // 落库必败
 	for i := 0; i < 6; i++ {
-		h.persistQuotaSample(context.Background(),
+		h.persistQuotaSample(
 			&store.QuotaSample{At: 1700000000 + int64(i*300), Account: "randall", DailyRemaining: f64(float64(90 - i))})
 	}
 	h.quotaPendingMu.Lock()
@@ -285,7 +286,7 @@ func TestQuotaSamplePersistRetry(t *testing.T) {
 	}
 	defer func() { _ = st2.Close() }()
 	h.store = st2
-	h.persistQuotaSample(context.Background(),
+	h.persistQuotaSample(
 		&store.QuotaSample{At: 1700000000 + 6*300, Account: "randall", DailyRemaining: f64(84)})
 	rows, err := st2.ListQuotaSamples(context.Background(), "randall", 0, 0)
 	if err != nil {
@@ -296,6 +297,75 @@ func TestQuotaSamplePersistRetry(t *testing.T) {
 	}
 	if stats := h.quotaPersistStats(); stats["persist_replayed"] != 4 || stats["pending_samples"] != 0 {
 		t.Fatalf("persist stats after replay = %+v", stats)
+	}
+}
+
+// TestQuotaPersistOwnsBudget 复刻 2026-09-19 02:02 randall 丢点形态：
+// 拉取吃掉调用方预算大半后，写库又撞上外部连接 BEGIN IMMEDIATE 持锁
+// ——调用方 ctx 在锁释放前到期。共享预算时代这次写死于
+// context deadline exceeded 只能挂账等下轮；persist 自带
+// quotaPersistBudget 独立死线后，等锁释放照常落库、缓冲不留痕。
+func TestQuotaPersistOwnsBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	// 外部连接持写锁 1.1s——复刻批量事务的争用窗。
+	holder, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(30000)")
+	if err != nil {
+		t.Fatalf("sql.Open holder: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+	conn, err := holder.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+	committed := make(chan struct{})
+	go func() {
+		defer close(committed)
+		time.Sleep(1100 * time.Millisecond)
+		_, _ = conn.ExecContext(context.Background(), "COMMIT")
+	}()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"userStatus":{"name":"Randall","planStatus":{"dailyQuotaRemainingPercent":90}}}`))
+	}))
+	defer srv.Close()
+	h := &Handler{store: st}
+	up, err := newPanelUpstream(srv.URL, "", false, func() string { return "unused" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.upstreamPtr.Store(up)
+
+	// 调用方预算 800ms：fetch 毫秒级完成，但写锁 1.1s 后才释放——
+	// persist 若仍共享调用方预算必死于 deadline。
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	if _, _, err := h.captureAccountQuota(ctx, "randall", "tok-r"); err != nil {
+		t.Fatalf("captureAccountQuota: %v", err)
+	}
+	<-committed
+	rows, err := st.ListQuotaSamples(context.Background(), "randall", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("samples = %+v, want the point landed after lock release", rows)
+	}
+	h.quotaPendingMu.Lock()
+	pending := len(h.pendingQuotaSamples)
+	h.quotaPendingMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending = %d, want 0 — write succeeded on first attempt", pending)
 	}
 }
 
