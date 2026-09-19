@@ -1061,11 +1061,11 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		slog.Warn("debuglog: dir allocation lock wait exceeded", "waited", waited.String())
 	}
 	now := manager.now()
-	base := now.Format("20060102-150405")
+	base := dirStamp(now)
 	for suffix := 1; ; suffix++ {
 		name := base
 		if suffix > 1 {
-			name = fmt.Sprintf("%s-%02d", base, suffix)
+			name = suffixedDirName(base, suffix)
 		}
 		if _, ok := manager.activeDirs[name]; ok {
 			continue

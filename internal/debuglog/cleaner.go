@@ -139,7 +139,7 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 	// ~900 目录曾付 1800+ 查询）。bound 钳到活跃集最小名之下，
 	// 等价旧实现的逐目录活跃跳过。
 	if policy.PayloadHours > 0 {
-		payloadBound := now.Add(-time.Duration(policy.PayloadHours) * time.Hour).Format("20060102-150405")
+		payloadBound := dirStamp(now.Add(-time.Duration(policy.PayloadHours) * time.Hour))
 		if minActive != "" && minActive < payloadBound {
 			payloadBound = minActive
 		}
@@ -171,7 +171,7 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 	// 受保护的失败目录同样豁免——「最近 N 个失败目录受保护」对龄删
 	// 与容量淘汰同语义，不再只豁免后者。
 	if policy.Days > 0 {
-		bound := now.Add(-time.Duration(policy.Days) * 24 * time.Hour).Format("20060102-150405")
+		bound := dirStamp(now.Add(-time.Duration(policy.Days) * 24 * time.Hour))
 		if minActive != "" && minActive < bound {
 			bound = minActive
 		}
@@ -290,10 +290,7 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 	if stripLast < 0 {
 		return removed, stripped
 	}
-	stripBound := "\xff"
-	if stripLast+1 < len(candidates) {
-		stripBound = candidates[stripLast+1]
-	}
+	stripBound := boundAfter(candidates, stripLast)
 	if err := manager.store.StripDebugDirsBefore(ctx, stripBound, capacityAnchorFiles, exclude); err != nil {
 		// 剥载失败不转整删——同一存储故障下一相多半同样失败，
 		// 等下一轮重试比抢删更稳。
@@ -336,11 +333,8 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 		return removed, stripped
 	}
 	// 界取下一候选名（dir<bound 圈出 candidates[:last+1]——字典序界即
-	// 删除范围）；删到候选末尾时没有更大名，"\xff" 越过一切目录名。
-	bound := "\xff"
-	if last+1 < len(candidates) {
-		bound = candidates[last+1]
-	}
+	// 删除范围）；删到候选末尾时 boundAfter 落到 boundAll 哨兵。
+	bound := boundAfter(candidates, last)
 	// 一条集合 DELETE 完成整轮淘汰，替代逐目录 autocommit——prod 每轮
 	// ~700 次独立事务曾把唯一写连接占满，insertQ 排空停滞、分片溢出
 	// 尾丢，丢弃突发正与淘汰 tick 聚簇。

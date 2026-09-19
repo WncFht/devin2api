@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -19,11 +18,6 @@ import (
 
 // fileReadCap 是单文件读取上限；超出时截断并在响应里标记 truncated。
 const fileReadCap = 4 << 20
-
-// requestDirPattern 约束请求目录名，防止伪造目录名探测库内其它行。
-// 同秒后缀按 %02d 生成、位数不设上限：同秒第 100+ 个请求会得到三位
-// 后缀（-100），必须同样被接受。
-var requestDirPattern = regexp.MustCompile(`^\d{8}-\d{6}(-\d{2,})?$`)
 
 // RequestFileInfo 是请求目录内一个文件的清单项。
 type RequestFileInfo struct {
@@ -219,7 +213,7 @@ func (manager *Manager) FindDirByStartedAt(ctx context.Context, ms int64) (strin
 	if manager.store == nil {
 		return "", false
 	}
-	dirs, err := manager.store.DebugDirsByPrefix(ctx, time.UnixMilli(ms).Format("20060102-150405"))
+	dirs, err := manager.store.DebugDirsByPrefix(ctx, dirStamp(time.UnixMilli(ms)))
 	if err != nil {
 		return "", false
 	}
