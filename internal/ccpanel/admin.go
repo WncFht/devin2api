@@ -393,7 +393,11 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 	// 该组，观测面不动端点。
 	if h.store != nil {
 		if opens, err := h.store.StoreOpens(r.Context()); err == nil {
-			data["store"] = storeOpensView(opens)
+			view := storeOpensView(opens)
+			// runtime_state 异步写队列的丢弃账与台账同组——gate 闩/池
+			// 冷却/脱钩台账的落库丢失只在此可见（写侧另有 stderr WARN）。
+			view["state_queue_drops"] = h.store.StateQueueDrops()
+			data["store"] = view
 		} else {
 			slog.Warn("ccpanel: store opens query failed", "error", err)
 		}
