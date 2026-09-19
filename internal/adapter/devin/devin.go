@@ -847,11 +847,18 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	recorder.SetResolvedModel(model)
 	// 完成缓存查找在一切上游动作之前：同键脱钩条目在场时整段建流
 	// 路径（目录校验/构建/闸门/发送）都不发生——重放不消耗上游。
-	detachKey := detachedRequestKey(request, model)
-	if entry := adapter.detached.lookup(detachKey); entry != nil {
+	// 键是 02 投影全量 marshal 的哈希（长会话上 MB 级），只在可能有
+	// 消费者时先兑现：本 lane 登记表有货或号池兄弟 lane 在场；否则
+	// 留成 OnceValue 惰性键随流走，真脱钩（罕见）才付这笔账。
+	detachKey := sync.OnceValue(func() string { return detachedRequestKey(request, model) })
+	var lookupKey string
+	if adapter.detached.hasEntries() || len(env.peers) > 0 {
+		lookupKey = detachKey()
+	}
+	if entry := adapter.detached.lookup(lookupKey); entry != nil {
 		originDir, state, buffered := entry.marker()
 		detail := map[string]any{
-			"key":             detachKey,
+			"key":             lookupKey,
 			"origin_dir":      originDir,
 			"state":           state.String(),
 			"buffered_events": buffered,
@@ -867,18 +874,18 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 与事件环，04 留 marker 行与 pool_candidates 的选号现场互证；
 	// owner 条目置 sawCrossLaneRetry 供移除时拆出「来错门」孤儿档。
 	// 多 holder（同键条目同时存在多条 lane）各记一次不吞。
-	if detachKey != "" {
+	if lookupKey != "" {
 		for owner, reg := range env.peers {
 			if reg == adapter.detached {
 				continue
 			}
-			state, usable, ok, originDir := reg.peek(detachKey)
+			state, usable, ok, originDir := reg.peek(lookupKey)
 			if !ok {
 				continue
 			}
-			adapter.detached.noteCrossLaneMiss(detachKey, owner, originDir, state)
+			adapter.detached.noteCrossLaneMiss(lookupKey, owner, originDir, state)
 			detail := map[string]any{
-				"key":         detachKey,
+				"key":         lookupKey,
 				"owner_lane":  owner,
 				"owner_state": state.String(),
 				"usable":      usable,
@@ -1838,12 +1845,14 @@ type responseStream struct {
 	// 无进度窗）与累计静默上限的锚点（首发起算、跨换流累计）。
 	// 纯值类型零 I/O 零锁，方法与语义见 streampolicy.go。
 	deadlines streamDeadlines
-	// detachKey/registry/entry 是完成缓存挂接面：key 是语义请求
-	// 哈希（detachedRequestKey），entry 自建流起经 Recv 返回点 tee
-	// 累积全部下发事件（重试方需要含前缀的完整序列），registry 持
-	// 命中判定与条目生命周期。三者由 Adapter.Stream 注入；测试裸流
-	// 留空 → detachable() 恒假 → 客户端断开行为与旧实现一致。
-	detachKey string
+	// detachKey/registry/entry 是完成缓存挂接面：detachKey 是语义
+	// 请求哈希的惰性兑现（OnceValue 包 detachedRequestKey——并发
+	// 安全只求值一次，断开发生且准入位全过才付投影+marshal 账，
+	// 正常请求与 pre-content 断连零支出），entry 自建流起经 Recv
+	// 返回点 tee 累积全部下发事件（重试方需要含前缀的完整序列），
+	// registry 持命中判定与条目生命周期。三者由 Adapter.Stream 注入；
+	// 测试裸流留空 → detachable() 恒假 → 客户端断开行为与旧实现一致。
+	detachKey func() string
 	registry  *detachedRegistry
 	entry     *detachedEntry
 	// detached 标记本流已与客户端解耦、由后台泵续命：无进度看门狗

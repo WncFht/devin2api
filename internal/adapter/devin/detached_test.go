@@ -90,7 +90,7 @@ func detachedTestStream(registry *detachedRegistry, key string, receiver devinRe
 		cancel:    func() {},
 		decoder:   newResponseDecoder("model", nil, nil, nil),
 		gate:      newRateGate(GateConfig{}, nil, ""),
-		detachKey: key,
+		detachKey: func() string { return key },
 		registry:  registry,
 		entry:     &detachedEntry{notify: make(chan struct{})},
 	}

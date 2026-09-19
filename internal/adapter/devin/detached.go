@@ -606,6 +606,17 @@ func detachedPeersFrom(ctx context.Context) map[string]*detachedRegistry {
 	return peers
 }
 
+// hasEntries 报告登记表是否非空：Stream 兑现惰性键的判据之一——空表
+// 上 lookup 必然未命中，键的投影+marshal 账不必为这次查找预付。
+func (registry *detachedRegistry) hasEntries() bool {
+	if registry == nil {
+		return false
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	return len(registry.entries) > 0
+}
+
 // lookup 查可挂接条目：running/completed 恒可挂；failed 只在可重放时
 // 挂（瞬态失败返回 nil 让调用方走新上游）；过期与截断即逐——截断缓冲
 // 产不出完整重放，同键重试直接走新上游，同时把槽位与缓冲提前释放。
@@ -1102,8 +1113,8 @@ func (stream *responseStream) watchClientCtx(ctx context.Context) {
 }
 
 // detachable 判定这条流客户端断开后是否值得脱钩续命：七个条件缺一
-// 不可——缓存挂接面注入（registry/detachKey/entry 非空，Adapter.Stream
-// 才有；测试裸流恒假）、未被主动中断（面板 abort/排空强掐与客户端
+// 不可——缓存挂接面注入（registry/detachKey/entry 已注入且键兑现非
+// 空，Adapter.Stream 才有；测试裸流恒假）、未被主动中断（面板 abort/排空强掐与客户端
 // 断连同走 ctx.Done，但缓存只救断连：被掐死的流准入会续烧上游至
 // running TTL，同键重试还会重放尸体）、缓存未闩门（排空中的进程即将
 // 退出，登记的条目随进程死蒸发，挂接方永远来不了——续烧的上游算力
@@ -1119,9 +1130,10 @@ func (stream *responseStream) detachable() bool {
 	return !stream.detached.Load() && !stream.finished.Load() &&
 		!stream.recorder.WasAborted() &&
 		stream.registry != nil && !stream.registry.draining.Load() &&
-		stream.detachKey != "" && stream.entry != nil &&
+		stream.detachKey != nil && stream.entry != nil &&
 		!stream.entry.isTruncated() &&
-		stream.producedEvents.Load() && !stream.decoder.hasStopReason && !stream.decoder.stoppedByPattern
+		stream.producedEvents.Load() && !stream.decoder.hasStopReason && !stream.decoder.stoppedByPattern &&
+		stream.detachKey() != ""
 }
 
 // admitIntent 是断连时刻的占位登记资格（admitDetached 锁外快路的准入
@@ -1133,12 +1145,15 @@ func (stream *responseStream) detachable() bool {
 // 拒绝占位才不致把每条成功请求都存进缓存；断连落在锁内阻塞段的场景
 // 段未收束 finished 必假，洞例照样占得上位。hasStopReason/
 // stoppedByPattern 不卡：断连落在「语义已收口、只剩尾帧」的窗口时登记
-// 仍兑现前缀价值，泵随后自然定态 completed。
+// 仍兑现前缀价值，泵随后自然定态 completed。键兑现排最末：单调位把
+// 正常完结与 pre-content 断连短路掉后，惰性求值只在真候选上发生
+// （OnceValue 并发安全，兑现一次全体共享）。
 func (stream *responseStream) admitIntent() bool {
 	return stream.registry != nil && !stream.registry.draining.Load() &&
-		stream.detachKey != "" && stream.entry != nil &&
+		stream.detachKey != nil && stream.entry != nil &&
 		stream.producedEvents.Load() && !stream.finished.Load() &&
-		!stream.entry.isTruncated() && !stream.recorder.WasAborted()
+		!stream.entry.isTruncated() && !stream.recorder.WasAborted() &&
+		stream.detachKey() != ""
 }
 
 // detach 把流从客户端生命周期解耦（持 mu 路径）：停掉两个看门狗计时器
@@ -1169,12 +1184,13 @@ func (stream *responseStream) admitDetached(ctx context.Context) {
 		return
 	}
 	entry := stream.entry
-	drainCtx, drainCancel, admitted := stream.registry.claim(stream.detachKey, entry, stream.recorder.Dir(), ctx)
+	key := stream.detachKey()
+	drainCtx, drainCancel, admitted := stream.registry.claim(key, entry, stream.recorder.Dir(), ctx)
 	if !admitted {
 		return
 	}
 	detail := map[string]any{
-		"key":             stream.detachKey,
+		"key":             key,
 		"buffered_events": entry.len(),
 	}
 	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached", detail)
@@ -1195,9 +1211,10 @@ func (stream *responseStream) teeDetached(event llm.ResponseEvent) {
 		return
 	}
 	if stream.entry.append(event) {
-		stream.registry.noteTruncated(stream.detachKey, stream.entry)
+		key := stream.detachKey()
+		stream.registry.noteTruncated(key, stream.entry)
 		detail := map[string]any{
-			"key":          stream.detachKey,
+			"key":          key,
 			"budget_bytes": detachedMaxBufferedBytes,
 		}
 		stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_truncated", detail)
@@ -1231,7 +1248,7 @@ func (stream *responseStream) pumpDetached(drainCtx context.Context, drainCancel
 				},
 			}) {
 				// 终局错误的追加自身越预算：同一冻结点记账口径。
-				stream.registry.noteTruncated(stream.detachKey, entry)
+				stream.registry.noteTruncated(stream.detachKey(), entry)
 			}
 		}
 		// 泵终局按原因记四档：drainCtx 超时是 running TTL 到期，
@@ -1246,7 +1263,7 @@ func (stream *responseStream) pumpDetached(drainCtx context.Context, drainCancel
 		case errors.Is(err, io.EOF) && state == detachedCompleted:
 			reason = detachFinishCompleted
 		}
-		stream.registry.noteFinish(stream.detachKey, reason, entry)
+		stream.registry.noteFinish(stream.detachKey(), reason, entry)
 		return
 	}
 }
