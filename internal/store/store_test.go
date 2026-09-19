@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -46,6 +47,125 @@ func TestOpenCreatesFileAndReopens(t *testing.T) {
 	// schema 幂等：重开后写读正常即可。
 	if err := s2.SetState(context.Background(), "k", "v"); err != nil {
 		t.Fatalf("SetState after reopen: %v", err)
+	}
+}
+
+// TestOpenRecordsStoreOpens 钉住开库台账：每次 Open 落一行进程身份，
+// 同进程两次打开留两行（pid 相同、id 区分），argv 落 JSON 数组且
+// 首元即 os.Args[0]，path 是解析后的绝对路径。
+func TestOpenRecordsStoreOpens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	rows, err := s2.db.Query(`SELECT pid, argv, build, path, at FROM store_opens ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query store_opens: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var n int
+	for rows.Next() {
+		var pid, at int64
+		var argv, build, p string
+		if err := rows.Scan(&pid, &argv, &build, &p, &at); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if pid != int64(os.Getpid()) {
+			t.Fatalf("pid = %d, want %d", pid, os.Getpid())
+		}
+		var args []string
+		if err := json.Unmarshal([]byte(argv), &args); err != nil || len(args) == 0 || args[0] != os.Args[0] {
+			t.Fatalf("argv = %q (unmarshal err %v)", argv, err)
+		}
+		if build == "" || p != path || at <= 0 {
+			t.Fatalf("row fields: build=%q path=%q at=%d", build, p, at)
+		}
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("store_opens rows = %d, want 2", n)
+	}
+}
+
+// TestOpenLedgerFailSoft 钉住台账写入的失败姿态：store_opens 表被
+// 预先污染（缺列）时插入报错只告警，Open 照常成功——观测面不能把
+// 工具拖死（probe/手搓二进制对坏库仍须可用）。
+func TestOpenLedgerFailSoft(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE store_opens (oops TEXT)`); err != nil {
+		t.Fatalf("seed poisoned table: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("raw close: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open over poisoned store_opens: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM store_opens`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("poisoned table rows = %d, want 0", n)
+	}
+	// 主路径不受台账失败影响：写读正常。
+	if err := s.SetState(context.Background(), "k", "v"); err != nil {
+		t.Fatalf("SetState: %v", err)
+	}
+}
+
+// TestOpenLedgerTrimKeepsLastN 钉住行数帽：预填超帽行后下一次 Open
+// 触发 keep-last-N 修剪，表收敛到 storeOpensKeep 且最新行是本次打开。
+func TestOpenLedgerTrimKeepsLastN(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// 递归 CTE 一条语句灌入超帽种子行（at=0 标记非 Open 写入）。
+	if _, err := s.db.Exec(`INSERT INTO store_opens(at, pid, argv, build, path)
+		WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < ?)
+		SELECT 0, 0, '', '', '' FROM c`, storeOpensKeep+50); err != nil {
+		t.Fatalf("seed rows: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+	var n, maxAt int64
+	if err := s2.db.QueryRow(`SELECT COUNT(*), MAX(at) FROM store_opens`).Scan(&n, &maxAt); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != storeOpensKeep {
+		t.Fatalf("rows after trim = %d, want %d", n, storeOpensKeep)
+	}
+	if maxAt <= 0 {
+		t.Fatalf("newest row at = %d, want >0 (this Open's row)", maxAt)
 	}
 }
 

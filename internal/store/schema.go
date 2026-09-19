@@ -289,6 +289,20 @@ var schemaStatements = []string{
 	// 保留期清理（PruneDetachedEvents 按 at 范围删）的支点。
 	`CREATE INDEX IF NOT EXISTS idx_detached_events_at ON detached_events(at)`,
 
+	// store_opens：开库台账——每次 Open 落一行进程身份（at/pid/argv/
+	// build/path），补 stderr 留痕的盲区：stderr 被丢弃的 opener 仍
+	// 在库内可枚举（reuseport 交接进程曾静默持锁三天，stderr 无迹）。
+	// 行数由 Open 内 keep-last-N 修剪自界，故不设保留期支点索引——
+	// PK 顺序即修剪与枚举序。
+	`CREATE TABLE IF NOT EXISTS store_opens (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		at INTEGER NOT NULL,
+		pid INTEGER NOT NULL,
+		argv TEXT NOT NULL DEFAULT '',
+		build TEXT NOT NULL DEFAULT '',
+		path TEXT NOT NULL DEFAULT ''
+	)`,
+
 	// runtime_state：键值小状态。gate:<lane> 存冷却闩 JSON；
 	// import_base_done / debug_dirs_imported 是导入进度标记。
 	`CREATE TABLE IF NOT EXISTS runtime_state (

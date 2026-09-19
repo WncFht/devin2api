@@ -12,6 +12,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -203,6 +204,17 @@ func (s *Store) deleteRowsChunked(ctx context.Context, table, pred string, args 
 	}
 }
 
+// storeOpensKeep 是开库台账的行数帽（keep-last-N）：开库是低频事件，
+// 但 crash-loop opener（systemd Restart 风暴、交接进程反复拉起）可日
+// 打数千行——行数帽保证任意 writer 节奏下表有界。修剪挂在 Open 自身
+// 而不走 Maintain 按龄清理：probe/protocensus/交接进程这类短命
+// opener 从不跑养护，而它们正是台账要抓的对象。
+const storeOpensKeep = 4096
+
+// storeOpenArgvMax 是落库 argv 的长度上界：取证字段不无限占行，超长
+// 命令行截尾留前缀——可执行名与头部 flag 是识别主体。
+const storeOpenArgvMax = 4096
+
 // buildStamp 返回本进程二进制的构建标识：module version（go install
 // module@version 装的）优先，其次 VCS 短 sha——dirty 尾缀标记未提交
 // 工作区，是手搓/树外二进制与部署二进制的区分信号。无构建信息
@@ -282,6 +294,25 @@ func Open(path string) (*Store, error) {
 	if err := applySchema(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
+	}
+	// 开库台账：凡经 Open 碰库的进程都在库内落一行身份——stderr 被
+	// 丢进 /dev/null 的 opener（reuseport 交接进程曾静默持锁三天）
+	// 在 stderr 留痕之外仍有库内枚举面，sqlite3 直查即列出全部
+	// attach 者。写入点紧跟 applySchema：表刚保证存在，migrations/
+	// seed/reconcile 中途崩掉的 opener 也有行在。台账是观测面不是
+	// 正确性依赖——插入或修剪失败（表被污染、写锁超时、只读场景）
+	// 只告警不阻断打开。
+	argv, _ := json.Marshal(os.Args)
+	if len(argv) > storeOpenArgvMax {
+		argv = argv[:storeOpenArgvMax]
+	}
+	if _, err := db.Exec(`INSERT INTO store_opens(at, pid, argv, build, path) VALUES(?,?,?,?,?)`,
+		time.Now().UnixMilli(), os.Getpid(), string(argv), buildStamp(), absPath); err != nil {
+		slog.Warn("store open ledger insert failed", "path", absPath, "err", err)
+	}
+	if _, err := db.Exec(`DELETE FROM store_opens WHERE id NOT IN (
+		SELECT id FROM store_opens ORDER BY id DESC LIMIT ?)`, storeOpensKeep); err != nil {
+		slog.Warn("store open ledger trim failed", "path", absPath, "err", err)
 	}
 	schemaMS := time.Since(stageStart).Milliseconds()
 	stageStart = time.Now()

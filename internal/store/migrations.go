@@ -248,6 +248,15 @@ var schemaMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		// store_opens 是全新表：幂等建表路径（schema.go）已覆盖新库
+		// 与存量库，这里登记版本如实反映演进史（同 0017 先例）。历史
+		// 开库事件本就无迹可考，表从部署后新打开起累计。
+		version: "0018_store_opens",
+		apply: func(_ *sql.Tx) error {
+			return nil
+		},
+	},
 }
 
 // migrationLockBudget 是整轮迁移等写锁的墙钟预算：BEGIN IMMEDIATE 在
