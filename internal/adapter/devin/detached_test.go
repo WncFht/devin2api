@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1504,25 +1505,42 @@ func TestMergeDetachedStats(t *testing.T) {
 	now := time.Now()
 	per := map[string]DetachedStats{
 		"a": {
-			Entries: 1, Running: 1, Detaches: 3, Orphans: 1,
+			Entries: 1, Running: 1, Completed: 2, Failed: 1,
+			Detaches: 3, Attaches: 4, AttachMisses: 1, CrossLaneMisses: 2,
+			FinishedCompleted: 5, FinishedFailed: 1, FinishedKilled: 1, FinishedExpired: 2,
+			Expired: 1, Evicted: 2, Replaced: 1, Aborted: 1, Truncated: 3,
+			Orphans: 1, OrphanCompleted: 1, OrphansCrossLane: 1, OrphanBufferedEvents: 7,
+			LedgerDrops: 2,
 			Events: []DetachedEvent{
 				{At: now.Add(-time.Minute), Kind: detachedEventFinish, Label: "泵完成"},
 				{At: now.Add(-2 * time.Minute), Kind: detachedEventAdmit, Label: "登记", Key: "k1"},
 			},
 		},
 		"b": {
-			Entries: 2, Completed: 1, Failed: 1, Detaches: 5, AttachMisses: 2,
+			Entries: 2, Running: 3, Completed: 1, Failed: 1,
+			Detaches: 5, Attaches: 2, AttachMisses: 2, CrossLaneMisses: 1,
+			FinishedCompleted: 3, FinishedFailed: 2, FinishedKilled: 1, FinishedExpired: 1,
+			Expired: 2, Evicted: 1, Replaced: 2, Aborted: 2, Truncated: 1,
+			Orphans: 2, OrphanCompleted: 3, OrphansCrossLane: 1, OrphanBufferedEvents: 4,
+			LedgerDrops: 1,
 			Events: []DetachedEvent{
 				{At: now.Add(-30 * time.Second), Kind: detachedEventAttach, Label: "挂接", Key: "k2"},
 			},
 		},
 	}
 	merged := mergeDetachedStats(per)
-	if merged.Entries != 3 || merged.Running != 1 || merged.Completed != 1 || merged.Failed != 1 {
-		t.Fatalf("entry gauges = %+v", merged)
-	}
-	if merged.Detaches != 8 || merged.Orphans != 1 || merged.AttachMisses != 2 {
-		t.Fatalf("counters = %+v", merged)
+	// 数值字段全量逐 lane 求和——反射扫住整个结构体，新字段漏进归并
+	// 体即失败（Aborted 曾在结构体加入后漏加，顶层 detached.aborted
+	// 永久为 0）。
+	va, vb, vm := reflect.ValueOf(per["a"]), reflect.ValueOf(per["b"]), reflect.ValueOf(merged)
+	for i := 0; i < va.NumField(); i++ {
+		f := va.Type().Field(i)
+		if f.Type.Kind() != reflect.Int && f.Type.Kind() != reflect.Int64 {
+			continue
+		}
+		if got, want := vm.Field(i).Int(), va.Field(i).Int()+vb.Field(i).Int(); got != want {
+			t.Fatalf("merged.%s = %d, want %d", f.Name, got, want)
+		}
 	}
 	// 事件新在前、回填 lane；归并不改 per-lane 快照（lane 身份由透出
 	// 路径携带，per-lane 视图本字段留空）。

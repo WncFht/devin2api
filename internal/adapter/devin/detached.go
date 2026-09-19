@@ -474,6 +474,7 @@ func mergeDetachedStats(per map[string]DetachedStats) DetachedStats {
 		merged.Expired += s.Expired
 		merged.Evicted += s.Evicted
 		merged.Replaced += s.Replaced
+		merged.Aborted += s.Aborted
 		merged.Truncated += s.Truncated
 		merged.Orphans += s.Orphans
 		merged.OrphanCompleted += s.OrphanCompleted
