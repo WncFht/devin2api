@@ -222,8 +222,8 @@ const cmdlineMaxLen = 200
 func truncateCmdline(raw []byte) string {
 	s := strings.TrimRight(string(raw), "\x00")
 	s = strings.ReplaceAll(s, "\x00", " ")
-	if len(s) > cmdlineMaxLen {
-		s = s[:cmdlineMaxLen] + "…"
+	if runes := []rune(s); len(runes) > cmdlineMaxLen {
+		s = string(runes[:cmdlineMaxLen]) + "…"
 	}
 	return s
 }
