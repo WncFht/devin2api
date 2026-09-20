@@ -27,7 +27,7 @@ When the token store has no rows, `/v1` accepts every request. Only bind `server
 
 ## Model registry
 
-The registry controls what `/v1/models` and request routing do with each name: disable a model (requests get `model_disabled`), or redirect one name to another before `devin.aliases` resolution.
+The registry controls what `/v1/models` and request routing do with each name: disable a model (requests get `model_disabled`), or redirect one name to another before `devin.aliases` resolution. Name matching is case-insensitive — a request for `SWE-2-Max` hits the `swe-2-max` entry too.
 
 ## Self-update
 
