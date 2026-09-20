@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/logvocab"
 )
 
 // logEModelExpr 是「生效模型」的 SQL 投影：Model 退化 RequestedModel，
@@ -468,7 +470,7 @@ func (s *Store) LogMatrixCells(ctx context.Context, q LogQuery, slotSec int64) (
 				SUM(rate_limited = 0 AND status_code != 429
 					AND (status_code >= 400 OR result = 'failed')
 					AND result NOT IN ('disconnected','aborted')
-					AND error_stage NOT IN ('http_read','http_decode')) AS err,
+					AND error_stage NOT IN ('`+logvocab.ErrStageHTTPRead+`','`+logvocab.ErrStageHTTPDecode+`')) AS err,
 				SUM(status_code = 429 OR rate_limited != 0) AS rl,
 				SUM(account_switches) AS sw
 				FROM logs%s GROUP BY slot, acct)`,

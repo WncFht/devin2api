@@ -18,6 +18,8 @@ import (
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/WncFht/devin2api/internal/logvocab"
 )
 
 // compressMinBytes 是压缩启用的尺寸阈值：小体的压缩收益换不回一
@@ -42,10 +44,9 @@ const deltaDictID = 2
 const deltaDictIDLegacy = 1
 
 // deltaBaseFileName 是 delta 基座在目录内的文件名：写侧把它的脱敏
-// 后字节当 dict，读侧按它取回字典。与 debuglog.StageHTTPRequest 同一
-// 字面量——store 不能反向 import debuglog（会成环），文件名契约的
-// 归属方是 stages.go，本常量仅为存储格式的自包含描述。
-const deltaBaseFileName = "01-http-request.json"
+// 后字节当 dict，读侧按它取回字典。文件名契约的唯一事实源在
+// logvocab（写方 debuglog 的阶段常量是同一份叶子的别名）。
+const deltaBaseFileName = logvocab.StageHTTPRequest
 
 // payloadGzipPool 复用 gzip.Writer：flate 的窗口与哈希表是压缩路径的
 // 分配大头（profiler 实测该路径占 debug 写入 alloc 的大半），池化后
