@@ -46,6 +46,7 @@ func newTokenStore(t *testing.T, plain string) *authtoken.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(store.Close)
 	if _, _, err := store.Ensure(plain, &authtoken.Token{Description: "test", IsActive: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -400,6 +401,7 @@ func TestResponsesHandlerOpenModeWhenTokenStoreEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(store.Close)
 	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
 	application.SetAuthTokens(store, nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
@@ -441,6 +443,7 @@ func TestResponsesHandlerTokenRPMLimitReturns429(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(store.Close)
 	if _, _, err := store.Ensure("secret-key", &authtoken.Token{Description: "t", IsActive: true, MaxRPM: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -475,6 +478,7 @@ func TestResponsesHandlerTokenCost5hLimitReturns429(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(store.Close)
 	tok, _, err := store.Ensure("secret-key", &authtoken.Token{
 		Description: "t", IsActive: true, MaxConcurrency: 5, Cost5hLimitMicroUSD: 1_000_000,
 	})

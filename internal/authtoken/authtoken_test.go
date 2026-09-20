@@ -368,9 +368,13 @@ func TestSyncWriteEnqueueBound(t *testing.T) {
 	}
 
 	// 楔死 worker：一条 run 无视 ctx 永久阻塞（模拟不响应取消的库调用），
-	// 再把 writes 填满——此后同步写只能等空位。
+	// 再把 writes 填满——此后同步写只能等空位。必须先等 worker 真正
+	// 吃进楔子再填：否则楔子占一个槽，worker 取走它后空位让给
+	// 后面的同步写，断言的就不是超时而是被 worker 永久挂起。
 	release := make(chan struct{})
-	s.writes <- writeTask{run: func(context.Context) error { <-release; return nil }}
+	started := make(chan struct{})
+	s.writes <- writeTask{run: func(context.Context) error { close(started); <-release; return nil }}
+	<-started
 	for len(s.writes) < cap(s.writes) {
 		s.submitStats(func(context.Context) error { return nil })
 	}

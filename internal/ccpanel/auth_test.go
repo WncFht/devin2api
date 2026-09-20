@@ -93,6 +93,7 @@ func TestWebAuthPasswordBeatsSeededToken(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(s.Close)
 		return s
 	}
 	probe := func(h *Handler, bearer string) (int, string) {
