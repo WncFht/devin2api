@@ -289,113 +289,267 @@ func (h *Handler) fetchUserStatusAs(ctx context.Context, token string) (user, pl
 	}
 
 	var root map[string]any
-	if err := json.Unmarshal(raw, &root); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&root); err != nil {
 		return nil, nil, nil, fmt.Errorf("decode GetUserStatus: %w", err)
 	}
-	us, _ := root["userStatus"].(map[string]any)
-	if us == nil {
-		us, _ = root["user_status"].(map[string]any)
+	// 上游同一字段在 camelCase/snake_case 间漂移——键树归一（去 _ 全小写）
+	// 后两种拼写收敛到同一键，wire struct 的 tag 按归一键书写。
+	normalizeWireKeys(root)
+	norm, err := json.Marshal(root)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("decode GetUserStatus: %w", err)
 	}
+	var wire seatUserStatusResponse
+	dec = json.NewDecoder(bytes.NewReader(norm))
+	dec.UseNumber()
+	if err := dec.Decode(&wire); err != nil {
+		return nil, nil, nil, fmt.Errorf("decode GetUserStatus: %w", err)
+	}
+	us := wire.UserStatus
 	if us == nil {
 		return nil, nil, nil, fmt.Errorf("GetUserStatus: empty userStatus")
 	}
 
 	user = map[string]any{
-		"name":                strAny(us["name"]),
-		"email":               strAny(us["email"]),
-		"pro":                 boolAny(us["pro"]),
-		"user_id":             strAny(us["userId"], us["user_id"]),
-		"team_id":             strAny(us["teamId"], us["team_id"]),
-		"teams_tier":          shortEnum(strAny(us["teamsTier"], us["teams_tier"])),
-		"used_prompt_credits": numAny(us["userUsedPromptCredits"], us["user_used_prompt_credits"]),
-		"used_flow_credits":   numAny(us["userUsedFlowCredits"], us["user_used_flow_credits"]),
-		"max_premium_chat":    numAny(us["maxNumPremiumChatMessages"], us["max_num_premium_chat_messages"]),
+		"name":                string(us.Name),
+		"email":               string(us.Email),
+		"pro":                 bool(us.Pro),
+		"user_id":             string(us.UserID),
+		"team_id":             string(us.TeamID),
+		"teams_tier":          shortEnum(string(us.TeamsTier)),
+		"used_prompt_credits": numOrNil(us.UsedPromptCredits),
+		"used_flow_credits":   numOrNil(us.UsedFlowCredits),
+		"max_premium_chat":    numOrNil(us.MaxPremiumChatMessages),
 	}
 
-	ps, _ := us["planStatus"].(map[string]any)
-	if ps == nil {
-		ps, _ = us["plan_status"].(map[string]any)
-	}
-	if ps != nil {
+	if ps := us.PlanStatus; ps != nil {
 		plan = map[string]any{
-			"available_prompt_credits": numAny(ps["availablePromptCredits"], ps["available_prompt_credits"]),
-			"available_flow_credits":   numAny(ps["availableFlowCredits"], ps["available_flow_credits"]),
-			"available_flex_credits":   numAny(ps["availableFlexCredits"], ps["available_flex_credits"]),
-			"used_flex_credits":        numAny(ps["usedFlexCredits"], ps["used_flex_credits"]),
-			"used_flow_credits":        numAny(ps["usedFlowCredits"], ps["used_flow_credits"]),
-			"used_prompt_credits":      numAny(ps["usedPromptCredits"], ps["used_prompt_credits"]),
-			"daily_quota_remaining":    numAny(ps["dailyQuotaRemainingPercent"], ps["daily_quota_remaining_percent"]),
-			"weekly_quota_remaining":   numAny(ps["weeklyQuotaRemainingPercent"], ps["weekly_quota_remaining_percent"]),
-			"daily_quota_reset":        numAny(ps["dailyQuotaResetAtUnix"], ps["daily_quota_reset_at_unix"]),
-			"weekly_quota_reset":       numAny(ps["weeklyQuotaResetAtUnix"], ps["weekly_quota_reset_at_unix"]),
-			"acu_consumed":             numAny(ps["acuConsumed"], ps["acu_consumed"]),
-			"acu_limit":                numAny(ps["acuLimit"], ps["acu_limit"]),
-			"overage_balance_micros":   numAny(ps["overageBalanceMicros"], ps["overage_balance_micros"]),
-			"plan_start":               strAny(ps["planStart"], ps["plan_start"]),
-			"plan_end":                 strAny(ps["planEnd"], ps["plan_end"]),
+			"available_prompt_credits": numOrNil(ps.AvailablePromptCredits),
+			"available_flow_credits":   numOrNil(ps.AvailableFlowCredits),
+			"available_flex_credits":   numOrNil(ps.AvailableFlexCredits),
+			"used_flex_credits":        numOrNil(ps.UsedFlexCredits),
+			"used_flow_credits":        numOrNil(ps.UsedFlowCredits),
+			"used_prompt_credits":      numOrNil(ps.UsedPromptCredits),
+			"daily_quota_remaining":    numOrNil(ps.DailyQuotaRemaining),
+			"weekly_quota_remaining":   numOrNil(ps.WeeklyQuotaRemaining),
+			"daily_quota_reset":        numOrNil(ps.DailyQuotaReset),
+			"weekly_quota_reset":       numOrNil(ps.WeeklyQuotaReset),
+			"acu_consumed":             numOrNil(ps.ACUConsumed),
+			"acu_limit":                numOrNil(ps.ACULimit),
+			"overage_balance_micros":   numOrNil(ps.OverageBalanceMicros),
+			"plan_start":               string(ps.PlanStart),
+			"plan_end":                 string(ps.PlanEnd),
 			// 超额使用后的宽限与充值状态：配额烧穿不是立即断供，先进
 			// grace period（grace_period_end 是 Connect-JSON Timestamp =
 			// RFC3339 字符串）；top_up_status 记录自动加额是否生效。
-			"was_reduced_by_orphaned_usage": boolAny(ps["wasReducedByOrphanedUsage"], ps["was_reduced_by_orphaned_usage"]),
-			"grace_period_status":           shortEnum(strAny(ps["gracePeriodStatus"], ps["grace_period_status"])),
-			"grace_period_end":              rfc3339Any(ps["gracePeriodEnd"], ps["grace_period_end"]),
+			"was_reduced_by_orphaned_usage": bool(ps.WasReducedByOrphanedUsage),
+			"grace_period_status":           shortEnum(string(ps.GracePeriodStatus)),
+			"grace_period_end":              normRFC3339(string(ps.GracePeriodEnd)),
 		}
-		tu, _ := ps["topUpStatus"].(map[string]any)
-		if tu == nil {
-			tu, _ = ps["top_up_status"].(map[string]any)
-		}
-		if tu != nil {
+		if tu := ps.TopUpStatus; tu != nil {
 			plan["top_up_status"] = map[string]any{
-				"enabled":            boolAny(tu["topUpEnabled"], tu["top_up_enabled"]),
-				"transaction_status": shortEnum(strAny(tu["topUpTransactionStatus"], tu["top_up_transaction_status"])),
-				"monthly_amount":     numAny(tu["monthlyTopUpAmount"], tu["monthly_top_up_amount"]),
-				"spent":              numAny(tu["topUpSpent"], tu["top_up_spent"]),
-				"increment":          numAny(tu["topUpIncrement"], tu["top_up_increment"]),
-				"criteria_met":       boolAny(tu["topUpCriteriaMet"], tu["top_up_criteria_met"]),
+				"enabled":            bool(tu.Enabled),
+				"transaction_status": shortEnum(string(tu.TransactionStatus)),
+				"monthly_amount":     numOrNil(tu.MonthlyAmount),
+				"spent":              numOrNil(tu.Spent),
+				"increment":          numOrNil(tu.Increment),
+				"criteria_met":       bool(tu.CriteriaMet),
 			}
 		}
-		pi, _ := ps["planInfo"].(map[string]any)
-		if pi == nil {
-			pi, _ = ps["plan_info"].(map[string]any)
-		}
-		if pi != nil {
-			plan["plan_name"] = strAny(pi["planName"], pi["plan_name"])
-			plan["monthly_prompt_credits"] = numAny(pi["monthlyPromptCredits"], pi["monthly_prompt_credits"])
-			plan["monthly_flow_credits"] = numAny(pi["monthlyFlowCredits"], pi["monthly_flow_credits"])
-			plan["billing_strategy"] = shortEnum(strAny(pi["billingStrategy"], pi["billing_strategy"]))
-			plan["is_teams"] = boolAny(pi["isTeams"], pi["is_teams"])
-			plan["is_enterprise"] = boolAny(pi["isEnterprise"], pi["is_enterprise"])
-			plan["can_buy_more"] = boolAny(pi["canBuyMoreCredits"], pi["can_buy_more_credits"])
-			plan["has_paid_features"] = boolAny(pi["hasPaidFeatures"], pi["has_paid_features"])
+		if pi := ps.PlanInfo; pi != nil {
+			plan["plan_name"] = string(pi.PlanName)
+			plan["monthly_prompt_credits"] = numOrNil(pi.MonthlyPromptCredits)
+			plan["monthly_flow_credits"] = numOrNil(pi.MonthlyFlowCredits)
+			plan["billing_strategy"] = shortEnum(string(pi.BillingStrategy))
+			plan["is_teams"] = bool(pi.IsTeams)
+			plan["is_enterprise"] = bool(pi.IsEnterprise)
+			plan["can_buy_more"] = bool(pi.CanBuyMoreCredits)
+			plan["has_paid_features"] = bool(pi.HasPaidFeatures)
 		}
 	}
 
-	// 顶层 planInfo（部分响应会挂在 root）
-	if top, ok := root["planInfo"].(map[string]any); ok {
+	// 顶层 planInfo（部分响应会挂在 root；键归一后 snake 拼写同样命中——
+	// 比原先只读 camelCase 略宽，漂移方向上是更宽容的一侧）。
+	if top := wire.PlanInfo; top != nil {
 		planInfo = map[string]any{
-			"plan_name":                 strAny(top["planName"], top["plan_name"]),
-			"monthly_prompt_credits":    numAny(top["monthlyPromptCredits"], top["monthly_prompt_credits"]),
-			"monthly_flow_credits":      numAny(top["monthlyFlowCredits"], top["monthly_flow_credits"]),
-			"billing_strategy":          shortEnum(strAny(top["billingStrategy"], top["billing_strategy"])),
-			"is_teams":                  boolAny(top["isTeams"], top["is_teams"]),
-			"is_enterprise":             boolAny(top["isEnterprise"], top["is_enterprise"]),
-			"has_paid_features":         boolAny(top["hasPaidFeatures"], top["has_paid_features"]),
-			"max_premium_chat_messages": numAny(top["maxNumPremiumChatMessages"], top["max_num_premium_chat_messages"]),
+			"plan_name":                 string(top.PlanName),
+			"monthly_prompt_credits":    numOrNil(top.MonthlyPromptCredits),
+			"monthly_flow_credits":      numOrNil(top.MonthlyFlowCredits),
+			"billing_strategy":          shortEnum(string(top.BillingStrategy)),
+			"is_teams":                  bool(top.IsTeams),
+			"is_enterprise":             bool(top.IsEnterprise),
+			"has_paid_features":         bool(top.HasPaidFeatures),
+			"max_premium_chat_messages": numOrNil(top.MaxPremiumChatMessages),
 		}
-	} else if plan != nil {
-		if name, ok := plan["plan_name"]; ok {
-			planInfo = map[string]any{
-				"plan_name":              name,
-				"monthly_prompt_credits": plan["monthly_prompt_credits"],
-				"monthly_flow_credits":   plan["monthly_flow_credits"],
-				"billing_strategy":       plan["billing_strategy"],
-				"is_teams":               plan["is_teams"],
-				"is_enterprise":          plan["is_enterprise"],
-				"has_paid_features":      plan["has_paid_features"],
-			}
+	} else if us.PlanStatus != nil && us.PlanStatus.PlanInfo != nil {
+		pi := us.PlanStatus.PlanInfo
+		planInfo = map[string]any{
+			"plan_name":              string(pi.PlanName),
+			"monthly_prompt_credits": numOrNil(pi.MonthlyPromptCredits),
+			"monthly_flow_credits":   numOrNil(pi.MonthlyFlowCredits),
+			"billing_strategy":       shortEnum(string(pi.BillingStrategy)),
+			"is_teams":               bool(pi.IsTeams),
+			"is_enterprise":          bool(pi.IsEnterprise),
+			"has_paid_features":      bool(pi.HasPaidFeatures),
 		}
 	}
 	return user, plan, planInfo, nil
+}
+
+// seatUserStatusResponse 是 GetUserStatus Connect-JSON 响应的 wire 形状。
+// tag 写的是 normalizeWireKeys 归一后的键（去 _ 全小写）：上游同一字段
+// 在 camelCase/snake_case 间漂移，归一后两种拼写打到同一字段。
+// 数值字段用 any 原样透传——上游数字与数字串两种形态都发，下游
+// floatAny 两种都吃，透传保住 wire 原文（含 >2^53 的精度）。
+type seatUserStatusResponse struct {
+	UserStatus *seatUserStatus `json:"userstatus"`
+	PlanInfo   *seatPlanInfo   `json:"planinfo"`
+}
+
+// seatUserStatus 是 userStatus 段的 wire 形状；PlanStatus/TopUpStatus/
+// PlanInfo 嵌套对象缺席时指针为 nil，与原 map 断言同口径。
+type seatUserStatus struct {
+	Name                   wireString      `json:"name"`
+	Email                  wireString      `json:"email"`
+	Pro                    wireBool        `json:"pro"`
+	UserID                 wireString      `json:"userid"`
+	TeamID                 wireString      `json:"teamid"`
+	TeamsTier              wireString      `json:"teamstier"`
+	UsedPromptCredits      any             `json:"userusedpromptcredits"`
+	UsedFlowCredits        any             `json:"userusedflowcredits"`
+	MaxPremiumChatMessages any             `json:"maxnumpremiumchatmessages"`
+	PlanStatus             *seatPlanStatus `json:"planstatus"`
+}
+
+// seatPlanStatus 是 planStatus 段的 wire 形状（配额/宽限/充值状态）。
+type seatPlanStatus struct {
+	AvailablePromptCredits    any           `json:"availablepromptcredits"`
+	AvailableFlowCredits      any           `json:"availableflowcredits"`
+	AvailableFlexCredits      any           `json:"availableflexcredits"`
+	UsedFlexCredits           any           `json:"usedflexcredits"`
+	UsedFlowCredits           any           `json:"usedflowcredits"`
+	UsedPromptCredits         any           `json:"usedpromptcredits"`
+	DailyQuotaRemaining       any           `json:"dailyquotaremainingpercent"`
+	WeeklyQuotaRemaining      any           `json:"weeklyquotaremainingpercent"`
+	DailyQuotaReset           any           `json:"dailyquotaresetatunix"`
+	WeeklyQuotaReset          any           `json:"weeklyquotaresetatunix"`
+	ACUConsumed               any           `json:"acuconsumed"`
+	ACULimit                  any           `json:"aculimit"`
+	OverageBalanceMicros      any           `json:"overagebalancemicros"`
+	PlanStart                 wireString    `json:"planstart"`
+	PlanEnd                   wireString    `json:"planend"`
+	WasReducedByOrphanedUsage wireBool      `json:"wasreducedbyorphanedusage"`
+	GracePeriodStatus         wireString    `json:"graceperiodstatus"`
+	GracePeriodEnd            wireString    `json:"graceperiodend"`
+	TopUpStatus               *seatTopUp    `json:"topupstatus"`
+	PlanInfo                  *seatPlanInfo `json:"planinfo"`
+}
+
+// seatTopUp 是 topUpStatus 段的 wire 形状（自动加额配置与当月执行账）。
+type seatTopUp struct {
+	Enabled           wireBool   `json:"topupenabled"`
+	TransactionStatus wireString `json:"topuptransactionstatus"`
+	MonthlyAmount     any        `json:"monthlytopupamount"`
+	Spent             any        `json:"topupspent"`
+	Increment         any        `json:"topupincrement"`
+	CriteriaMet       wireBool   `json:"topupcriteriamet"`
+}
+
+// seatPlanInfo 是 planInfo 段的 wire 形状；同一形状挂在 planStatus 内与
+// 响应 root 两处，字段集取两边投影的并集。
+type seatPlanInfo struct {
+	PlanName               wireString `json:"planname"`
+	MonthlyPromptCredits   any        `json:"monthlypromptcredits"`
+	MonthlyFlowCredits     any        `json:"monthlyflowcredits"`
+	BillingStrategy        wireString `json:"billingstrategy"`
+	IsTeams                wireBool   `json:"isteams"`
+	IsEnterprise           wireBool   `json:"isenterprise"`
+	CanBuyMoreCredits      wireBool   `json:"canbuymorecredits"`
+	HasPaidFeatures        wireBool   `json:"haspaidfeatures"`
+	MaxPremiumChatMessages any        `json:"maxnumpremiumchatmessages"`
+}
+
+// wireString 接受字符串或原始数字/布尔字面量的宽松字符串字段
+// （strAny 同口径：字符串原样、数字取原始字面量、布尔取 true/false 文本）。
+type wireString string
+
+// UnmarshalJSON 把 JSON 值宽松解成字符串：字符串正常解，其余标量保留
+// 原始字面量，null 留空。
+func (s *wireString) UnmarshalJSON(raw []byte) error {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	if raw[0] != '"' {
+		*s = wireString(string(raw))
+		return nil
+	}
+	return json.Unmarshal(raw, (*string)(s))
+}
+
+// wireBool 接受 bool 或字符串型 bool 的宽松布尔字段（boolAny 同口径：
+// bool 原样、"true"/"1" 字符串判真，其余一律 false）。
+type wireBool bool
+
+// UnmarshalJSON 把 JSON 值宽松解成布尔：true 字面量与 "true"/"1" 字符串
+// 为真，其余（false/其它字符串/数字/对象/null）一律 false。
+func (b *wireBool) UnmarshalJSON(raw []byte) error {
+	switch string(raw) {
+	case "true", `"true"`, `"1"`:
+		*b = true
+	}
+	return nil
+}
+
+// normalizeWireKeys 把宽松解码的 JSON 树键名原地归一成「去 _ 全小写」：
+// userId/user_id/userID 收敛到 userid，wire struct 只写一种 tag。
+// 键按序处理且先写赢——排序使 camelCase（无 _ 拼写）先于 snake 落位，
+// 归一撞键时保留 camel 值，与原双读 camel 优先的口径一致。
+func normalizeWireKeys(m map[string]any) {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		v := m[k]
+		delete(m, k)
+		nk := strings.ToLower(strings.ReplaceAll(k, "_", ""))
+		if _, clash := m[nk]; !clash {
+			m[nk] = v
+		}
+		switch child := v.(type) {
+		case map[string]any:
+			normalizeWireKeys(child)
+		case []any:
+			for _, item := range child {
+				if mm, ok := item.(map[string]any); ok {
+					normalizeWireKeys(mm)
+				}
+			}
+		}
+	}
+}
+
+// numOrNil 与 numAny 同口径：空字符串按缺席计（nil），其余值原样透传。
+func numOrNil(v any) any {
+	if s, ok := v.(string); ok && s == "" {
+		return nil
+	}
+	return v
+}
+
+// normRFC3339 把 RFC3339 串归一成 UTC RFC3339；解析失败保留原文——外部
+// 输入边界上原样暴露比吞掉更可排障（rfc3339Any 同口径）。
+func normRFC3339(s string) string {
+	if s == "" {
+		return ""
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return s
 }
 
 // cachedModels 返回 TTL 内的模型目录缓存；缓存与并发收敛由

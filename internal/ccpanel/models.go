@@ -68,10 +68,6 @@ func (h *Handler) adminModelRegistry(w http.ResponseWriter, r *http.Request) {
 	if ps, ok := h.poolSnapshot(); ok {
 		aliases = ps.Aliases
 	}
-	overrides := map[string]modelreg.Entry{}
-	if h.models != nil {
-		overrides = h.models.Entries()
-	}
 
 	src := h.modelNamesUnion(r)
 	// 目录行按 uid 键控，并入注册表行——目录外的名字（别名键、纯注册表项、
@@ -84,16 +80,12 @@ func (h *Handler) adminModelRegistry(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := make([]modelRow, 0, len(src))
 	for name, sources := range src {
-		e, has := overrides[name]
-		target := name
-		if e.RedirectModel != "" {
-			target = e.RedirectModel
-		}
+		resolved, e, has := h.resolvedModel(name, aliases)
 		rows = append(rows, modelRow{
 			Model:         name,
 			Enabled:       !e.Disabled,
 			RedirectModel: e.RedirectModel,
-			Resolved:      devin.ResolveModelAlias(aliases, target),
+			Resolved:      resolved,
 			Sources:       sources,
 			HasOverride:   has,
 			Catalog:       catalogByUID[name],
@@ -303,20 +295,21 @@ func (r *probeRecorder) Write(p []byte) (int, error) {
 	return r.ResponseRecorder.Write(p)
 }
 
-// resolvedModel 返回模型经注册表覆盖与别名链后的最终解析名，与 /v1
-// 准入后的解析路径一致；探活结果的 actual_model 用它（Anthropic 响应体
-// 回显的是请求名，拿不到真实落点）。
-func (h *Handler) resolvedModel(name string) string {
-	target := name
+// resolvedModel 按 /v1 准入后的同一条链把请求模型名解析到最终落点：
+// 注册表 Lookup（exact→大小写折叠）的 redirect_model 改写 → aliases
+// 别名表（exact→折叠→"*"→直通）。注册表行展示与探针 actual_model
+// 共用此链，改写顺序只此一处。返回命中的注册项供调用方展示（未命中
+// 零值 + ok=false）；aliases 由调用方供——注册表视图一次池快照全表
+// 共用，探针自取；空/ nil 别名表即直通。
+func (h *Handler) resolvedModel(name string, aliases map[string]string) (resolved string, entry modelreg.Entry, ok bool) {
 	if h.models != nil {
-		if e, ok := h.models.Entries()[name]; ok && e.RedirectModel != "" {
-			target = e.RedirectModel
-		}
+		entry, ok = h.models.Lookup(name)
 	}
-	if ps, ok := h.poolSnapshot(); ok {
-		return devin.ResolveModelAlias(ps.Aliases, target)
+	target := name
+	if entry.RedirectModel != "" {
+		target = entry.RedirectModel
 	}
-	return target
+	return devin.ResolveModelAlias(aliases, target), entry, ok
 }
 
 // adminModelTest 实现 POST /admin/model-test：面板探活入口，返回形状与
@@ -434,12 +427,17 @@ func (h *Handler) serveProbeRequest(w http.ResponseWriter, r *http.Request, path
 	res := rec.Result()
 	respBody := rec.Body.Bytes()
 	ok := res.StatusCode >= 200 && res.StatusCode < 300
+	var aliases map[string]string
+	if ps, hasPool := h.poolSnapshot(); hasPool {
+		aliases = ps.Aliases
+	}
+	actualModel, _, _ := h.resolvedModel(model, aliases)
 	out := map[string]any{
 		"success":         ok,
 		"status_code":     res.StatusCode,
 		"duration_ms":     time.Since(started).Milliseconds(),
 		"is_streaming":    stream,
-		"actual_model":    h.resolvedModel(model),
+		"actual_model":    actualModel,
 		"client_protocol": probeProtocolName(clientProtocol),
 		"request_id":      res.Header.Get("X-Request-Id"),
 	}
