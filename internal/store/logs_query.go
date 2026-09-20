@@ -513,6 +513,61 @@ func (s *Store) ExistsLogBefore(ctx context.Context, q LogQuery) (bool, error) {
 	return n != 0, err
 }
 
+const (
+	// logPageDefaultLimit/logPageMaxLimit 是日志页翻页的默认/上限
+	// 页大小——SearchLogsPage 的入参归一化口径。
+	logPageDefaultLimit = 200
+	logPageMaxLimit     = 1000
+)
+
+// SearchLogsPage 是日志页的 keyset 翻页编排（原 ccpanel.dashboardLogs
+// 的页边界规则，编排下沉后与语义一起搬家）：q 携带原始页参数——
+// Limit<=0 按 200、>1000 按 1000；Offset<0 按 0；BeforeID 是上一页
+// 最旧行的 id，与 Offset 并存时谓词取交（id<before_id 且按 offset
+// 跳行）。返回本页行（新在前）、total 与 has_more：
+//   - 首页（Offset==0 且 BeforeID==0）付精确 COUNT(*)，total 是
+//     筛选命中总数，has_more=total>len(rows)；
+//   - 深页多取一行（limit+1 探测）判 has_more 并跳过全窗计数——
+//     total=-1 标记计数缺席，调用方据此省略 count 字段（深页翻页时
+//     全窗计数 ~0.7-1s/页是纯税，字段缺席走前端既有降级分支）；
+//   - 两条路径都判不出更多命中时回落 ExistsLogBefore——时间窗下界
+//     之外仍有更早历史也算 has_more。
+func (s *Store) SearchLogsPage(ctx context.Context, q LogQuery) (rows []*LogRow, total int64, hasMore bool, err error) {
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+	limit := q.Limit
+	if limit <= 0 {
+		limit = logPageDefaultLimit
+	}
+	if limit > logPageMaxLimit {
+		limit = logPageMaxLimit
+	}
+	firstPage := q.Offset == 0 && q.BeforeID == 0
+	q.Limit = limit
+	if !firstPage {
+		q.Limit = limit + 1
+		q.SkipCount = true
+	}
+	rows, total, err = s.SearchLogs(ctx, q)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if !firstPage && len(rows) > limit {
+		rows = rows[:limit]
+		hasMore = true
+	}
+	if firstPage {
+		hasMore = total > int64(len(rows))
+	}
+	if !hasMore {
+		if before, berr := s.ExistsLogBefore(ctx, q); berr == nil {
+			hasMore = before
+		}
+	}
+	return rows, total, hasMore, nil
+}
+
 // deleteLogsBatch 是 DeleteLogsBefore 单片删除的行数上界：logs 是
 // 无界增长表，每行删除连带约十个索引项维护，无界单事务在保留期调小
 // 或批量回填触发存量清理时会独占唯一写连接数秒。片级提交让请求路径
