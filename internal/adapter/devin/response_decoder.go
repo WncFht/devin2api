@@ -207,9 +207,10 @@ func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageRespon
 		// 停止序列已截断对外输出；继续消费上游帧仅为 usage 统计完整。
 		return nil
 	}
-	// 子解码器共享同一个 events 切片追加事件；多数帧只产 1-2 个事件，
-	// 共享切片把每帧的 2-3 次小分配压到接近一次。
-	events := make([]llm.ResponseEvent, 0, 4)
+	// 子解码器共享同一个 events 切片追加事件；nil 起步让零产出的
+	// 元数据帧（usage/latency 活性帧）不付容量分配，首个 append 再
+	// 按倍增扩容——多数帧只产 1-2 个事件，比固定预开 4 容量省。
+	var events []llm.ResponseEvent
 	// 上游把签名作为全部正文之后的尾随帧发送；思考块已关闭时
 	// 不能新开思考块，要把签名合并回上一个思考块。
 	if response.GetDeltaSignature() != "" && response.GetDeltaThinking() == "" && !decoder.thinkingOpen {

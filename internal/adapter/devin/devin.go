@@ -1039,7 +1039,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		},
 		detachKey: detachKey,
 		registry:  adapter.detached,
-		entry:     &detachedEntry{notify: make(chan struct{})},
+		entry:     &detachedEntry{},
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
 		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
 		// 上游语义拒绝（参数校验/权限/限流）重试只会复现同样失败，直接放行。
@@ -1883,15 +1883,14 @@ type devinResponseReceiver interface {
 func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
-	// 静默计时器挂在流上跨 Recv 复用：每次入等待循环前 Reset 覆盖
-	// 帧间隔。Go 1.23+ 计时器通道无缓冲，Stop/Reset 后不会投递陈旧触发，
-	// 已触发（stall.C 分支）的计时器 Reset 重新武装即可。
+	// 静默计时器挂在流上跨 Recv 复用：等待循环内每次 select 前 Reset
+	// 覆盖帧间隔（见下方 stall.Reset），顶部只建不武装。Go 1.23+ 计时器
+	// 通道无缓冲，Stop/Reset 后不会投递陈旧触发，已触发（stall.C 分支）
+	// 的计时器 Reset 重新武装即可。
 	stall := stream.stall
 	if stall == nil {
 		stall = time.NewTimer(stream.deadlines.stall(stream.decoder.hasStopReason, stream.upstreamConfirmed))
 		stream.stall = stall
-	} else {
-		stall.Reset(stream.deadlines.stall(stream.decoder.hasStopReason, stream.upstreamConfirmed))
 	}
 	defer stall.Stop()
 	// progress 与 stall 同构：计时器跨 Recv 复用，消费方每次进入等待
@@ -2356,9 +2355,13 @@ type protoJSON struct{ message proto.Message }
 func (p protoJSON) MarshalJSON() ([]byte, error) { return protojson.Marshal(p.message) }
 
 // recordProtoJSON 把 proto 消息记入调试日志；.jsonl 文件名走追加，
-// 其余整写。recorder 可为 nil（未开调试日志）——Recorder 方法对
-// nil 接收者安全。message 在全部调用点都已保证非空。
+// 其余整写。recorder 为 nil（未开调试日志）时直接返回——早退省掉
+// protoJSON 值装箱进 any 形参的每帧一次堆分配（Recorder 方法本身
+// 对 nil 也安全）。message 在全部调用点都已保证非空。
 func recordProtoJSON(recorder *debuglog.Recorder, name string, message proto.Message) {
+	if recorder == nil {
+		return
+	}
 	if strings.HasSuffix(name, ".jsonl") {
 		// JSONL 阶段文件的帧行走 JSONLRecord 信封（event="frame"）：
 		// seq/elapsed_ms 给每帧本地到达序与时标——帧间隔重建不再依赖

@@ -565,7 +565,6 @@ func (registry *detachedRegistry) seed() {
 		entry := &detachedEntry{
 			events:     events,
 			state:      detachedCompleted,
-			notify:     make(chan struct{}),
 			replayable: true,
 			originDir:  blob.OriginDir,
 			// admittedAt 记真实完成时刻而非开机时刻：容量让位序按条目

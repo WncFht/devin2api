@@ -78,8 +78,10 @@ type detachedEntry struct {
 	mu     sync.Mutex
 	events []llm.ResponseEvent
 	state  detachedState
-	// notify 是「有新事件/已终态」的广播钟：每次 append/finish 关闭
-	// 换新，全部等待中的挂接方被唤醒后重走 poll。
+	// notify 是「有新事件/已终态」的广播钟：等待中的挂接方在 poll
+	// 空转分支按需创建，append/finish 关闭并置 nil——全部持有者被
+	// 唤醒后重走 poll 时再建下一只。无等待者期间恒为 nil，append
+	// 不为无人收听的广播逐事件付 channel 分配。
 	notify chan struct{}
 	// replayable 仅 failed 态有意义：终局错误是否值得原样重放——
 	// 传输断裂/取消类瞬态失败的同键重试应走新上游而非吃缓存终态。
@@ -128,14 +130,18 @@ func (entry *detachedEntry) append(event llm.ResponseEvent) bool {
 	entry.events = append(entry.events, event)
 	entry.bufferedBytes += detachedEventBytes(event)
 	if entry.bufferedBytes <= detachedMaxBufferedBytes {
-		close(entry.notify)
-		entry.notify = make(chan struct{})
+		if entry.notify != nil {
+			close(entry.notify)
+			entry.notify = nil
+		}
 		return false
 	}
 	entry.truncated = true
 	entry.events = append(entry.events, detachedTruncatedEvent(entry.bufferedBytes))
-	close(entry.notify)
-	entry.notify = make(chan struct{})
+	if entry.notify != nil {
+		close(entry.notify)
+		entry.notify = nil
+	}
 	return true
 }
 
@@ -232,8 +238,10 @@ func (entry *detachedEntry) finish() detachedState {
 		entry.replayable = true
 		entry.expiresAt = time.Now().Add(detachedCompletedTTL)
 	}
-	close(entry.notify)
-	entry.notify = make(chan struct{})
+	if entry.notify != nil {
+		close(entry.notify)
+		entry.notify = nil
+	}
 	return entry.state
 }
 
@@ -247,6 +255,9 @@ func (entry *detachedEntry) poll(cursor int) (event llm.ResponseEvent, ok, done 
 	}
 	if entry.state != detachedRunning {
 		return llm.ResponseEvent{}, false, true, nil
+	}
+	if entry.notify == nil {
+		entry.notify = make(chan struct{})
 	}
 	return llm.ResponseEvent{}, false, false, entry.notify
 }

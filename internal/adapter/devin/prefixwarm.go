@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -295,8 +296,14 @@ type cacheWarmer struct {
 	done      chan struct{}
 	closeOnce sync.Once
 
-	mu            sync.Mutex
-	params        WarmConfig
+	mu     sync.Mutex
+	params WarmConfig
+	// enabled 是 params.Enabled 的锁外镜像：keyOf 是每请求热路径，
+	// 为读一个 bool 拿 mu 会把全部流在 setParams/清扫持锁期串行。
+	// 唯一写点是 setParams（mu 内与 params 同源同序），读侧只需
+	// 「此刻是否值得算哈希」的近似——开关边缘的一次误判至多白算
+	// 一次键或多记一条将删条目。
+	enabled       atomic.Bool
 	drained       bool // 排空中：停发 ping，表留作观测，条目自然到期退役
 	entries       map[warmLineageKey]*warmEntry
 	retainedBytes int64 // 全部条目 retainedBytes 合计（容量帽账本）
@@ -367,6 +374,7 @@ func (w *cacheWarmer) setParams(next WarmConfig) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.params = NormalizeWarmConfig(next)
+	w.enabled.Store(w.params.Enabled)
 	if !w.params.Enabled {
 		w.entries = make(map[warmLineageKey]*warmEntry)
 		w.retainedBytes = 0
@@ -376,12 +384,10 @@ func (w *cacheWarmer) setParams(next WarmConfig) {
 }
 
 // keyOf 计算请求的 lineage 键；功能关闭时返回零键让下游全 no-op，
-// 省掉每请求一次的哈希开销。
+// 省掉每请求一次的哈希开销。enabled 镜像只承近似判定——开/关边缘
+// 误算出的键在 retain 的 mu 内 Enabled 复核处被拦住，不会落簿记。
 func (w *cacheWarmer) keyOf(request llm.RequestMessages, resolvedUID string) warmLineageKey {
-	w.mu.Lock()
-	enabled := w.params.Enabled
-	w.mu.Unlock()
-	if !enabled {
+	if !w.enabled.Load() {
 		return warmLineageKey{}
 	}
 	return warmLineageKey{
