@@ -125,41 +125,45 @@ func encodePayload(zw *gzip.Writer, data []byte) (stored []byte, usize int64) {
 // base 为空或残差收益不达阈值时回退 EncodePayload 独立存储——读侧
 // 按魔数自判形态，回退不需要任何标记位。
 func EncodePayloadDelta(data, base []byte) (stored []byte, usize int64) {
-	enc := NewPayloadDeltaEncoder(base)
-	if enc == nil {
-		return EncodePayload(data)
-	}
+	enc := NewPayloadDeltaEncoder()
 	defer enc.Close()
-	return enc.Encode(data)
+	return enc.Encode(data, base)
 }
 
-// PayloadDeltaEncoder 是单字典复用的 zstd delta 编码器：字典哈希表
-// 构建是 ~400KB 基座上编码的最贵一步，同目录 02/03* 分片各建一次
-// 编码器等于重复付这笔账。非并发安全：持有者是单编码协程。
+// PayloadDeltaEncoder 是单持有者复用的 zstd delta 编码器：Encode
+// 每次供给 base，相同（指针判等）直接编、不同经 ResetWithOptions
+// 换 dict。换 dict 只付 dict 哈希表的 clear+重填 CPU——编码器长短表
+// 与 8MB window hist 跨 base 永续复用，把「每目录新建 dict 编码器」
+// ~16MB 的一次性建造成本摊成零。非并发安全：持有者是单编码协程。
 type PayloadDeltaEncoder struct {
-	zw *zstd.Encoder
+	zw   *zstd.Encoder
+	base []byte
 }
 
-// NewPayloadDeltaEncoder 以 base 为 raw dict 建复用编码器；base 为空
-// 或建器失败返回 nil——调用方回退 EncodePayload 独立编码。
-func NewPayloadDeltaEncoder(base []byte) *PayloadDeltaEncoder {
-	if len(base) == 0 {
-		return nil
-	}
-	zw, err := zstd.NewWriter(nil,
-		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
-		zstd.WithEncoderConcurrency(1),
-		zstd.WithEncoderDictRaw(deltaDictID, base))
-	if err != nil {
-		return nil
-	}
-	return &PayloadDeltaEncoder{zw: zw}
-}
+// NewPayloadDeltaEncoder 建空编码器；底层 zstd writer 随首个带合法
+// base 的 Encode 懒建——无 delta 候选的持有者不付建造成本。
+func NewPayloadDeltaEncoder() *PayloadDeltaEncoder { return &PayloadDeltaEncoder{} }
 
-// Encode 与 EncodePayloadDelta 同语义，复用持有者的字典编码器。
-func (e *PayloadDeltaEncoder) Encode(data []byte) (stored []byte, usize int64) {
-	if len(data) < compressMinBytes {
+// Encode 以 base 为字典编码 data，语义同 EncodePayloadDelta。
+// base 为空、data 过阈下或残差收益不足时回退 EncodePayload。
+func (e *PayloadDeltaEncoder) Encode(data, base []byte) (stored []byte, usize int64) {
+	if len(data) < compressMinBytes || len(base) == 0 {
 		return EncodePayload(data)
+	}
+	if e.zw == nil {
+		zw, err := zstd.NewWriter(nil,
+			zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
+			zstd.WithEncoderConcurrency(1),
+			zstd.WithEncoderDictRaw(deltaDictID, base))
+		if err != nil {
+			return EncodePayload(data)
+		}
+		e.zw, e.base = zw, base
+	} else if !sameDeltaBase(e.base, base) {
+		if err := e.zw.ResetWithOptions(nil, zstd.WithEncoderDictRaw(deltaDictID, base)); err != nil {
+			return EncodePayload(data)
+		}
+		e.base = base
 	}
 	if stored = e.zw.EncodeAll(data, nil); int64(len(stored)) >= int64(len(data))*9/10 {
 		return EncodePayload(data)
@@ -167,8 +171,19 @@ func (e *PayloadDeltaEncoder) Encode(data []byte) (stored []byte, usize int64) {
 	return stored, int64(len(data))
 }
 
+// sameDeltaBase 判两次供给的基座是否同一底层段：钉住的 deltaBase 在
+// 本目录内是同一切片，指针+长度相等即可跳过 dict 更换；指针不同的
+// 相同内容走换 dict 路径，只多付一次表重建，正确性中立。
+func sameDeltaBase(a, b []byte) bool {
+	return len(a) == len(b) && &a[0] == &b[0]
+}
+
 // Close 释放编码器占有的内部缓冲；EncodeAll 路径无流式状态可冲刷。
-func (e *PayloadDeltaEncoder) Close() { _ = e.zw.Close() }
+func (e *PayloadDeltaEncoder) Close() {
+	if e.zw != nil {
+		_ = e.zw.Close()
+	}
+}
 
 // errDeltaNeedsBase 是 delta 帧走到无字典解码口的显式失败：读侧必须
 // 先取同目录基座，静默透传 zstd 帧等于交出乱码。
