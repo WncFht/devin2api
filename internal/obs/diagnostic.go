@@ -15,6 +15,8 @@ import (
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
+
+	"github.com/WncFht/devin2api/internal/logvocab"
 )
 
 const (
@@ -24,14 +26,32 @@ const (
 
 var (
 	// sensitiveAssignmentPattern 匹配 k=v / "k": "v" 形式的敏感赋值，保留键名。
-	// 键名名单与 debuglog/sanitize.go 的 secretKeyNames 同源（那边是归一化
-	// 键名、这边按 [\s_-]* 分隔匹配原文）——增删要两侧同步。cookie 一项
-	// 同时覆盖 set-cookie（子串命中）。
-	sensitiveAssignmentPattern = regexp.MustCompile(`(?i)(["']?(?:access[\s_-]*token|refresh[\s_-]*token|id[\s_-]*token|api[\s_-]*key|access[\s_-]*key|client[\s_-]*secret|proxy[\s_-]*authorization|authorization|password|credential|session[\s_-]*token|secret|token|fingerprint|cookie|model[\s_-]*assignment[\s_-]*jwt)["']?\s*[:=]\s*)(?:(?:bearer|basic)\s+[^\s,;]+|"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s,;&}\]]+)`)
+	// 键名交替由 logvocab.SecretKeys 派生（'_' 展开成 [\s_-]* 分隔匹配原文），
+	// 并入本正则专属的宽松项——名单与 debuglog 的 JSON 脱敏同源，增删只改
+	// 叶子包一处。
+	sensitiveAssignmentPattern = regexp.MustCompile(`(?i)(["']?(?:` + sensitiveKeyAlternation() + `)["']?\s*[:=]\s*)(?:(?:bearer|basic)\s+[^\s,;]+|"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s,;&}\]]+)`)
 	bearerPattern              = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[^\s,;]+`)
 	urlUserinfoPattern         = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@`)
 	httpStatusPattern          = regexp.MustCompile(`(?i)\bstatus(?:\s+code)?\s*[:=]?\s*([1-5][0-9]{2})\b`)
 )
+
+// sensitiveKeyAlternation 展开脱敏键名为 sensitiveAssignmentPattern 的
+// 交替段：logvocab.SecretKeys 的规范形态把 '_' 换成 [\s_-]* 以匹配
+// 原文键名（cookie 一项同时覆盖 set-cookie 子串命中，反过来
+// set[\s_-]*cookie 也兜住键内带分隔的变体）。末尾并入本正则专属的
+// 宽松项：id_token/proxy_authorization 是常见凭据形，credential/
+// secret/fingerprint 是词缀兜底——自由文本诊断的口径宁宽勿漏，
+// 这些项不进 JSON 键名名单（宽匹配会把客户端负载里的同名短键误伤）。
+func sensitiveKeyAlternation() string {
+	alternatives := make([]string, 0, len(logvocab.SecretKeys)+5)
+	for _, key := range logvocab.SecretKeys {
+		alternatives = append(alternatives, strings.ReplaceAll(key, "_", `[\s_-]*`))
+	}
+	alternatives = append(alternatives,
+		`id[\s_-]*token`, `proxy[\s_-]*authorization`,
+		`credential`, `secret`, `fingerprint`)
+	return strings.Join(alternatives, "|")
+}
 
 // Diagnostic 把 err 收敛为单行有界文本：白名单信号 + 脱敏截断摘要。
 // 永不原样输出自由文本——上游/provider 错误体可能携带凭据。

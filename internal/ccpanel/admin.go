@@ -193,7 +193,7 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 			a = &tokenAgg{}
 			byKH[key.KeyHash] = a
 		}
-		a.t = addCells(a.t, c)
+		a.t = a.t.Add(c)
 		a.cost += cellCost(key, c, prices)
 		if n := c.Requests - c.Gone; n > a.peak {
 			a.peak = n

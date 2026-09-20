@@ -18,7 +18,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/logvocab"
 )
+
+// stripKeepPred 是剥载（StripDirs 与读侧 StripDebugDirsBefore）保留
+// 归因锚点的 WHERE 片段：meta.json 记结果与延迟分解、error.json 记
+// 首败点——名单的唯一事实源是 logvocab.AnchorFiles。
+var stripKeepPred = `name NOT IN ('` + strings.Join(logvocab.AnchorFiles, "', '") + `')`
 
 // DebugFileInfo 是目录内一个文件的清单项。
 type DebugFileInfo struct {
@@ -249,7 +256,7 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 			for _, dir := range batch.StripDirs {
 				args = append(args, dir)
 			}
-			where := `dir IN (` + placeholders(len(batch.StripDirs)) + `) AND name NOT IN ('meta.json', 'error.json')`
+			where := `dir IN (` + placeholders(len(batch.StripDirs)) + `) AND ` + stripKeepPred
 			freed, err := deleteReturningBytes(ctx, q,
 				`DELETE FROM debug_files WHERE `+where+` RETURNING LENGTH(content)`, args...)
 			if err != nil {
@@ -641,8 +648,8 @@ func (s *Store) DebugErrorSignatures(ctx context.Context) (map[string][2]string,
 	rows, err := s.ro.QueryContext(ctx,
 		`SELECT l.dir, l.error_stage, l.error_message FROM logs l
 		JOIN (
-			SELECT dir FROM debug_files WHERE name='error.json'
-			UNION SELECT dir FROM debug_chunks WHERE name='error.json'
+			SELECT dir FROM debug_files WHERE name='`+logvocab.ErrorFile+`'
+			UNION SELECT dir FROM debug_chunks WHERE name='`+logvocab.ErrorFile+`'
 		) e ON e.dir = l.dir
 		WHERE l.error_stage != ''`)
 	if err != nil {

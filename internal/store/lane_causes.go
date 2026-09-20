@@ -3,9 +3,10 @@
 // debuglog.logRowFor 从 meta.json 同源的 upstream_attempts 投影）在
 // InsertLog/WriteDebugBatch 里按 (day,lane,cause) 主键累加——meta.json
 // 的 upstream_attempts 明细受 payload 与目录保留期约束会淘汰，本表
-// 是「为什么换号」的唯一持久口径。cause 词表由 debuglog 写方定版：
-// local_gate[:reason] 是本地闸门快败的幻影换号（零上游发送）、
-// connect code 是真实 failover 发送、nocode 是无 code 的传输断裂。
+// 是「为什么换号」的唯一持久口径。cause 词表的唯一事实源在 logvocab
+// （写方 debuglog.switchCauseKey 经它取词）：local_gate[:reason] 是
+// 本地闸门快败的幻影换号（零上游发送）、connect code 是真实 failover
+// 发送、nocode 是无 code 的传输断裂。
 package store
 
 import (

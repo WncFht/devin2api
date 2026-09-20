@@ -7,23 +7,24 @@ import (
 	"time"
 )
 
-// LogRow 是 logs 表一行的领域形状，也是日志行的 wire 投影
-// （/admin/logs 导出与 matrix 的元素，json tag 即对外字段名）。
+// LogRow 是 logs 表一行的领域形状。它不是 wire 投影——对外字段名由
+// 各端点自己的投影类型持有（ccpanel 的 logEntry/matrixEntry/
+// logExportRow，store 导出文件的 logRowToLegacyIndexEntry）。
 // time/minute_bucket 由 InsertLog 从 StartedAt 派生、不进字段；
 // upstream_protocol 由 DDL 默认值供值——两者都只在读侧回填出现。
 type LogRow struct {
 	// ID 是自增日志行号——面板 log_id 与 last_*_id 的身份；读侧回填。
-	ID int64 `json:"-"`
+	ID int64
 	// LogSource 是写入时定版的来源：写侧置值即生效（rejected 行靠它
 	// 与服役流量分域），留空时 InsertLog 回落 'proxy'——业务分类归
 	// 写方（debuglog.logRowFor / 导入器各自定版）；读路径回填库内原值。
-	LogSource string `json:"-"`
+	LogSource string
 	// UpstreamProtocol 保留过滤维度的统一形状（当前恒 devin）；读侧回填。
-	UpstreamProtocol string `json:"-"`
+	UpstreamProtocol string
 
-	Dir        string    `json:"dir"`
-	StartedAt  time.Time `json:"started_at"`
-	DurationMS int64     `json:"duration_ms"`
+	Dir        string
+	StartedAt  time.Time
+	DurationMS int64
 	// 延迟分解字段用指针区分「未发生」（nil，省略）与「即时发生」（0ms）；
 	// int 零值会掩盖这两种语义。分解口径见 debuglog.Recorder 同名字段注释：
 	// ready→sent 本地投影、sent→open 建流往返、open→first_upstream 上游
@@ -31,86 +32,86 @@ type LogRow struct {
 	// 是泵收完上游事件流的时刻——非流式 egress 段以它为基线（流式仍用
 	// first_upstream）；库列在 DDL 尾部与 ALTER 补齐的物理列序一致，
 	// 字段按语义归在分解块。
-	RequestReadyMS   *int64 `json:"request_ready_ms,omitempty"`
-	UpstreamSentMS   *int64 `json:"upstream_sent_ms,omitempty"`
-	UpstreamOpenMS   *int64 `json:"upstream_open_ms,omitempty"`
-	FirstUpstreamMS  *int64 `json:"first_upstream_ms,omitempty"`
-	FirstClientMS    *int64 `json:"first_client_ms,omitempty"`
-	UpstreamDoneMS   *int64 `json:"upstream_done_ms,omitempty"`
-	API              string `json:"api,omitempty"`
-	Method           string `json:"method"`
-	Path             string `json:"path"`
-	StatusCode       int    `json:"status_code"`
-	Result           string `json:"result"`
-	RequestedModel   string `json:"requested_model,omitempty"`
-	Model            string `json:"model,omitempty"`
-	ResponseModel    string `json:"response_model,omitempty"`
-	ModelMismatch    bool   `json:"model_mismatch,omitempty"`
-	Stream           bool   `json:"stream"`
-	InputTokens      int64  `json:"input_tokens,omitempty"`
-	OutputTokens     int64  `json:"output_tokens,omitempty"`
-	CacheReadTokens  int64  `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens int64  `json:"cache_write_tokens,omitempty"`
-	ReasoningTokens  int64  `json:"reasoning_tokens,omitempty"`
-	TotalTokens      int64  `json:"total_tokens,omitempty"`
+	RequestReadyMS   *int64
+	UpstreamSentMS   *int64
+	UpstreamOpenMS   *int64
+	FirstUpstreamMS  *int64
+	FirstClientMS    *int64
+	UpstreamDoneMS   *int64
+	API              string
+	Method           string
+	Path             string
+	StatusCode       int
+	Result           string
+	RequestedModel   string
+	Model            string
+	ResponseModel    string
+	ModelMismatch    bool
+	Stream           bool
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	ReasoningTokens  int64
+	TotalTokens      int64
 	// CreditCost 是上游帧上报的权威计费读数（单请求口径，可加总）；
 	// Committed* 系账户快照读数不进索引——逐请求保留见 meta.json。
-	CreditCost        int64  `json:"credit_cost,omitempty"`
-	UpstreamRequestID string `json:"upstream_request_id,omitempty"`
-	ClientIP          string `json:"client_ip,omitempty"`
-	KeyHash           string `json:"key_hash,omitempty"`
+	CreditCost        int64
+	UpstreamRequestID string
+	ClientIP          string
+	KeyHash           string
 	// ClientRequestID 是客户端自带的关联 ID（X-Request-Id 等），
 	// 让调用方能用自己的 ID 反查本次请求。
-	ClientRequestID string `json:"client_request_id,omitempty"`
+	ClientRequestID string
 	// ErrorStage 是首个失败阶段（http_decode/provider_stream/http_stream 等），
 	// 让检索直接定位失败发生在哪一层。只在终结性失败（result!=completed）
 	// 时落盘：中途被重试救回的错误仍留在目录 error.json 与 retry_attempts
 	// 里，进索引会把「发生过失败」与「请求失败」混成一桶。
-	ErrorStage string `json:"error_stage,omitempty"`
+	ErrorStage string
 	// ErrorMessage 是首个失败的错误文案（与 error.json 的 message 同源，
 	// 截断后随索引落盘）。目录被保留策略淘汰后，日志行仍能回答
 	// 「为什么败」——此前只剩阶段名，归因必须靠目录在场。
-	ErrorMessage  string `json:"error_message,omitempty"`
-	DroppedEvents uint64 `json:"dropped_events,omitempty"`
+	ErrorMessage  string
+	DroppedEvents uint64
 	// RetryAfterSeconds 是上游限流给出的 reset 秒数 hint，
 	// 供聚合区分「有退避提示的限流」与「裸限流」；非限流请求为 0。
-	RetryAfterSeconds int64 `json:"retry_after_seconds,omitempty"`
+	RetryAfterSeconds int64
 	// RateLimited 标记本请求被限流语义终结（上游 429 / 本地闸门 / 流内
 	// 限流错误事件）。HTTP 状态码认不全限流——流内下发的限流仍是 200，
 	// 责任归因与限流采样用本字段而不是 status_code。
-	RateLimited bool `json:"rate_limited,omitempty"`
+	RateLimited bool
 	// Retries 是上游重发次数（attempt2+，token 自愈/空响应/transport
 	// 重开）；明细在同目录 meta.json 的 retry_attempts 与 04 的
 	// retry_attempt 分界行。0 表示一次发送完成。
-	Retries int `json:"retries,omitempty"`
+	Retries int
 	// Account 是最终服务请求的上游账号名（号池 lane 名）；迁移前
 	// 历史行另有 ''/'default' 残留，读侧按 'default' 折叠归桶。
-	Account string `json:"account,omitempty"`
+	Account string
 	// AccountSwitches 是号池 failover 换号次数（成功前的失败尝试数），
 	// 明细在同目录 meta.json 的 upstream_attempts。0 表示首号即成。
-	AccountSwitches int `json:"account_switches,omitempty"`
+	AccountSwitches int
 	// PrematureEndTurn 标记「工具结果之后模型纯文本 end_turn」的可疑收尾，
 	// 供检索统计该模型行为的真实频率。
-	PrematureEndTurn bool `json:"premature_end_turn,omitempty"`
+	PrematureEndTurn bool
 	// Repairs 是请求投影为上游 wire 格式时的静默修复动作总数
 	//（重排/降级/剥离/指纹改写），明细在同名 meta.json 字段。
-	Repairs int `json:"repairs,omitempty"`
+	Repairs int
 	// ConnReused 标记成功建流那次发送是否复用了 idle 连接；指针是为了
 	// 区分「未记录」（nil，省略）与「复用失败新建」（false）——connect
 	// 段偏高时靠它区分「握手成本」与「上游响应头延迟」。
-	ConnReused *bool  `json:"conn_reused,omitempty"`
-	ConnIdleMS *int64 `json:"conn_idle_ms,omitempty"`
+	ConnReused *bool
+	ConnIdleMS *int64
 	// AffinityHash 是号池选号的会话谱系亲和键（SessionAffinityKey 的
 	// SHA-256，不可逆），与 meta.json 的 affinity_hash 同源——谱系
 	// 分析（绑定谱系/warm 救援/failover 同族）的 GROUP BY 维。非号池
 	// 路径与管线前拒绝留空串；读侧回填库内原值。
-	AffinityHash string `json:"affinity_hash,omitempty"`
+	AffinityHash string
 
 	// SwitchCauses 是被放弃 lane 尝试的归因聚合（{lane,cause}→次数），
 	// 由写方 debuglog.logRowFor 从 meta.json 同源的 upstream_attempts
 	// 投影而来——它不是列，只作 InsertLog/WriteDebugBatch 展开进
 	// lane_attempt_causes 表的瞬时载体，读侧回填恒为 nil。
-	SwitchCauses map[SwitchCause]int `json:"-"`
+	SwitchCauses map[SwitchCause]int
 }
 
 // logColumnList 是 logs 表全部列，顺序与 schema.go 的 CREATE TABLE

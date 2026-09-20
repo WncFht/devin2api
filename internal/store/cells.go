@@ -31,6 +31,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/logvocab"
 )
 
 // cellMetrics 依序登记 log_cells 的 40 个可加指标列：DDL、回填
@@ -306,18 +308,15 @@ func logCellVals(e *LogRow) cellVals {
 	if e.StatusCode == 429 || e.RateLimited {
 		v.rltd = 1
 	}
-	switch {
-	case e.Result == "rejected":
-		// 'none'
-	case e.StatusCode == 429 || e.RateLimited:
-		// business_limited——两个归因列都不计。
-	case disc:
+	switch logvocab.ClassifyOwner(logvocab.OwnerInput{
+		Result:      e.Result,
+		StatusCode:  e.StatusCode,
+		RateLimited: e.RateLimited,
+		ErrorStage:  e.ErrorStage,
+	}) {
+	case logvocab.OwnerClient:
 		v.cfault = 1
-	case e.StatusCode < 400 && e.Result != "failed":
-		// 'none'
-	case e.ErrorStage == "http_read" || e.ErrorStage == "http_decode":
-		v.cfault = 1
-	default:
+	case logvocab.OwnerUpstream:
 		v.ufault = 1
 	}
 	ok2xx := e.StatusCode >= 200 && e.StatusCode < 300

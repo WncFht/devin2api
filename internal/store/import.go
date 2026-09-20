@@ -11,58 +11,17 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/logvocab"
 )
 
 // legacyToken/legacyTokenFile 是 auth_tokens.json 的读写形状——
-// store 不能 import authtoken（方向相反），这里自持最小镜像。
-// JSON tag 与文件时代 authtoken.Token/tokenFile 逐字段一致（含
-// omitempty 分布），导入（Unmarshal）与导出（Marshal）共用。
-type legacyTokenFile struct {
-	NextID int64          `json:"next_id"`
-	Tokens []*legacyToken `json:"tokens"`
-}
+// 文件格式的唯一事实源在 logvocab（JSON tag 与文件时代
+// authtoken.Token/tokenFile 逐字段一致，含 omitempty 分布），
+// 导入（Unmarshal）与导出（Marshal）共用；随导入器退役一起删。
+type legacyTokenFile = logvocab.LegacyTokenFile
 
-type legacyToken struct {
-	ID             int64   `json:"id"`
-	Hash           string  `json:"token"`
-	Description    string  `json:"description"`
-	CreatedAt      string  `json:"created_at"`
-	ExpiresAt      *int64  `json:"expires_at,omitempty"`
-	LastUsedAt     *int64  `json:"last_used_at,omitempty"`
-	IsActive       bool    `json:"is_active"`
-	SuccessCount   int64   `json:"success_count"`
-	FailureCount   int64   `json:"failure_count"`
-	StreamAvgTTFB  float64 `json:"stream_avg_ttfb"`
-	NonStreamAvgRT float64 `json:"non_stream_avg_rt"`
-	StreamCount    int64   `json:"stream_count"`
-	NonStreamCount int64   `json:"non_stream_count"`
-
-	PromptTokensTotal        int64   `json:"prompt_tokens_total"`
-	CompletionTokensTotal    int64   `json:"completion_tokens_total"`
-	CacheReadTokensTotal     int64   `json:"cache_read_tokens_total"`
-	CacheCreationTokensTotal int64   `json:"cache_creation_tokens_total"`
-	TotalCostUSD             float64 `json:"total_cost_usd"`
-	EffectiveCostUSD         float64 `json:"effective_cost_usd"`
-
-	CostUsedMicroUSD     int64 `json:"cost_used_micro_usd"`
-	CostLimitMicroUSD    int64 `json:"cost_limit_micro_usd"`
-	DailyUsedMicroUSD    int64 `json:"cost_daily_used_micro_usd"`
-	DailyLimitMicroUSD   int64 `json:"cost_daily_limit_micro_usd"`
-	DailyPeriodStart     int64 `json:"cost_daily_period_start"`
-	MonthlyUsedMicroUSD  int64 `json:"cost_monthly_used_micro_usd"`
-	MonthlyLimitMicroUSD int64 `json:"cost_monthly_limit_micro_usd"`
-	MonthlyPeriodStart   int64 `json:"cost_monthly_period_start"`
-	Cost5hUsedMicroUSD   int64 `json:"cost_5h_used_micro_usd"`
-	Cost5hLimitMicroUSD  int64 `json:"cost_5h_limit_micro_usd"`
-	Cost5hAnchor         int64 `json:"cost_5h_anchor"`
-	WeeklyUsedMicroUSD   int64 `json:"cost_weekly_used_micro_usd"`
-	WeeklyLimitMicroUSD  int64 `json:"cost_weekly_limit_micro_usd"`
-	WeeklyPeriodStart    int64 `json:"cost_weekly_period_start"`
-
-	AllowedModels  []string `json:"allowed_models,omitempty"`
-	MaxConcurrency int      `json:"max_concurrency"`
-	MaxRPM         int      `json:"max_rpm"`
-}
+type legacyToken = logvocab.LegacyToken
 
 // probeClientRequestID 镜像 debuglog.ProbeClientRequestID——store 是被
 // debuglog 导入的下层包，不能反向引用常量。仅剩 importIndex 一处消费：

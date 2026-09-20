@@ -12,6 +12,8 @@ import (
 	"math"
 	"sort"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/logvocab"
 )
 
 // logDecodeCond 是「可信流式」条目的 SQL 判定（旧 decodeWindow 同款）：
@@ -22,16 +24,10 @@ const logDecodeCond = `result = 'completed' AND first_upstream_ms IS NOT NULL AN
 		AND duration_ms - first_upstream_ms > 0
 		AND output_tokens * 1000 <= 400 * (duration_ms - first_upstream_ms)`
 
-// logOwnerCase 与 debuglog.ErrorOwner 同一判定链的 SQL 版（store 不能
-// 反向依赖 debuglog 的阶段常量，'http_read'/'http_decode' 字面量对应
-// ErrStageHTTPRead/HTTPDecode，两边必须同步改）。
-const logOwnerCase = `CASE
-		WHEN result = 'rejected' THEN 'none'
-		WHEN status_code = 429 OR rate_limited != 0 THEN 'business_limited'
-		WHEN result IN ('disconnected', 'aborted') THEN 'client'
-		WHEN status_code < 400 AND result != 'failed' THEN 'none'
-		WHEN error_stage IN ('http_read', 'http_decode') THEN 'client'
-		ELSE 'upstream' END`
+// logOwnerCase 是失败责任归因链的 SQL 版：唯一事实源在 logvocab
+// （Go 侧镜像 ClassifyOwner 与它对偶，写方 debuglog.ErrorOwner 经
+// 同一叶子取判定）。
+const logOwnerCase = logvocab.OwnerCaseSQL
 
 // dayBoundsMS 返回 t 所在本地日的毫秒闭开区间界（[起点, 次日起点)），
 // 供 today 谓词替代不可索引的 logDayExpr 等值比较。
