@@ -209,7 +209,12 @@
   // 冻结序列（stale）显式标出——采样停更是「该号拉取在失败」的信号。
   function cellQuota(a) {
     const q = a.quota;
-    if (!q || (!q.daily && !q.weekly)) return `<span class="acct-none">${esc(t('accounts.noQuota'))}</span>`;
+    // seat_gated 挂在 report.user（采样侧 1h 缓存判定）——individual plan
+    // 号恒无采样，用专属文案区别于「还没采到」。
+    const gated = !!(q && q.user && q.user.seat_gated === true);
+    if (!q || (!q.daily && !q.weekly)) {
+      return `<span class="acct-none">${esc(gated ? t('accounts.st.seatGated') : t('accounts.noQuota'))}</span>`;
+    }
     const bars = miniBar(t('accounts.f.daily'), q.daily) + miniBar(t('accounts.f.weekly'), q.weekly);
     const sub = q.stale
       ? `<div class="acct-quota-sub acct-quota-sub--stale">${esc(t('accounts.stale'))}</div>`

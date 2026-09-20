@@ -1146,6 +1146,8 @@ window.I18N_LOCALES['en'] = {
   'accounts.st.exhausted': 'Quota exhausted',
   'accounts.st.unready': 'Not sendable',
   'accounts.st.unknownError': 'unknown',
+  'accounts.st.seatGated': 'Individual plan · no quota/self-heal',
+  'accounts.st.mintUnavailable': 'api_key mint unavailable',
   'accounts.pill.waiters': '{n} queued',
   'accounts.pill.deadzone': 'Window dead zone',
   'accounts.kpi.lanes': 'Accounts',

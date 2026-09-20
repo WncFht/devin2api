@@ -288,8 +288,14 @@ func (q *quotaSampler) accounts() []quotaAccount {
 // 在 persist 里自带独立预算，不分享这段余额。
 // 首尾各记一次逐 lane 心跳：轮次走到 fetch/persist 哪一步、最近一次
 // 错误文本，供静默空洞期判别「调度器没跑」与「跑了没写」。
+// seat-gated 号（individual plan 对 SeatManagementService 整面 403）
+// TTL 内跳过上游拉取：那是 plan 属性不是瞬时故障，每轮白打只产 WARN。
 func (q *quotaSampler) sampleAccount(ctx context.Context, account, token string) {
 	q.noteLaneStart(account)
+	if q.seatGatedFresh(account) {
+		q.noteSeatGatedRound(account)
+		return
+	}
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	_, plan, persistErr, err := q.capture(ctx, account, token)
@@ -297,6 +303,43 @@ func (q *quotaSampler) sampleAccount(ctx context.Context, account, token string)
 	if err != nil {
 		slog.Warn("quota sample failed", "account", account, "error", err)
 	}
+}
+
+// seatGatedTTL 是「individual plan 无 seat 面」判定在采样侧的缓存
+// 时长：期内跳过该号的上游拉取，到期重探一次——升 team 后自行恢复，
+// 仍 gated 则重新记戳。手动 quota/refresh 不走此闩（用户显式要求即
+// 打），且 fetch 成功时 users 投影整体换新、旗标自然清除。
+const seatGatedTTL = time.Hour
+
+// noteSeatGated 在该号的 users 身份投影上合并打 seat-gated 标：
+// 采样侧据 seatGatedFresh 周期性跳拉取，accounts 视图经 report.user
+// 透出受限态（user.seat_gated）。合并写保住已有 name/email 等字段，
+// 附带判定时刻供 TTL 重探。
+func (q *quotaSampler) noteSeatGated(account string) {
+	q.userMu.Lock()
+	defer q.userMu.Unlock()
+	if q.users == nil {
+		q.users = map[string]map[string]any{}
+	}
+	u := q.users[account]
+	if u == nil {
+		u = map[string]any{}
+		q.users[account] = u
+	}
+	u["seat_gated"] = true
+	u["seat_gated_at"] = time.Now().Unix()
+}
+
+// seatGatedFresh 报该号 seat-gated 判定是否仍在有效期内（跳拉取依据）。
+func (q *quotaSampler) seatGatedFresh(account string) bool {
+	q.userMu.Lock()
+	defer q.userMu.Unlock()
+	u := q.users[account]
+	if u == nil || u["seat_gated"] != true {
+		return false
+	}
+	at, _ := u["seat_gated_at"].(int64)
+	return time.Since(time.Unix(at, 0)) < seatGatedTTL
 }
 
 // capture 是逐号配额采样内核：拉取该号 userStatus、更新
@@ -309,6 +352,11 @@ func (q *quotaSampler) sampleAccount(ctx context.Context, account, token string)
 func (q *quotaSampler) capture(ctx context.Context, account, token string) (user, plan map[string]any, persistErr, err error) {
 	rawUser, plan, _, err := q.h.fetchUserStatusAs(ctx, token)
 	if err != nil {
+		// seat plan-gate（individual plan 整面 403）记标进投影：定时
+		// 采样在 TTL 内跳过白打，视图侧透出受限态。
+		if isSeatPlanGate(err) {
+			q.noteSeatGated(account)
+		}
 		return nil, nil, nil, err
 	}
 	user = map[string]any{
@@ -503,6 +551,7 @@ type quotaLaneStats struct {
 	roundsStarted   int64  // 轮次起跑（sampleAccount 入口）
 	roundsFetchOK   int64  // userStatus 拉取成功（含无 planStatus 轮）
 	roundsPersistOK int64  // 本号新点落库（含 OR IGNORE 幂等命中）
+	roundsSeatGated int64  // seat plan-gate 跳过的轮数（TTL 内不再白打）
 	failedFetch     int64  // 拉取失败（对应 WARN quota sample failed）
 	failedNoPlan    int64  // 拉到但缺 planStatus（WARN ...skipped）
 	failedPersist   int64  // 落库批停于写错误（WARN ...persist failed）
@@ -568,6 +617,17 @@ func (q *quotaSampler) noteLaneFinish(account string, plan map[string]any, persi
 	}
 }
 
+// noteSeatGatedRound 记一轮「seat plan-gate 命中 TTL、跳过拉取」：
+// 不计失败（gated 是 plan 属性非故障），但轮次须留痕——静默空洞
+// 归因要能区分「调度器没跑」与「跑了但被 gated 跳过」。
+func (q *quotaSampler) noteSeatGatedRound(account string) {
+	q.hbMu.Lock()
+	defer q.hbMu.Unlock()
+	st := q.laneLocked(account)
+	st.lastFinishedAt = time.Now().Unix()
+	st.roundsSeatGated++
+}
+
 // laneLocked 取该号的逐 lane 账簿，缺则建（hbMu
 // 内调用）；匿名空串按 ”/default 折叠归名，与 report 同口径。
 func (q *quotaSampler) laneLocked(account string) *quotaLaneStats {
@@ -614,6 +674,7 @@ func (q *quotaSampler) persistStats() map[string]any {
 			"rounds_started":    st.roundsStarted,
 			"rounds_fetch_ok":   st.roundsFetchOK,
 			"rounds_persist_ok": st.roundsPersistOK,
+			"rounds_seat_gated": st.roundsSeatGated,
 			"rounds_failed":     st.failedFetch + st.failedNoPlan + st.failedPersist,
 			"failures": map[string]any{
 				"fetch":   st.failedFetch,

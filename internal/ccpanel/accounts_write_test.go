@@ -618,3 +618,385 @@ func TestAccountOpsUnavailable(t *testing.T) {
 		}
 	}
 }
+
+// ---- 三段式探测（mint/chat/seat）的 stub 上游与端到端覆盖 ----
+
+// probeStub 按路径分流三段探测端点；各段可断言 wire 认证形态
+// （chat=Basic tok-tok、mint=X-Api-Key、seat=Bearer）。
+type probeStub struct {
+	chat func(w http.ResponseWriter, r *http.Request)
+	mint func(w http.ResponseWriter, r *http.Request)
+	seat func(w http.ResponseWriter, r *http.Request)
+}
+
+func (s probeStub) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var h func(http.ResponseWriter, *http.Request)
+		switch r.URL.Path {
+		case chatCapacityPath:
+			h = s.chat
+		case seatMintPath:
+			h = s.mint
+		case seatUserStatusPath:
+			h = s.seat
+		}
+		if h == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		h(w, r)
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body))
+}
+
+const probeSeatOK = `{"userStatus":{"name":"Yan","email":"y@x","teamsTier":"ExaCodeiumCommonPb_TeamsTier_TEAMS_TIER_DEVIN_TEAMS_V2","planStatus":{"planInfo":{"planName":"Teams"}}}}`
+const probeSeatGated = `{"error":{"code":"permission_denied","message":"Your account is on an individual plan. Please upgrade to team plan for multi-user access."}}`
+
+// newProbeHandler 装配指到 stub 上游的写端点 Handler：三段探测只走
+// baseTransport，apiClient 可由 newPanelUpstream 空挂。
+func newProbeHandler(t *testing.T, srv *httptest.Server, ops accounts.AccountOps) *Handler {
+	t.Helper()
+	h := newWriteOpsHandler(ops)
+	up, err := newPanelUpstream(srv.URL, "", false, func() string { return "unused" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { up.baseTransport.CloseIdleConnections() })
+	h.upstreamPtr.Store(up)
+	return h
+}
+
+// TestCreateAccountVerifyUpstream 验证 verify 三段式探测的真实 wire 行为：
+// chat 面是硬门（拒=400 不建行），seat 面只做回填（individual plan 403
+// 记 seat_gated 不拦），api_key-only 先 mint 再以铸出 token 过 chat。
+func TestCreateAccountVerifyUpstream(t *testing.T) {
+	create := func() accounts.AccountOps {
+		return accounts.AccountOps{
+			Create: func(_ context.Context, in accounts.AccountWrite) (*store.ResolvedAccount, error) {
+				return &store.ResolvedAccount{Name: in.Name, Source: store.AccountSourcePanel}, nil
+			},
+			CredentialOf: func(in accounts.AccountWrite) (string, error) {
+				return in.Token, nil
+			},
+		}
+	}
+	createReq := func(body string) (*httptest.ResponseRecorder, *http.Request) {
+		return httptest.NewRecorder(), accountRequest(http.MethodPost, "/admin/accounts", "", body)
+	}
+	decodeData := func(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+		t.Helper()
+		env := decodeEnvelope(t, rec)
+		if !env.Success {
+			t.Fatalf("success = false (%s)", env.Error)
+		}
+		var data map[string]any
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+
+	t.Run("happy", func(t *testing.T) {
+		srv := httptest.NewServer(probeStub{
+			chat: func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Basic tok-good-tok-good" {
+					t.Errorf("chat auth = %q, want Basic tok-good-tok-good", r.Header.Get("Authorization"))
+				}
+				writeJSON(w, 200, `{"hasCapacity":true}`)
+			},
+			seat: func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer tok-good" {
+					t.Errorf("seat auth = %q, want Bearer tok-good", r.Header.Get("Authorization"))
+				}
+				writeJSON(w, 200, probeSeatOK)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, create())
+		rec, req := createReq(`{"name":"a","token":"tok-good","verify":true}`)
+		h.adminCreateAccount(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+		}
+		ver, _ := decodeData(t, rec)["verification"].(map[string]any)
+		if ver["chat"] != true || ver["seat"] != true || ver["has_capacity"] != true {
+			t.Fatalf("verification = %v", ver)
+		}
+		if ver["plan"] != "Teams" || ver["teams_tier"] != "DEVIN_TEAMS_V2" {
+			t.Fatalf("verification plan/tier = %v/%v", ver["plan"], ver["teams_tier"])
+		}
+	})
+
+	t.Run("seat gated still creates", func(t *testing.T) {
+		srv := httptest.NewServer(probeStub{
+			chat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 200, `{"hasCapacity":true}`)
+			},
+			seat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 403, probeSeatGated)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, create())
+		rec, req := createReq(`{"name":"a","token":"tok-indie","verify":true}`)
+		h.adminCreateAccount(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+		}
+		ver, _ := decodeData(t, rec)["verification"].(map[string]any)
+		if ver["seat"] != false || ver["seat_gated"] != true || ver["chat"] != true {
+			t.Fatalf("verification = %v", ver)
+		}
+	})
+
+	t.Run("chat failure rejects", func(t *testing.T) {
+		createCalled := false
+		ops := create()
+		ops.Create = func(context.Context, accounts.AccountWrite) (*store.ResolvedAccount, error) {
+			createCalled = true
+			return nil, nil
+		}
+		srv := httptest.NewServer(probeStub{
+			chat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 403, `{"error":{"code":"unauthenticated","message":"Invalid service key"}}`)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, ops)
+		rec, req := createReq(`{"name":"a","token":"tok-dead","verify":true}`)
+		h.adminCreateAccount(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		env := decodeEnvelope(t, rec)
+		if !strings.Contains(env.Error, "CheckChatCapacity HTTP 403") {
+			t.Fatalf("error = %q", env.Error)
+		}
+		if createCalled {
+			t.Fatal("Create must not run after chat-gate failure")
+		}
+	})
+
+	t.Run("api_key mints then serves", func(t *testing.T) {
+		srv := httptest.NewServer(probeStub{
+			mint: func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-Api-Key") != "cog_key1" {
+					t.Errorf("mint X-Api-Key = %q", r.Header.Get("X-Api-Key"))
+				}
+				writeJSON(w, 200, `{"sessionToken":"sess-minted"}`)
+			},
+			chat: func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Basic sess-minted-sess-minted" {
+					t.Errorf("chat auth = %q, want minted token", r.Header.Get("Authorization"))
+				}
+				writeJSON(w, 200, `{"hasCapacity":true}`)
+			},
+			seat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 200, probeSeatOK)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, create())
+		rec, req := createReq(`{"name":"a","api_key":"cog_key1","verify":true}`)
+		h.adminCreateAccount(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+		}
+		ver, _ := decodeData(t, rec)["verification"].(map[string]any)
+		if ver["mint"] != true || ver["chat"] != true || ver["seat"] != true {
+			t.Fatalf("verification = %v", ver)
+		}
+	})
+
+	t.Run("api_key mint failure rejects", func(t *testing.T) {
+		srv := httptest.NewServer(probeStub{
+			mint: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 401, `{"error":{"code":"unauthenticated","message":"bad key cog_key1"}}`)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, create())
+		rec, req := createReq(`{"name":"a","api_key":"cog_key1","verify":true}`)
+		h.adminCreateAccount(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		env := decodeEnvelope(t, rec)
+		if !strings.Contains(env.Error, "api_key mint:") {
+			t.Fatalf("error = %q", env.Error)
+		}
+		// durable key 不得随错误体回显（adapter 同款防回显）。
+		if strings.Contains(env.Error, "cog_key1") {
+			t.Fatalf("error echoes api key: %q", env.Error)
+		}
+	})
+
+	t.Run("token plus api_key soft mint flag", func(t *testing.T) {
+		srv := httptest.NewServer(probeStub{
+			mint: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 401, `{"error":{"code":"unauthenticated","message":"bad key"}}`)
+			},
+			chat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 200, `{"hasCapacity":false}`)
+			},
+			seat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 200, probeSeatOK)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, create())
+		rec, req := createReq(`{"name":"a","token":"tok-good","api_key":"cog_key1","verify":true}`)
+		h.adminCreateAccount(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+		}
+		ver, _ := decodeData(t, rec)["verification"].(map[string]any)
+		if ver["mint"] != false || ver["mint_error"] == nil || ver["chat"] != true || ver["has_capacity"] != false {
+			t.Fatalf("verification = %v", ver)
+		}
+	})
+}
+
+// TestTestAccountProbes 验证 /test 的两段式口径：ok 判据是 chat 面；
+// api_key-only 号先 mint 再打 chat（mint 失败即 ok:false）；seat 面
+// 只做回填——403 individual plan 记 seat_gated 不翻 ok。
+func TestTestAccountProbes(t *testing.T) {
+	opsWith := func(resolved *store.ResolvedAccount) accounts.AccountOps {
+		return accounts.AccountOps{
+			TokenOf: func(context.Context, string) (string, error) {
+				if resolved.APIKey != "" {
+					return resolved.APIKey, nil
+				}
+				return resolved.Token, nil
+			},
+			Effective: func(context.Context) ([]store.ResolvedAccount, error) {
+				return []store.ResolvedAccount{*resolved}, nil
+			},
+			ClearCooldown: func(string) bool { return true },
+		}
+	}
+	testReq := func() (*httptest.ResponseRecorder, *http.Request) {
+		return httptest.NewRecorder(), accountRequest(http.MethodPost, "/admin/accounts/a/test", "a", "")
+	}
+	decodeData := func(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+		t.Helper()
+		env := decodeEnvelope(t, rec)
+		var data map[string]any
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			t.Fatalf("decode data: %v (%s)", err, rec.Body.String())
+		}
+		return data
+	}
+
+	t.Run("token ok", func(t *testing.T) {
+		srv := httptest.NewServer(probeStub{
+			chat: func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Basic tok-live-tok-live" {
+					t.Errorf("chat auth = %q", r.Header.Get("Authorization"))
+				}
+				writeJSON(w, 200, `{"hasCapacity":true}`)
+			},
+			seat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 200, probeSeatOK)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, opsWith(&store.ResolvedAccount{Name: "a", Token: "tok-live"}))
+		rec, req := testReq()
+		h.adminTestAccount(rec, req)
+		data := decodeData(t, rec)
+		if data["ok"] != true || data["chat"] != true || data["seat"] != true || data["has_capacity"] != true {
+			t.Fatalf("data = %v", data)
+		}
+	})
+
+	t.Run("api_key-only mints first", func(t *testing.T) {
+		srv := httptest.NewServer(probeStub{
+			mint: func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-Api-Key") != "cog_key1" {
+					t.Errorf("mint X-Api-Key = %q", r.Header.Get("X-Api-Key"))
+				}
+				writeJSON(w, 200, `{"sessionToken":"sess-minted"}`)
+			},
+			chat: func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Basic sess-minted-sess-minted" {
+					t.Errorf("chat auth = %q, want minted token", r.Header.Get("Authorization"))
+				}
+				writeJSON(w, 200, `{"hasCapacity":true}`)
+			},
+			seat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 200, probeSeatOK)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, opsWith(&store.ResolvedAccount{Name: "a", APIKey: "cog_key1"}))
+		rec, req := testReq()
+		h.adminTestAccount(rec, req)
+		data := decodeData(t, rec)
+		if data["ok"] != true || data["mint"] != true || data["chat"] != true {
+			t.Fatalf("data = %v", data)
+		}
+	})
+
+	t.Run("api_key-only mint failure", func(t *testing.T) {
+		srv := httptest.NewServer(probeStub{
+			mint: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 401, `{"error":{"code":"unauthenticated"}}`)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, opsWith(&store.ResolvedAccount{Name: "a", APIKey: "cog_key1"}))
+		rec, req := testReq()
+		h.adminTestAccount(rec, req)
+		data := decodeData(t, rec)
+		if data["ok"] != false || data["mint"] != false {
+			t.Fatalf("data = %v", data)
+		}
+		if msg, _ := data["error"].(string); !strings.Contains(msg, "api_key mint:") {
+			t.Fatalf("error = %v", data["error"])
+		}
+	})
+
+	t.Run("seat gated keeps ok", func(t *testing.T) {
+		srv := httptest.NewServer(probeStub{
+			chat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 200, `{"hasCapacity":true}`)
+			},
+			seat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 403, probeSeatGated)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, opsWith(&store.ResolvedAccount{Name: "a", Token: "tok-indie"}))
+		rec, req := testReq()
+		h.adminTestAccount(rec, req)
+		data := decodeData(t, rec)
+		if data["ok"] != true || data["seat"] != false || data["seat_gated"] != true {
+			t.Fatalf("data = %v", data)
+		}
+	})
+
+	t.Run("chat failure flips ok", func(t *testing.T) {
+		srv := httptest.NewServer(probeStub{
+			chat: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, 403, `{"error":{"code":"unauthenticated","message":"Invalid service key"}}`)
+			},
+		}.handler())
+		defer srv.Close()
+		h := newProbeHandler(t, srv, opsWith(&store.ResolvedAccount{Name: "a", Token: "tok-dead"}))
+		rec, req := testReq()
+		h.adminTestAccount(rec, req)
+		data := decodeData(t, rec)
+		if data["ok"] != false {
+			t.Fatalf("data = %v", data)
+		}
+		if msg, _ := data["error"].(string); !strings.Contains(msg, "CheckChatCapacity HTTP 403") {
+			t.Fatalf("error = %v", data["error"])
+		}
+	})
+}

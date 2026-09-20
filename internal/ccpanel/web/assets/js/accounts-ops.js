@@ -444,7 +444,7 @@
         const credKey = kind === 'token' ? 'token' : kind === 'credFile' ? 'credentials_file' : 'credentials_content';
         const priority = parseInt(form.querySelector('[data-f="priority"]').value.trim(), 10) || 0;
         const notes = form.querySelector('[data-f="notes"]').value.trim();
-        await apiCall(BASE, {
+        const resp = await apiCall(BASE, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -456,7 +456,14 @@
           }),
         });
         closeAddModal();
-        window.showNotification(t('accounts.add.success'), 'success');
+        // verify 结构化结果挂在 data.verification：chat 过=已建行，seat/mint
+        // 受限只做提示级回填（individual plan 号可服役但无配额/自愈）。
+        const ver = resp && resp.verification;
+        const vnotes = [];
+        if (ver && ver.seat_gated) vnotes.push(t('accounts.st.seatGated'));
+        else if (ver && ver.seat === false && ver.seat_error) vnotes.push(String(ver.seat_error));
+        if (ver && ver.mint === false) vnotes.push(t('accounts.st.mintUnavailable'));
+        window.showNotification(t('accounts.add.success') + (vnotes.length ? ` · ${vnotes.join(' · ')}` : ''), 'success');
         form.reset();
         reload();
       } catch (e2) {
@@ -695,7 +702,10 @@
       if (d && d.ok) {
         const who = [pick(d.user, ['email', 'name']), pick(d.plan, ['plan_name', 'name', 'tier'])]
           .filter(Boolean).join(' · ');
-        window.showNotification(t('accounts.test.ok', { ms: d.latency_ms ?? '—', who: who ? ` · ${who}` : '' }), 'success');
+        // ok 判据是 chat 面；seat_gated/seat_error 是 seat 面受限的附带信号。
+        const snote = d.seat_gated ? t('accounts.st.seatGated')
+          : (d.seat === false && d.seat_error ? String(d.seat_error) : '');
+        window.showNotification(t('accounts.test.ok', { ms: d.latency_ms ?? '—', who: who ? ` · ${who}` : '' }) + (snote ? ` · ${snote}` : ''), 'success');
         reload();
       } else {
         window.showNotification(t('accounts.test.fail', { err: (d && d.error) || t('accounts.st.unknownError') }), 'error');

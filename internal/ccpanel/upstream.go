@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	devinproto "local/devinproto"
 	"local/devinproto/devinprotoconnect"
 
+	"github.com/WncFht/devin2api/internal/accounts"
 	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/upstream"
 )
@@ -29,7 +31,35 @@ const (
 	// seatUserStatusPath 与 Windsurf 官方 / WindsurfAPI 一致的 JSON Connect 路径。
 	// 生成的 connect 包名 ExaSeatManagementPb_SeatManagementService 在上游会 404。
 	seatUserStatusPath = "/exa.seat_management_pb.SeatManagementService/GetUserStatus"
+	// seatMintPath 是 durable api_key 铸 session token 的 seat 端点，
+	// 与 adapter mintSessionToken 同 wire（X-Api-Key + metadata.api_key）。
+	seatMintPath = "/exa.seat_management_pb.SeatManagementService/GetSelfDevinSessionToken"
+	// chatCapacityPath 是 lane 真实鉴权面（ApiServerService）的轻量探针：
+	// Basic token-token 认证与 lane 完全同形，答「凭据能不能干活」。
+	chatCapacityPath = "/exa.api_server_pb.ApiServerService/CheckChatCapacity"
 )
+
+// upstreamHTTPError 是上游非 200 的结构化错误：endpoint/status/body
+// 供调用方按语义分拣（seat plan-gate 判别需要 status 与正文，裸字符
+// 串断言做不到）。Error() 与原 fmt.Errorf 文案同形，调用面无感。
+type upstreamHTTPError struct {
+	endpoint string
+	status   int
+	body     string
+}
+
+func (e *upstreamHTTPError) Error() string {
+	return fmt.Sprintf("%s HTTP %d: %s", e.endpoint, e.status, truncate(e.body, 300))
+}
+
+// isSeatPlanGate 判定错误是不是「individual plan 无 seat 面权限」：
+// SeatManagementService 对非 team 号整面 403 permission_denied，错误
+// 文案带 individual plan 标记——凭据本身有效，只是该服务面对其不开放。
+func isSeatPlanGate(err error) bool {
+	var ue *upstreamHTTPError
+	return errors.As(err, &ue) && ue.status == http.StatusForbidden &&
+		strings.Contains(ue.body, "individual plan")
+}
 
 // panelUpstream 是一次「上游端点」的固化产物：面板自身的 connect client
 // 与裸 transport 绑在同一份 base_url/proxy/force_http1 上。endpoint 配置
@@ -285,7 +315,7 @@ func (h *Handler) fetchUserStatusAs(ctx context.Context, token string) (user, pl
 		return nil, nil, nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, nil, fmt.Errorf("GetUserStatus HTTP %d: %s", resp.StatusCode, truncate(string(raw), 300))
+		return nil, nil, nil, &upstreamHTTPError{endpoint: "GetUserStatus", status: resp.StatusCode, body: string(raw)}
 	}
 
 	var root map[string]any
@@ -398,7 +428,161 @@ func (h *Handler) fetchUserStatusAs(ctx context.Context, token string) (user, pl
 	return user, plan, planInfo, nil
 }
 
-// seatUserStatusResponse 是 GetUserStatus Connect-JSON 响应的 wire 形状。
+// seatProbeBody 构造 seat/ApiServer 裸 JSON 探针的公共请求体——
+// metadata 形状与 fetchUserStatusAs/adapter mint 完全同口径。
+func seatProbeBody(token string) []byte {
+	payload, _ := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"api_key":           token,
+			"extension_name":    clientName,
+			"extension_version": clientVersion,
+			"ide_name":          clientName,
+			"ide_version":       clientVersion,
+			"locale":            "en",
+			"os":                "windows",
+		},
+	})
+	return payload
+}
+
+// checkChatCapacityAs 以指定凭据探测 ApiServerService/CheckChatCapacity：
+// lane 的真实鉴权面（Basic token-token 认证与 lane wire 完全同形）。
+// verify/test 用它回答「这枚凭据能不能干活」——seat 端点答不了这个
+// 问题（对 individual plan 整面 plan-gated，结果互不预测）。
+// 返回 has_capacity；非 200 回 *upstreamHTTPError。
+func (h *Handler) checkChatCapacityAs(ctx context.Context, token string) (bool, error) {
+	up := h.currentUpstream()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		up.baseURL+chatCapacityPath, bytes.NewReader(seatProbeBody(token)))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("Authorization", "Basic "+token+"-"+token)
+	client := &http.Client{Timeout: 60 * time.Second, Transport: up.baseTransport}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return false, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, &upstreamHTTPError{endpoint: "CheckChatCapacity", status: resp.StatusCode, body: string(raw)}
+	}
+	var parsed struct {
+		HasCapacity bool `json:"hasCapacity"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return false, fmt.Errorf("decode CheckChatCapacity: %w", err)
+	}
+	return parsed.HasCapacity, nil
+}
+
+// mintSessionTokenProbe 以 durable api_key 试铸一枚 session token
+// （adapter mintSessionToken 的探测版，同 wire：metadata.api_key 与
+// X-Api-Key 头放同一枚 key）。api_key-only 账号的 lane 服役凭据就是
+// 铸出的 token——mint 成功即服役链路的端到端验证。错误体先擦掉
+// durable key 再外透（adapter 同款防回显）。
+func (h *Handler) mintSessionTokenProbe(ctx context.Context, apiKey string) (string, error) {
+	up := h.currentUpstream()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		up.baseURL+seatMintPath, bytes.NewReader(seatProbeBody(apiKey)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("X-Api-Key", apiKey)
+	client := &http.Client{Timeout: 30 * time.Second, Transport: up.baseTransport}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		detail := strings.ReplaceAll(string(raw), apiKey, "[redacted]")
+		return "", &upstreamHTTPError{endpoint: "GetSelfDevinSessionToken", status: resp.StatusCode, body: detail}
+	}
+	var parsed struct {
+		SessionToken string `json:"sessionToken"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", fmt.Errorf("decode GetSelfDevinSessionToken: %w", err)
+	}
+	token := strings.TrimSpace(parsed.SessionToken)
+	if token == "" {
+		return "", errors.New("GetSelfDevinSessionToken: empty sessionToken")
+	}
+	return token, nil
+}
+
+// verifyCredential 探测一次写输入将生效的凭据，回结构化能力位；cred 是
+// 调用方已按 ops 口径解出的服役凭据（api_key-only 输入解出 api_key 本身）。
+//   - api_key-only（lane 将以铸出的 session token 服役）：mint 即端到端
+//     验证，铸出的 token 再过 chat 面拿 has_capacity；
+//   - token/credentials_file/credentials_content：cred 直接过 chat 面；
+//     附带 api_key 时顺带测 mint——不通只记能力位不拦建行（服役凭据
+//     本身已证可用）；
+//   - seat GetUserStatus 尽力回填：200 带 user/plan/teams_tier；
+//     individual-plan 403 → seat=false+seat_gated 受限标记；其余失败
+//     仅留 seat_error——chat 已过即放行。
+//
+// error 非 nil = 拒绝建号（chat 面或 mint 段失败，含上游真实原因）。
+func (h *Handler) verifyCredential(ctx context.Context, in accounts.AccountWrite, cred string) (map[string]any, error) {
+	ver := map[string]any{}
+	var servingToken string
+	if in.Token == "" && in.CredentialsFile == "" && in.CredentialsContent == "" && strings.TrimSpace(in.APIKey) != "" {
+		minted, err := h.mintSessionTokenProbe(ctx, strings.TrimSpace(in.APIKey))
+		if err != nil {
+			return nil, fmt.Errorf("api_key mint: %w", err)
+		}
+		ver["mint"] = true
+		servingToken = minted
+	} else {
+		servingToken = cred
+		if k := strings.TrimSpace(in.APIKey); k != "" {
+			if _, err := h.mintSessionTokenProbe(ctx, k); err != nil {
+				ver["mint"] = false
+				ver["mint_error"] = err.Error()
+			} else {
+				ver["mint"] = true
+			}
+		}
+	}
+	hasCap, err := h.checkChatCapacityAs(ctx, servingToken)
+	if err != nil {
+		return nil, err
+	}
+	ver["chat"] = true
+	ver["has_capacity"] = hasCap
+	user, plan, _, err := h.fetchUserStatusAs(ctx, servingToken)
+	if err != nil {
+		ver["seat"] = false
+		ver["seat_error"] = err.Error()
+		if isSeatPlanGate(err) {
+			ver["seat_gated"] = true
+		}
+	} else {
+		ver["seat"] = true
+		ver["user"] = user
+		if plan != nil {
+			ver["plan"] = plan["plan_name"]
+			if user != nil {
+				ver["teams_tier"] = user["teams_tier"]
+			}
+		}
+	}
+	return ver, nil
+}
+
 // tag 写的是 normalizeWireKeys 归一后的键（去 _ 全小写）：上游同一字段
 // 在 camelCase/snake_case 间漂移，归一后两种拼写打到同一字段。
 // 数值字段用 any 原样透传——上游数字与数字串两种形态都发，下游

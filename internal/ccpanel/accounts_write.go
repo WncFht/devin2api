@@ -76,22 +76,27 @@ func (h *Handler) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		MaxRPM:             req.MaxRPM,
 		Notes:              req.Notes,
 	}
+	var verification map[string]any
 	if req.Verify {
-		// verify 是建行前的凭据探测：解析与持久化同一口径（ops 侧），
-		// 探测走面板上游链——失败 400 不建行。
+		// verify 是建行前的凭据探测：解析失败（文件不可读/无凭据）原文
+		// 透传 400；解析过后 chat 面（ApiServerService）是硬门——lane
+		// 真实服役的鉴权域；seat 面只做尽力回填（individual plan 对其
+		// 整面 403，不拦建行只记受限）。探测失败 400 不建行。
 		if h.accountOps.CredentialOf == nil {
 			respondError(w, http.StatusBadRequest, "credential verification unavailable")
 			return
 		}
-		token, err := h.accountOps.CredentialOf(in)
+		cred, err := h.accountOps.CredentialOf(in)
 		if err != nil {
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if _, _, _, err := h.fetchUserStatusAs(r.Context(), token); err != nil {
+		ver, err := h.verifyCredential(r.Context(), in, cred)
+		if err != nil {
 			respondError(w, http.StatusBadRequest, fmt.Sprintf("credential verification failed: %v", err))
 			return
 		}
+		verification = ver
 	}
 	resolved, err := h.accountOps.Create(r.Context(), in)
 	if err != nil {
@@ -104,7 +109,11 @@ func (h *Handler) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	respondOK(w, h.accountView(r.Context(), resolved))
+	view := h.accountView(r.Context(), resolved)
+	if verification != nil {
+		view["verification"] = verification
+	}
+	respondOK(w, view)
 }
 
 // adminUpdateAccount 实现 PUT /admin/accounts/{name}（改凭据/停启用）。
@@ -269,11 +278,16 @@ func (h *Handler) adminRefreshAccountQuota(w http.ResponseWriter, r *http.Reques
 	respondOK(w, data)
 }
 
-// adminTestAccount 实现 POST /admin/accounts/{name}/test：以生效凭据
-// 探测上游 GetUserStatus 并计时。探测失败是结果不是 HTTP 错误——恒
-// 200：失败 {ok:false,latency_ms,error}，成功 {ok:true,latency_ms,
-// user,plan} 并顺带把配额信号回灌池侧、清该号冷却。名不在生效集/
-// tombstoned/凭据不可解 404（与 quota/refresh 同口径）。
+// adminTestAccount 实现 POST /admin/accounts/{name}/test：以 lane 实际
+// 服役的凭据探测上游并计时。ok 判据是 chat 面（ApiServerService
+// CheckChatCapacity）——「能不能干活」由 lane 真实鉴权域回答；seat
+// GetUserStatus 只做尽力回填（individual plan 对其整面 403，不影响
+// ok）。api_key-only 号 lane 用铸出的 session token 服役，探测先走
+// mint 再打 chat——mint 失败即 ok:false（lane 同样拿不到服役凭据）。
+// 探测失败是结果不是 HTTP 错误——恒 200：失败 {ok:false,latency_ms,
+// error}；成功 {ok:true,latency_ms,chat,has_capacity,seat,user,plan}
+// 并顺带把配额信号回灌池侧、清该号冷却。名不在生效集/tombstoned/
+// 凭据不可解 404（与 quota/refresh 同口径）。
 func (h *Handler) adminTestAccount(w http.ResponseWriter, r *http.Request) {
 	if h.accountOpsUnavailable(w) {
 		return
@@ -291,8 +305,36 @@ func (h *Handler) adminTestAccount(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	// api_key-only 判定：生效集里该号无 token/credentials_file 仅有
+	// api_key——lane 用铸出的 session token 服役，探测须先走 mint。
+	apiKeyOnly := false
+	if h.accountOps.Effective != nil {
+		if accounts, err := h.accountOps.Effective(r.Context()); err == nil {
+			for i := range accounts {
+				if accounts[i].Name == name {
+					apiKeyOnly = accounts[i].Token == "" && accounts[i].CredentialsFile == "" && accounts[i].APIKey != ""
+					break
+				}
+			}
+		}
+	}
 	start := time.Now()
-	user, plan, _, err := h.fetchUserStatusAs(r.Context(), token)
+	servingToken := token
+	resp := map[string]any{}
+	if apiKeyOnly {
+		minted, err := h.mintSessionTokenProbe(r.Context(), token)
+		if err != nil {
+			resp["ok"] = false
+			resp["mint"] = false
+			resp["latency_ms"] = time.Since(start).Milliseconds()
+			resp["error"] = fmt.Sprintf("api_key mint: %v", err)
+			respondOK(w, resp)
+			return
+		}
+		resp["mint"] = true
+		servingToken = minted
+	}
+	hasCap, err := h.checkChatCapacityAs(r.Context(), servingToken)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		respondOK(w, map[string]any{
@@ -302,11 +344,25 @@ func (h *Handler) adminTestAccount(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	h.quotaSub().noteSignal(name, plan)
-	h.accountOps.ClearCooldown(name)
-	resp := map[string]any{"ok": true, "latency_ms": latency, "user": user}
-	if plan != nil {
-		resp["plan"] = plan
+	resp["ok"] = true
+	resp["latency_ms"] = latency
+	resp["chat"] = true
+	resp["has_capacity"] = hasCap
+	user, plan, _, err := h.fetchUserStatusAs(r.Context(), servingToken)
+	if err != nil {
+		resp["seat"] = false
+		resp["seat_error"] = err.Error()
+		if isSeatPlanGate(err) {
+			resp["seat_gated"] = true
+		}
+	} else {
+		resp["seat"] = true
+		resp["user"] = user
+		if plan != nil {
+			resp["plan"] = plan
+		}
+		h.quotaSub().noteSignal(name, plan)
 	}
+	h.accountOps.ClearCooldown(name)
 	respondOK(w, resp)
 }

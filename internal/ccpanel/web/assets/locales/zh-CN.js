@@ -1145,6 +1145,8 @@ window.I18N_LOCALES['zh-CN'] = {
   'accounts.st.exhausted': '配额耗尽',
   'accounts.st.unready': '暂不可发',
   'accounts.st.unknownError': '未知错误',
+  'accounts.st.seatGated': '个人版 · 配额/自愈不可用',
+  'accounts.st.mintUnavailable': 'api_key 换票不可用',
   'accounts.pill.waiters': '排队 {n}',
   'accounts.pill.deadzone': '窗口死区',
   'accounts.kpi.lanes': '账号数',
