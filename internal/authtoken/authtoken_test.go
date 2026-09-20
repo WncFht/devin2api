@@ -249,6 +249,80 @@ func TestAllowRPMLimitsAndRollsBucket(t *testing.T) {
 	}
 }
 
+// TestAdmitOrderAndRelease 钉住准入检查序（并发槽→模型白名单→RPM→费用
+// 窗口）与 Deny 的 Status/Message 文案；占槽后发生的拒绝仍返回
+// release，调用方配对归还后槽位复原——同包直读仓内 inflight 佐证。
+func TestAdmitOrderAndRelease(t *testing.T) {
+	store := newStore(t)
+	tok, _, err := store.Ensure("k", &Token{
+		Description: "t", IsActive: true, MaxConcurrency: 1, MaxRPM: 1,
+		AllowedModels: []string{"m"}, CostLimitMicroUSD: 1_000_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inflight := func() int64 { return store.byID[tok.ID].inflight }
+
+	release, deny := store.Admit(tok, "m")
+	if deny != nil || release == nil {
+		t.Fatalf("clean Admit = (release:%v, deny:%v), want admit", release != nil, deny)
+	}
+	if inflight() != 1 {
+		t.Fatalf("inflight = %d, want 1", inflight())
+	}
+	// 并发槽满：Acquire 失败的拒绝不占槽、无 release。
+	if release, deny := store.Admit(tok, "m"); deny == nil || release != nil ||
+		deny.Status != 429 || deny.Error() != "token concurrency limit exceeded: 1 active of 1 limit" {
+		t.Fatalf("concurrency deny = (release:%v, deny:%v)", release != nil, deny)
+	}
+	release()
+	if inflight() != 0 {
+		t.Fatalf("inflight after release = %d, want 0", inflight())
+	}
+
+	// 模型白名单拒绝：已占槽照样返回 release，配对归还后槽位复原。
+	release, deny = store.Admit(tok, "other")
+	if deny == nil || release == nil || deny.Status != 403 ||
+		deny.Error() != "model 'other' is not allowed for this token" {
+		t.Fatalf("model deny = (release:%v, deny:%v)", release != nil, deny)
+	}
+	release()
+	if inflight() != 0 {
+		t.Fatalf("inflight after model deny release = %d, want 0", inflight())
+	}
+
+	// RPM 拒绝排在模型白名单之后：翻页清零（首个 admit 已烧掉
+	// MaxRPM=1 的桶名额），放行一次烧掉新桶名额，下一次即拒。
+	store.byID[tok.ID].rpmBucket--
+	release, deny = store.Admit(tok, "m")
+	if deny != nil {
+		t.Fatalf("first admit denied: %v", deny)
+	}
+	release()
+	if release, deny = store.Admit(tok, "m"); deny == nil || deny.Status != 429 ||
+		deny.Error() != "token rate limit exceeded: 1 of 1 requests per minute" {
+		t.Fatalf("rpm deny = (release:%v, deny:%v)", release != nil, deny)
+	}
+	release()
+	store.byID[tok.ID].rpmBucket-- // 分钟桶翻页让 RPM 检查放行。
+
+	// 费用窗口拒绝排在准入序最后：前序检查全过才到它——验证文案与
+	// 窗口名（total→Total）渲染。
+	tok.CostUsedMicroUSD = 1_000_000
+	if err := store.Update(tok); err != nil {
+		t.Fatal(err)
+	}
+	release, deny = store.Admit(tok, "m")
+	if deny == nil || release == nil || deny.Status != 429 ||
+		deny.Error() != "Total cost limit exceeded: $1.00 used of $1.00 limit" {
+		t.Fatalf("cost deny = (release:%v, deny:%v)", release != nil, deny)
+	}
+	release()
+	if inflight() != 0 {
+		t.Fatalf("inflight after cost deny release = %d, want 0", inflight())
+	}
+}
+
 // TestResolveAnonymousChannel 验证空明文的解析矩阵：空仓 miss；种匿名行后
 // Resolve("") 命中且 IsAnonymous；匿名行停用后 miss；坏凭据恒 miss。
 func TestResolveAnonymousChannel(t *testing.T) {

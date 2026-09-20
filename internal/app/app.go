@@ -793,11 +793,11 @@ func (application *App) createCompletion(
 	startedAt := time.Now()
 	responseBytes := 0
 	// authTok 是本次请求解析到的下游令牌（开放模式为 nil——空仓无凭据
-	// 准入，无行可归因）；tokenAcquired 标记并发槽已占，defer 据此配对
-	// Release；tokenBlocked 标记准入拒绝——被拒请求不进令牌统计
-	//（ccLoad 在代理层前就返回）。
+	// 准入，无行可归因）；tokenRelease 是并发槽的归还函数（准入占槽
+	// 成功即非 nil，defer 配对调用一次）；tokenBlocked 标记准入拒绝——
+	// 被拒请求不进令牌统计（ccLoad 在代理层前就返回）。
 	var authTok *authtoken.Token
-	tokenAcquired := false
+	var tokenRelease func()
 	tokenBlocked := false
 	// recorder 在请求体读成后才创建：连完整请求都没到达的读失败
 	//（超时/断连/对端 RST）不产生调试记录与 logs 行——它们与鉴权、
@@ -856,8 +856,8 @@ func (application *App) createCompletion(
 			}
 			application.tokens.AddResult(authTok.ID, res)
 		}
-		if tokenAcquired {
-			application.tokens.Release(authTok.ID)
+		if tokenRelease != nil {
+			tokenRelease()
 		}
 		slog.Info("request",
 			"api", api, "method", request.Method, "path", request.URL.Path,
@@ -988,39 +988,13 @@ func (application *App) createCompletion(
 		// 脱钩完成缓存的等价键按调用方身份隔离：同 body 的跨令牌请求
 		// 不得互相挂接（usage 归属与轨迹隔离都靠它）。
 		messages.CallerKeyHash = authTok.KeyHash()
-		active, limit, ok := application.tokens.Acquire(authTok.ID)
-		if !ok {
+		// 额度准入（并发槽/模型白名单/RPM/费用窗口的检查序与文案）
+		// 收口在 tokens.Admit——ccLoad enforceTokenLimits 同序。
+		release, deny := application.tokens.Admit(authTok, messages.Model)
+		tokenRelease = release
+		if deny != nil {
 			tokenBlocked = true
-			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("token concurrency limit exceeded: %d active of %d limit", active, limit))
-			return
-		}
-		tokenAcquired = true
-		if !authTok.IsModelAllowed(messages.Model) {
-			tokenBlocked = true
-			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusForbidden, fmt.Errorf("model '%s' is not allowed for this token", messages.Model))
-			return
-		}
-		if used, limit, ok := application.tokens.AllowRPM(authTok.ID); !ok {
-			tokenBlocked = true
-			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("token rate limit exceeded: %d of %d requests per minute", used, limit))
-			return
-		}
-		if used, limit, window, exceeded := application.tokens.CostLimitState(authTok.ID); exceeded {
-			tokenBlocked = true
-			// 窗口词表以 CostLimitState 为准；词表外的新窗口名原样透出，
-			// 不静默渲染成空串。
-			windowName := window
-			switch window {
-			case "daily":
-				windowName = "Daily"
-			case "weekly":
-				windowName = "Weekly"
-			case "monthly":
-				windowName = "Monthly"
-			case "total":
-				windowName = "Total"
-			}
-			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("%s cost limit exceeded: $%.2f used of $%.2f limit", windowName, float64(used)/1e6, float64(limit)/1e6))
+			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, deny.Status, deny)
 			return
 		}
 	}
