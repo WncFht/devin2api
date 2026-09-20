@@ -81,7 +81,7 @@ func TestRunReturnsServeError(t *testing.T) {
 	}
 	application := app.New(devinAdapter, config.ServerConfig{},
 		debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil))
-	if err := run(context.Background(), application, &http.Server{}, listener); err == nil {
+	if err := run(context.Background(), application, &http.Server{}, listener, time.Second); err == nil {
 		t.Fatal("run() error = nil, want serve error")
 	}
 }
@@ -547,9 +547,6 @@ func (b *drainBlockAdapter) ListModels(context.Context) ([]adapter.ModelInfo, er
 // （result=aborted、error_stage=drain_timeout）与 error.json——
 // server.Close 不等 handler 协程，缺收尾等待时这些行随进程退出丢失。
 func TestDrainTimeoutKillsInflightWithBookkeeping(t *testing.T) {
-	prev := drainTimeout
-	drainTimeout = 200 * time.Millisecond
-	defer func() { drainTimeout = prev }()
 
 	dir := t.TempDir()
 	dbStore, err := store.Open(filepath.Join(dir, "test.db"))
@@ -568,7 +565,7 @@ func TestDrainTimeoutKillsInflightWithBookkeeping(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- run(ctx, application, server, listener) }()
+	go func() { serveDone <- run(ctx, application, server, listener, 200*time.Millisecond) }()
 
 	// 真实 conn 上的在途流式请求：server.Close 的强掐走完整传输路径。
 	clientDone := make(chan struct{})

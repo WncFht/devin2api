@@ -528,7 +528,7 @@ func main() {
 	}
 	// SIGHUP（终端断开）不参与排空语义：前台裸跑时断连不应强杀在途流。
 	signal.Ignore(syscall.SIGHUP)
-	if err := run(ctx, application, server, listener); err != nil {
+	if err := run(ctx, application, server, listener, defaultDrainTimeout); err != nil {
 		slog.Error("serve HTTP failed", "error", err)
 		os.Exit(1)
 	}
@@ -813,14 +813,14 @@ func listenURL(listen string) string {
 	return "http://" + host + ":" + port
 }
 
-// drainTimeout 是优雅退出排空在途请求的最长等待：plist ExitTimeOut=660、
+// defaultDrainTimeout 是优雅退出排空在途请求的最长等待：plist ExitTimeOut=660、
 // systemd TimeoutStopSec=660，留 ~60s 给 Close 与进程退出。重叠交接部署下
 // 排空不再阻塞新请求，上限按在途时长分布取（实测 p99≈163s，但 CC 长会话
 // 尾部分布远超该值——300s 窗口内仍有真实请求被硬切）。注意这里不用
 // http.Server.Shutdown——它先关 listener 再排空，排空期所有新连接都被内核
 // refused；非交接场景改为 listener 保持开启、/v1/* 由应用层快速 503。
-// var 而非 const：测试缩短它来走 drain 超时的强掐路径。
-var drainTimeout = 600 * time.Second
+// run 以参数注入该值：测试传小超时走 drain 强掐路径，不改包级状态。
+const defaultDrainTimeout = 600 * time.Second
 
 // drainKillGrace 是 drain 超时强掐后、进程退出前等在途请求跑完收尾簿记
 // 的窗口：server.Close 只关连接不等待 handler 协程，被掐请求的 Complete
@@ -854,8 +854,9 @@ func reusePortProvenance() bool {
 
 // run 启动 HTTP 服务直到 ctx 取消（SIGINT/SIGTERM），随后优雅排空：
 // 关 keep-alive 让复用连接流走、reuseport 下立即释放 listener 给接替
-// 进程、等在途请求排空后关闭服务器。
-func run(ctx context.Context, application *app.App, server *http.Server, listener net.Listener) error {
+// 进程、等在途请求排空后关闭服务器。drainTimeout 是排空在途的最长等待，
+// 生产取 defaultDrainTimeout，测试可缩短走强掐路径。
+func run(ctx context.Context, application *app.App, server *http.Server, listener net.Listener, drainTimeout time.Duration) error {
 	result := make(chan error, 1)
 	go func() {
 		result <- server.Serve(listener)
