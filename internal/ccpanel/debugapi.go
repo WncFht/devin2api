@@ -236,7 +236,113 @@ func (h *Handler) adminLogsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(rows)
+	var out []logExportRow
+	for _, e := range rows {
+		out = append(out, projectLogExportRow(e))
+	}
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// logExportRow 是 /admin/logs/export 的 wire 投影：字段名承接 LogRow
+// 剥离 json tag 前的对外契约，另加 log_id（行的自增身份，与面板
+// log_id 参数/last_*_id 同源）。LogRow 是 logs 表的领域形状，wire
+// 形状归各端点自己的投影类型（logEntry/matrixEntry/本类型）。
+type logExportRow struct {
+	LogID             int64     `json:"log_id"`
+	Dir               string    `json:"dir"`
+	StartedAt         time.Time `json:"started_at"`
+	DurationMS        int64     `json:"duration_ms"`
+	RequestReadyMS    *int64    `json:"request_ready_ms,omitempty"`
+	UpstreamSentMS    *int64    `json:"upstream_sent_ms,omitempty"`
+	UpstreamOpenMS    *int64    `json:"upstream_open_ms,omitempty"`
+	FirstUpstreamMS   *int64    `json:"first_upstream_ms,omitempty"`
+	FirstClientMS     *int64    `json:"first_client_ms,omitempty"`
+	UpstreamDoneMS    *int64    `json:"upstream_done_ms,omitempty"`
+	API               string    `json:"api,omitempty"`
+	Method            string    `json:"method"`
+	Path              string    `json:"path"`
+	StatusCode        int       `json:"status_code"`
+	Result            string    `json:"result"`
+	RequestedModel    string    `json:"requested_model,omitempty"`
+	Model             string    `json:"model,omitempty"`
+	ResponseModel     string    `json:"response_model,omitempty"`
+	ModelMismatch     bool      `json:"model_mismatch,omitempty"`
+	Stream            bool      `json:"stream"`
+	InputTokens       int64     `json:"input_tokens,omitempty"`
+	OutputTokens      int64     `json:"output_tokens,omitempty"`
+	CacheReadTokens   int64     `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens  int64     `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens   int64     `json:"reasoning_tokens,omitempty"`
+	TotalTokens       int64     `json:"total_tokens,omitempty"`
+	CreditCost        int64     `json:"credit_cost,omitempty"`
+	UpstreamRequestID string    `json:"upstream_request_id,omitempty"`
+	ClientIP          string    `json:"client_ip,omitempty"`
+	KeyHash           string    `json:"key_hash,omitempty"`
+	ClientRequestID   string    `json:"client_request_id,omitempty"`
+	ErrorStage        string    `json:"error_stage,omitempty"`
+	ErrorMessage      string    `json:"error_message,omitempty"`
+	DroppedEvents     uint64    `json:"dropped_events,omitempty"`
+	RetryAfterSeconds int64     `json:"retry_after_seconds,omitempty"`
+	RateLimited       bool      `json:"rate_limited,omitempty"`
+	Retries           int       `json:"retries,omitempty"`
+	Account           string    `json:"account,omitempty"`
+	AccountSwitches   int       `json:"account_switches,omitempty"`
+	PrematureEndTurn  bool      `json:"premature_end_turn,omitempty"`
+	Repairs           int       `json:"repairs,omitempty"`
+	ConnReused        *bool     `json:"conn_reused,omitempty"`
+	ConnIdleMS        *int64    `json:"conn_idle_ms,omitempty"`
+	AffinityHash      string    `json:"affinity_hash,omitempty"`
+}
+
+// projectLogExportRow 把 logs 行投影成导出行——逐字段搬运，
+// log_id 取自行的自增 ID。
+func projectLogExportRow(e *store.LogRow) logExportRow {
+	return logExportRow{
+		LogID:             e.ID,
+		Dir:               e.Dir,
+		StartedAt:         e.StartedAt,
+		DurationMS:        e.DurationMS,
+		RequestReadyMS:    e.RequestReadyMS,
+		UpstreamSentMS:    e.UpstreamSentMS,
+		UpstreamOpenMS:    e.UpstreamOpenMS,
+		FirstUpstreamMS:   e.FirstUpstreamMS,
+		FirstClientMS:     e.FirstClientMS,
+		UpstreamDoneMS:    e.UpstreamDoneMS,
+		API:               e.API,
+		Method:            e.Method,
+		Path:              e.Path,
+		StatusCode:        e.StatusCode,
+		Result:            e.Result,
+		RequestedModel:    e.RequestedModel,
+		Model:             e.Model,
+		ResponseModel:     e.ResponseModel,
+		ModelMismatch:     e.ModelMismatch,
+		Stream:            e.Stream,
+		InputTokens:       e.InputTokens,
+		OutputTokens:      e.OutputTokens,
+		CacheReadTokens:   e.CacheReadTokens,
+		CacheWriteTokens:  e.CacheWriteTokens,
+		ReasoningTokens:   e.ReasoningTokens,
+		TotalTokens:       e.TotalTokens,
+		CreditCost:        e.CreditCost,
+		UpstreamRequestID: e.UpstreamRequestID,
+		ClientIP:          e.ClientIP,
+		KeyHash:           e.KeyHash,
+		ClientRequestID:   e.ClientRequestID,
+		ErrorStage:        e.ErrorStage,
+		ErrorMessage:      e.ErrorMessage,
+		DroppedEvents:     e.DroppedEvents,
+		RetryAfterSeconds: e.RetryAfterSeconds,
+		RateLimited:       e.RateLimited,
+		Retries:           e.Retries,
+		Account:           e.Account,
+		AccountSwitches:   e.AccountSwitches,
+		PrematureEndTurn:  e.PrematureEndTurn,
+		Repairs:           e.Repairs,
+		ConnReused:        e.ConnReused,
+		ConnIdleMS:        e.ConnIdleMS,
+		AffinityHash:      e.AffinityHash,
+	}
 }
 
 // writeRequestsCSV 把请求摘要写成 CSV；指针字段用空串表示缺失。

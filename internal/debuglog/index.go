@@ -27,30 +27,19 @@ const (
 // 的可归因文本，又不让超大错误文案把行撑变形。
 const errorMessageCap = 300
 
-// logRowFor 构建完成请求的 logs 摘要行；store 为 nil（测试或 DB 未
-// 接线）或 dir 为空时返回 nil——日志行是观测副本，不反向决定请求
-// 能否完结。duration 取 completion.EndedAt（Complete 在请求 goroutine
-// 入口打戳）减 startedAt：收尾在编码/写队列与批量事务里的等待不计入
-// 请求耗时。落库由写 worker 合并进批量事务（runWriter → flushAll），
-// 失败重试随批次走。
-func (manager *Manager) logRowFor(recorder *Recorder, completion *Completion) *store.LogRow {
-	if manager.store == nil || recorder.dir == "" {
-		return nil
-	}
-	account, accountAttempts := recorder.upstreamAttribution()
-	row := &store.LogRow{
-		Dir:               recorder.dir,
-		StartedAt:         recorder.startedAt,
-		DurationMS:        completion.EndedAt.Sub(recorder.startedAt).Milliseconds(),
-		RequestReadyMS:    optionalLatency(recorder.requestReadyMS.Load()),
-		UpstreamSentMS:    optionalLatency(recorder.upstreamSentMS.Load()),
-		UpstreamOpenMS:    optionalLatency(recorder.upstreamOpenMS.Load()),
-		FirstUpstreamMS:   optionalLatency(recorder.firstUpstreamMS.Load()),
-		FirstClientMS:     optionalLatency(recorder.firstClientMS.Load()),
-		UpstreamDoneMS:    optionalLatency(recorder.upstreamDoneMS.Load()),
-		API:               recorder.requestMeta.API,
-		Method:            recorder.requestMeta.Method,
-		Path:              recorder.requestMeta.Path,
+// completionLogRow 填充 logs 行里 completion+meta 共源的字段——
+// logRowFor 与 NoteUnclaimedCompletion 共享这份基座，各自再覆盖
+// 自己独有的来源（recorder 的实时读数/目录身份 vs 零值字段）。
+// 来源分类在这里定版（面板探活归 manual_test）：业务口径归
+// debuglog 写方，store 侧原样落字段。
+func completionLogRow(meta RequestMeta, completion *Completion, startedAt time.Time, durationMS int64) store.LogRow {
+	row := store.LogRow{
+		LogSource:         LogSourceProxy,
+		StartedAt:         startedAt,
+		DurationMS:        durationMS,
+		API:               meta.API,
+		Method:            meta.Method,
+		Path:              meta.Path,
 		StatusCode:        completion.StatusCode,
 		Result:            completion.Result,
 		RequestedModel:    completion.RequestedModel,
@@ -66,32 +55,61 @@ func (manager *Manager) logRowFor(recorder *Recorder, completion *Completion) *s
 		TotalTokens:       completion.Usage.TotalTokens,
 		CreditCost:        creditCost(completion.Usage),
 		UpstreamRequestID: completion.UpstreamRequestID,
-		ClientIP:          recorder.requestMeta.ClientIP,
-		KeyHash:           recorder.effectiveKeyHash(),
-		ClientRequestID:   recorder.requestMeta.ClientRequestID,
-		// 来源分类在这里定版（面板探活归 manual_test）：业务口径归
-		// debuglog 写方，store 侧原样落字段。
-		LogSource:         LogSourceProxy,
-		DroppedEvents:     recorder.dropped.Load(),
-		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
-		RateLimited:       recorder.rateLimited.Load(),
-		Retries:           len(recorder.retryAttempts()),
-		Account:           account,
-		AccountSwitches:   len(accountAttempts),
+		ClientIP:          meta.ClientIP,
+		KeyHash:           meta.KeyHash,
+		ClientRequestID:   meta.ClientRequestID,
+		RateLimited:       completion.RateLimited,
 		PrematureEndTurn:  completion.PrematureEndTurn,
-		AffinityHash:      recorder.affinityHash,
 	}
 	if row.ClientRequestID == ProbeClientRequestID {
 		row.LogSource = LogSourceManualTest
 	}
-	if completion.Result != "completed" {
-		// error 字段只对终结性失败出账：被重试救回的中间错误留在目录
-		// error.json 与 meta.retry_attempts，不污染按失败点检索的口径。
-		if stage, message := recorder.FirstError(); stage != "" {
-			row.ErrorStage = stage
-			row.ErrorMessage = truncateRunes(message, errorMessageCap)
-		}
+	return row
+}
+
+// noteTerminalError 把终结性失败的首败点落到行的 error 字段：只对
+// result!=completed 出账——被重试救回的中间错误留在目录 error.json
+// 与 meta.retry_attempts，不污染按失败点检索的口径。stage/message
+// 的来源归调用方（recorder.FirstError() 的首败点 vs completion
+// 自身字段）。
+func noteTerminalError(row *store.LogRow, result, stage, message string) {
+	if result == "completed" || stage == "" {
+		return
 	}
+	row.ErrorStage = stage
+	row.ErrorMessage = truncateRunes(message, errorMessageCap)
+}
+
+// logRowFor 构建完成请求的 logs 摘要行；store 为 nil（测试或 DB 未
+// 接线）或 dir 为空时返回 nil——日志行是观测副本，不反向决定请求
+// 能否完结。duration 取 completion.EndedAt（Complete 在请求 goroutine
+// 入口打戳）减 startedAt：收尾在编码/写队列与批量事务里的等待不计入
+// 请求耗时。落库由写 worker 合并进批量事务（runWriter → flushAll），
+// 失败重试随批次走。
+func (manager *Manager) logRowFor(recorder *Recorder, completion *Completion) *store.LogRow {
+	if manager.store == nil || recorder.dir == "" {
+		return nil
+	}
+	account, accountAttempts := recorder.upstreamAttribution()
+	row := completionLogRow(recorder.requestMeta, completion, recorder.startedAt,
+		completion.EndedAt.Sub(recorder.startedAt).Milliseconds())
+	row.Dir = recorder.dir
+	row.RequestReadyMS = optionalLatency(recorder.requestReadyMS.Load())
+	row.UpstreamSentMS = optionalLatency(recorder.upstreamSentMS.Load())
+	row.UpstreamOpenMS = optionalLatency(recorder.upstreamOpenMS.Load())
+	row.FirstUpstreamMS = optionalLatency(recorder.firstUpstreamMS.Load())
+	row.FirstClientMS = optionalLatency(recorder.firstClientMS.Load())
+	row.UpstreamDoneMS = optionalLatency(recorder.upstreamDoneMS.Load())
+	row.KeyHash = recorder.effectiveKeyHash()
+	row.DroppedEvents = recorder.dropped.Load()
+	row.RetryAfterSeconds = recorder.retryAfterSeconds.Load()
+	row.RateLimited = recorder.rateLimited.Load()
+	row.Retries = len(recorder.retryAttempts())
+	row.Account = account
+	row.AccountSwitches = len(accountAttempts)
+	row.AffinityHash = recorder.affinityHash
+	stage, message := recorder.FirstError()
+	noteTerminalError(&row, completion.Result, stage, message)
 	if conn := recorder.upstreamConn.Load(); conn != nil {
 		row.ConnReused = &conn.reused
 		row.ConnIdleMS = &conn.idleMS
@@ -108,7 +126,7 @@ func (manager *Manager) logRowFor(recorder *Recorder, completion *Completion) *s
 		}
 		row.SwitchCauses[store.SwitchCause{Lane: a.Account, Cause: switchCauseKey(a)}]++
 	}
-	return row
+	return &row
 }
 
 // switchCauseKey 把一次被放弃 lane 尝试压成 lane_attempt_causes 的
@@ -178,42 +196,10 @@ func (manager *Manager) NoteUnclaimedCompletion(meta RequestMeta, completion Com
 	if manager == nil || manager.store == nil || manager.root == "" || !manager.enabled.Load() {
 		return
 	}
-	row := store.LogRow{
-		LogSource:         LogSourceProxy,
-		StartedAt:         startedAt,
-		DurationMS:        manager.now().Sub(startedAt).Milliseconds(),
-		API:               meta.API,
-		Method:            meta.Method,
-		Path:              meta.Path,
-		StatusCode:        completion.StatusCode,
-		Result:            completion.Result,
-		RequestedModel:    completion.RequestedModel,
-		Model:             completion.Model,
-		ResponseModel:     completion.ResponseModel,
-		ModelMismatch:     completion.ModelMismatch,
-		Stream:            completion.Stream,
-		InputTokens:       completion.Usage.Input,
-		OutputTokens:      completion.Usage.Output,
-		CacheReadTokens:   completion.Usage.CacheRead,
-		CacheWriteTokens:  completion.Usage.CacheWrite,
-		ReasoningTokens:   reasoningTokens(completion.Usage),
-		TotalTokens:       completion.Usage.TotalTokens,
-		CreditCost:        creditCost(completion.Usage),
-		UpstreamRequestID: completion.UpstreamRequestID,
-		ClientIP:          meta.ClientIP,
-		KeyHash:           meta.KeyHash,
-		ClientRequestID:   meta.ClientRequestID,
-		RateLimited:       completion.RateLimited,
-		PrematureEndTurn:  completion.PrematureEndTurn,
-	}
-	if row.ClientRequestID == ProbeClientRequestID {
-		row.LogSource = LogSourceManualTest
-	}
+	row := completionLogRow(meta, &completion, startedAt,
+		manager.now().Sub(startedAt).Milliseconds())
 	// error 字段口径与 logRowFor 一致：只对终结性失败出账。
-	if completion.Result != "completed" && completion.ErrorStage != "" {
-		row.ErrorStage = completion.ErrorStage
-		row.ErrorMessage = truncateRunes(completion.ErrorMessage, errorMessageCap)
-	}
+	noteTerminalError(&row, completion.Result, completion.ErrorStage, completion.ErrorMessage)
 	ctx, cancel := reqStoreOpCtx()
 	defer cancel()
 	if _, err := manager.store.InsertLog(ctx, &row); err != nil {
