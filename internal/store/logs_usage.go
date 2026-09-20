@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/logvocab"
@@ -850,39 +851,106 @@ type AccountUsageRow struct {
 	TTFBAvgMS float64
 }
 
-// AccountUsage 返回单账号的 usage 原始量；account 走读侧折叠口径
-// （'default' 命中 ”+'default' 两群）。三个分量各一条 SQL——TTFB
-// 分位须取样本集在 Go 侧排序，无法并进聚合扫描；逐号 N 次调用的
-// 成本随 lane 数线性，个位数无压力。
-func (s *Store) AccountUsage(ctx context.Context, account string) (*AccountUsageRow, error) {
-	row := &AccountUsageRow{}
-	var err error
-	if row.Recent, err = s.LogRecentWindow(ctx, 60, LogScope{Account: account}); err != nil {
+// AccountsUsage 批量返回各账号的 usage 原始量；折叠口径同 LogScope
+// （'default' 命中 ”+'default' 两群）。Recent 与 Today 各一条按
+// logAccountExpr 分组的聚合扫描；TTFB 样本逐号走 recentSamples——
+// 「每号最近 N 条」靠 id 索引截断，比窗口函数全表分区便宜。每个请求
+// 名保证有行（窗口内零活动的号得零值行），面板逐号快照的 3N 次查询
+// 收成 2+N 次。
+func (s *Store) AccountsUsage(ctx context.Context, accounts []string) (map[string]*AccountUsageRow, error) {
+	out := make(map[string]*AccountUsageRow, len(accounts))
+	names := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		if _, ok := out[a]; !ok {
+			out[a] = &AccountUsageRow{}
+			names = append(names, a)
+		}
+	}
+	if len(names) == 0 {
+		return out, nil
+	}
+	foldIn := ` AND ` + logAccountExpr + ` IN (` + strings.Repeat("?,", len(names)-1) + `?)`
+	nameArgs := make([]any, len(names))
+	for i, n := range names {
+		nameArgs[i] = n
+	}
+
+	cut := time.Now().Unix() - 60
+	recentRows, err := s.ro.QueryContext(ctx, `SELECT `+logAccountExpr+`,
+		COALESCE(SUM(CASE WHEN status_code != 499 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(input_tokens), 0),
+		COALESCE(SUM(output_tokens), 0),
+		COALESCE(SUM(cache_read_tokens), 0),
+		COALESCE(SUM(cache_write_tokens), 0),
+		COALESCE(SUM(CASE WHEN duration_ms > 0 THEN duration_ms ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN duration_ms > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN first_upstream_ms > 0 AND first_upstream_ms < duration_ms
+			THEN duration_ms - first_upstream_ms ELSE duration_ms END), 0),
+		COALESCE(SUM(CASE WHEN stream != 0 AND status_code >= 200 AND status_code < 300 AND first_upstream_ms > 0 THEN first_upstream_ms ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN stream != 0 AND status_code >= 200 AND status_code < 300 AND first_upstream_ms > 0 THEN 1 ELSE 0 END), 0)
+		FROM logs WHERE time > ? AND `+logRecentEndExpr+` > ?`+foldIn+`
+		GROUP BY `+logAccountExpr,
+		append([]any{(cut - 3600) * 1000, cut}, nameArgs...)...)
+	if err != nil {
 		return nil, err
 	}
-	scopeWhere, scopeArgs := LogScope{Account: account}.where()
+	defer func() { _ = recentRows.Close() }()
+	for recentRows.Next() {
+		var name string
+		var a LogRecentAgg
+		if err := recentRows.Scan(&name, &a.Req, &a.InTok, &a.OutTok, &a.CrTok, &a.CwTok,
+			&a.DurMS, &a.NDur, &a.GenMS, &a.FirstMS, &a.NFirst); err != nil {
+			return nil, err
+		}
+		if row := out[name]; row != nil {
+			row.Recent = a
+		}
+	}
+	if err := recentRows.Err(); err != nil {
+		return nil, err
+	}
+
 	dayStart, dayEnd := dayBoundsMS(time.Now())
-	if err = s.ro.QueryRowContext(ctx, `SELECT
+	todayRows, err := s.ro.QueryContext(ctx, `SELECT `+logAccountExpr+`,
 		COUNT(*),
 		COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status_code != 499 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(total_tokens), 0)
-		FROM logs WHERE time >= ? AND time < ?`+scopeWhere,
-		append([]any{dayStart, dayEnd}, scopeArgs...)...).Scan(
-		&row.Today.Requests, &row.Today.OK, &row.Today.Non499, &row.Today.Tokens); err != nil {
-		return nil, err
-	}
-	samples, err := s.recentSamples(ctx, "first_upstream_ms", true, account)
+		FROM logs WHERE time >= ? AND time < ?`+foldIn+`
+		GROUP BY `+logAccountExpr,
+		append([]any{dayStart, dayEnd}, nameArgs...)...)
 	if err != nil {
 		return nil, err
 	}
-	row.TTFB = latencyStatsOf(samples)
-	if len(samples) > 0 {
-		var sum int64
-		for _, v := range samples {
-			sum += v
+	defer func() { _ = todayRows.Close() }()
+	for todayRows.Next() {
+		var name string
+		var td AccountUsageToday
+		if err := todayRows.Scan(&name, &td.Requests, &td.OK, &td.Non499, &td.Tokens); err != nil {
+			return nil, err
 		}
-		row.TTFBAvgMS = float64(sum) / float64(len(samples))
+		if row := out[name]; row != nil {
+			row.Today = td
+		}
 	}
-	return row, nil
+	if err := todayRows.Err(); err != nil {
+		return nil, err
+	}
+
+	for _, name := range names {
+		samples, err := s.recentSamples(ctx, "first_upstream_ms", true, name)
+		if err != nil {
+			return nil, err
+		}
+		row := out[name]
+		row.TTFB = latencyStatsOf(samples)
+		if len(samples) > 0 {
+			var sum int64
+			for _, v := range samples {
+				sum += v
+			}
+			row.TTFBAvgMS = float64(sum) / float64(len(samples))
+		}
+	}
+	return out, nil
 }
