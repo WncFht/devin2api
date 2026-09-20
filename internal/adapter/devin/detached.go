@@ -283,6 +283,97 @@ func (entry *detachedEntry) marker() (originDir string, state detachedState, buf
 // 缓冲已无重放价值却占槽，活泵不该给它让位；完成态条目兑现「重试秒回」
 // 的价值更高，排在 running 之后只作兜底——缺它则全终态未过期时 map
 // 会随 admit 速率×TTL 无界长大（软帽）。
+// detachedCounters 是脱钩完成缓存的累计计数组，字段清单只存在这一份：
+// detachedRegistry 内嵌后在 mu 下原地累加，DetachedStats 内嵌后 stats()
+// 一次结构拷贝即得快照，mergeDetachedStats 经 add 逐 lane 聚合——计数器
+// 回答「缓存兑现了几次救援、烧了多少无人认领的上游算力」（04 标记行只记
+// detach/attach 两个登记时刻，泵终局/移除原因/孤儿浪费没有其它观测面）。
+type detachedCounters struct {
+	// Detaches 累计登记（后台泵启动数）。
+	Detaches int64 `json:"detaches"`
+	// Attaches 累计挂接命中。
+	Attaches int64 `json:"attaches"`
+	// AttachMisses 是同键请求到场但条目不可用（过期/不可重放）的计数。
+	AttachMisses int64 `json:"attach_misses"`
+	// CrossLaneMisses 是「同键请求到本 lane、条目却在兄弟 lane」的探测
+	// 命中计数——与 attach_misses（条目在场不可用）对称的缺失补全：
+	// 跨 lane 重试此前在两侧都不可见（本 lane miss 不计、owner 只能等
+	// 移除时记不区分原因的孤儿）。
+	CrossLaneMisses int64 `json:"cross_lane_misses"`
+	// FinishedCompleted 泵终局 completed（上游 EOF 干净收尾）。
+	FinishedCompleted int64 `json:"finished_completed"`
+	// FinishedFailed 泵终局 failed（上游错误尾帧/泵内异常）。
+	FinishedFailed int64 `json:"finished_failed"`
+	// FinishedKilled 泵被 registry 淘汰掐死（drainCancel）。
+	FinishedKilled int64 `json:"finished_killed"`
+	// FinishedExpired 泵撞 running TTL（drainCtx 到期）。
+	FinishedExpired int64 `json:"finished_expired"`
+	// Expired 是死条目惰性移除：TTL 到期 + 截断尸体经 lookup 逐出
+	// （截断发生数单列 Truncated）。
+	Expired int64 `json:"expired"`
+	// Evicted 是容量淘汰（尸体让位/最老 running/最老终态兜底）。
+	Evicted int64 `json:"evicted"`
+	// Replaced 是同键新条目替换旧残骸。
+	Replaced int64 `json:"replaced"`
+	// Aborted 是面板 abort 按来源目录清场的移除计数——abort-after-detach
+	// 残留窗的兑现观测面（设计前提是稀有事件，非零即说明窗口真实命中）。
+	Aborted int64 `json:"aborted"`
+	// Closed 是登记表关停整体清场的移除计数——进程退出路径的兑现观测面，
+	// 非零即关停清场发生过（与 Aborted 并列的稀有事件口径）。
+	Closed int64 `json:"closed"`
+	// Truncated 是缓冲被字节预算冻结的次数（append 截断点记账）——
+	// flood/异常上游 drain 进缓存被预算拦下的信号；与移除路径解耦，
+	// 截断尸体无论经哪条路径淘汰都已入账，不会漏记也不会重复计。
+	Truncated int64 `json:"truncated"`
+	// Orphans 是移除时从未挂接的条目数（全部态）——「脱钩但无消费者」。
+	Orphans int64 `json:"orphans"`
+	// OrphanCompleted 是孤儿中的 completed：上游算完无人接，最纯的浪费。
+	OrphanCompleted int64 `json:"orphan_completed"`
+	// OrphansCrossLane 是孤儿中「消费者确实来过、只是去了别门」的
+	// 子集（sawCrossLaneRetry 置位）——Orphans-OrphansCrossLane
+	// 近似「客户端压根没重试」的上界。
+	OrphansCrossLane int64 `json:"orphans_cross_lane"`
+	// OrphanBufferedEvents 是孤儿条目脱钩后新产出的事件量合计——token
+	// 级浪费拿不到（真实 token 只在内存事件载荷里），事件量是最接近
+	// 的量级代理：区分「登记即死的孤儿」与「跑了 20 分钟无人认领」。
+	OrphanBufferedEvents int64 `json:"orphan_buffered_events"`
+	// LedgerDrops 是 detached_events 台账写失败计数：台账存在的意义
+	// 就是兜住争用期的丢痕迹，它自身的丢失量必须可观测（sqlite 争用
+	// 风暴期超时写失败时这里涨）。
+	LedgerDrops int64 `json:"ledger_drops"`
+	// Seeded 是开机从 detached_blobs 灌回的 completed 条目数——交接后
+	// 持久层兑现了几条的直接口径。
+	Seeded int64 `json:"seeded"`
+	// BlobDrops 是种子层自身丢失计数（编码/写库/坏行解码失败），与
+	// LedgerDrops 分列：台账丢的是取证痕迹，这里丢的是真重放价值。
+	BlobDrops int64 `json:"blob_drops"`
+}
+
+// add 把另一份计数逐字段累加进本组（mergeDetachedStats 的全 lane 聚合）。
+func (c *detachedCounters) add(o detachedCounters) {
+	c.Detaches += o.Detaches
+	c.Attaches += o.Attaches
+	c.AttachMisses += o.AttachMisses
+	c.CrossLaneMisses += o.CrossLaneMisses
+	c.FinishedCompleted += o.FinishedCompleted
+	c.FinishedFailed += o.FinishedFailed
+	c.FinishedKilled += o.FinishedKilled
+	c.FinishedExpired += o.FinishedExpired
+	c.Expired += o.Expired
+	c.Evicted += o.Evicted
+	c.Replaced += o.Replaced
+	c.Aborted += o.Aborted
+	c.Closed += o.Closed
+	c.Truncated += o.Truncated
+	c.Orphans += o.Orphans
+	c.OrphanCompleted += o.OrphanCompleted
+	c.OrphansCrossLane += o.OrphansCrossLane
+	c.OrphanBufferedEvents += o.OrphanBufferedEvents
+	c.LedgerDrops += o.LedgerDrops
+	c.Seeded += o.Seeded
+	c.BlobDrops += o.BlobDrops
+}
+
 type detachedRegistry struct {
 	mu      sync.Mutex
 	entries map[string]*detachedEntry
@@ -290,42 +381,15 @@ type detachedRegistry struct {
 	// 即将退出，此时登记的脱钩条目永远等不到挂接方——泵白烧上游算力到
 	// 进程死。detachable() 读它拒收准入；置位后不再清零（排空不可逆）。
 	draining atomic.Bool
-	// 计数与事件环全在 mu 下读写：04 标记行只记 detach/attach 两个
-	// 登记时刻，泵终局、移除原因与孤儿浪费没有其它观测面——计数器
-	// 回答「缓存兑现了几次救援、烧了多少无人认领的上游算力」。
-	detaches          int64 // 累计登记（后台泵启动数）
-	attaches          int64 // 累计挂接命中
-	attachMisses      int64 // 同键请求到场但条目不可用（过期/不可重放）
-	finishedCompleted int64 // 泵终局 completed（上游 EOF 干净收尾）
-	finishedFailed    int64 // 泵终局 failed（上游错误尾帧/泵内异常）
-	finishedKilled    int64 // 泵被 registry 淘汰掐死（drainCancel）
-	finishedExpired   int64 // 泵撞 running TTL（drainCtx 到期）
-	expired           int64 // 死条目惰性移除：TTL 到期 + 截断尸体经 lookup 逐出（截断发生数单列 truncated）
-	evicted           int64 // 容量淘汰（尸体让位/最老 running/最老终态兜底）
-	replaced          int64 // 同键新条目替换旧残骸
-	aborted           int64 // 面板 abort 按来源目录清场（abort-after-detach 残留窗）
-	closed            int64 // 登记表关停整体清场（进程退出路径——非零即关停发生）
-	truncated         int64 // 缓冲越字节预算被冻结次数——append 截断点记账，与移除路径解耦
-	orphans           int64 // 移除时从未挂接（全部态）——「脱钩但无消费者」
-	orphanCompleted   int64 // 其中 completed：上游算完无人接，最纯的浪费
-	orphanBuffered    int64 // 孤儿条目脱钩后新产出的事件量合计（浪费量级代理）
-	orphansCrossLane  int64 // 孤儿中消费者来过但去了别门的（sawCrossLaneRetry）
-	crossLaneMisses   int64 // 同键请求到本 lane 但条目在兄弟 lane 的探测命中
+	// 计数与事件环全在 mu 下读写。
+	detachedCounters
 	// ledger/lane 是 detached_events 台账的写出口与归属维：事件环只有
 	// 64 条且随进程死蒸发，而脱钩事件的两侧请求目录都可能缺席（claim
 	// 失败的重试零 payload、origin 标记行在 sqlite 争用中被丢）——台账
 	// 是这类「零足迹」现场的兜底取证层。ledger 为 nil 时只走内存环。
 	ledger *store.Store
 	lane   string
-	// ledgerDrops 记台账写丢失数（队满拒收/写失败/关停后到队）——台账
-	// 存在的目的就是兜住争用期的丢痕迹，它自己丢了多少必须有数。
-	ledgerDrops int64
-	// seeded 记开机播种灌回的 completed 条目数；blobDrops 记种子层的
-	// 自身丢失（编码失败/写库失败/坏行解码失败）——持久层的兑现率与
-	// 折损率都从这俩数读，与台账 ledgerDrops 分开记账。
-	seeded    int64
-	blobDrops int64
-	events    eventRing[DetachedEvent]
+	events eventRing[DetachedEvent]
 	// closing 由 close() 置位（mu 下）：登记表进入关停态，admit 拒收新
 	// 条目、pushEvent 不再入队台账（直接记 drop）。draining 只拒新准入
 	// 不掐在册泵；closing 是真清场。
@@ -470,54 +534,7 @@ type DetachedStats struct {
 	Completed int `json:"completed"`
 	Failed    int `json:"failed"`
 
-	Detaches     int64 `json:"detaches"`
-	Attaches     int64 `json:"attaches"`
-	AttachMisses int64 `json:"attach_misses"`
-	// CrossLaneMisses 是「同键请求到本 lane、条目却在兄弟 lane」的探测
-	// 命中计数——与 attach_misses（条目在场不可用）对称的缺失补全：
-	// 跨 lane 重试此前在两侧都不可见（本 lane miss 不计、owner 只能等
-	// 移除时记不区分原因的孤儿）。
-	CrossLaneMisses int64 `json:"cross_lane_misses"`
-
-	FinishedCompleted int64 `json:"finished_completed"`
-	FinishedFailed    int64 `json:"finished_failed"`
-	FinishedKilled    int64 `json:"finished_killed"`
-	FinishedExpired   int64 `json:"finished_expired"`
-
-	Expired  int64 `json:"expired"`
-	Evicted  int64 `json:"evicted"`
-	Replaced int64 `json:"replaced"`
-	// Aborted 是面板 abort 按来源目录清场的移除计数——abort-after-detach
-	// 残留窗的兑现观测面（设计前提是稀有事件，非零即说明窗口真实命中）。
-	Aborted int64 `json:"aborted"`
-	// Closed 是登记表关停整体清场的移除计数——进程退出路径的兑现观测面，
-	// 非零即关停清场发生过（与 aborted 并列的稀有事件口径）。
-	Closed int64 `json:"closed"`
-	// Truncated 是缓冲被字节预算冻结的次数（append 截断点记账）——
-	// flood/异常上游 drain 进缓存被预算拦下的信号；与移除路径解耦，
-	// 截断尸体无论经哪条路径淘汰都已入账，不会漏记也不会重复计。
-	Truncated int64 `json:"truncated"`
-
-	Orphans         int64 `json:"orphans"`
-	OrphanCompleted int64 `json:"orphan_completed"`
-	// OrphansCrossLane 是孤儿中「消费者确实来过、只是去了别门」的
-	// 子集（sawCrossLaneRetry 置位）——orphans-orphans_cross_lane
-	// 近似「客户端压根没重试」的上界。
-	OrphansCrossLane int64 `json:"orphans_cross_lane"`
-	// OrphanBufferedEvents 是孤儿条目脱钩后新产出的事件量合计——token
-	// 级浪费拿不到（真实 token 只在内存事件载荷里），事件量是最接近
-	// 的量级代理：区分「登记即死的孤儿」与「跑了 20 分钟无人认领」。
-	OrphanBufferedEvents int64 `json:"orphan_buffered_events"`
-	// LedgerDrops 是 detached_events 台账写失败计数：台账存在的意义
-	// 就是兜住争用期的丢痕迹，它自身的丢失量必须可观测（sqlite 争用
-	// 风暴期超时写失败时这里涨）。
-	LedgerDrops int64 `json:"ledger_drops"`
-	// Seeded 是开机从 detached_blobs 灌回的 completed 条目数——交接后
-	// 持久层兑现了几条的直接口径。BlobDrops 是种子层自身丢失计数
-	//（编码/写库/坏行解码失败），与 LedgerDrops 分列：台账丢的是
-	// 取证痕迹，这里丢的是真重放价值。
-	Seeded    int64 `json:"seeded"`
-	BlobDrops int64 `json:"blob_drops"`
+	detachedCounters
 
 	Events []DetachedEvent `json:"events,omitempty"` // 新在前
 }
@@ -533,27 +550,7 @@ func mergeDetachedStats(per map[string]DetachedStats) DetachedStats {
 		merged.Running += s.Running
 		merged.Completed += s.Completed
 		merged.Failed += s.Failed
-		merged.Detaches += s.Detaches
-		merged.Attaches += s.Attaches
-		merged.AttachMisses += s.AttachMisses
-		merged.CrossLaneMisses += s.CrossLaneMisses
-		merged.FinishedCompleted += s.FinishedCompleted
-		merged.FinishedFailed += s.FinishedFailed
-		merged.FinishedKilled += s.FinishedKilled
-		merged.FinishedExpired += s.FinishedExpired
-		merged.Expired += s.Expired
-		merged.Evicted += s.Evicted
-		merged.Replaced += s.Replaced
-		merged.Aborted += s.Aborted
-		merged.Closed += s.Closed
-		merged.Truncated += s.Truncated
-		merged.Orphans += s.Orphans
-		merged.OrphanCompleted += s.OrphanCompleted
-		merged.OrphansCrossLane += s.OrphansCrossLane
-		merged.OrphanBufferedEvents += s.OrphanBufferedEvents
-		merged.LedgerDrops += s.LedgerDrops
-		merged.Seeded += s.Seeded
-		merged.BlobDrops += s.BlobDrops
+		merged.add(s.detachedCounters)
 		for _, ev := range s.Events {
 			ev.Lane = name
 			merged.Events = append(merged.Events, ev)
@@ -658,17 +655,17 @@ func (registry *detachedRegistry) lookup(key string) *detachedEntry {
 		if !expired {
 			cause = detachEvictTruncated
 		}
-		registry.attachMisses++
+		registry.AttachMisses++
 		registry.pushEvent(detachedEventMiss, key, originDir, cause)
 		registry.evictLocked(key, entry, cause)
 		return nil
 	}
 	if !replayable {
-		registry.attachMisses++
+		registry.AttachMisses++
 		registry.pushEvent(detachedEventMiss, key, originDir, "unreplayable")
 		return nil
 	}
-	registry.attaches++
+	registry.Attaches++
 	registry.pushEvent(detachedEventAttach, key, originDir, state.String())
 	return entry
 }
@@ -701,7 +698,7 @@ func (registry *detachedRegistry) peek(key string) (state detachedState, usable,
 func (registry *detachedRegistry) noteCrossLaneMiss(key, owner, originDir string, state detachedState) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	registry.crossLaneMisses++
+	registry.CrossLaneMisses++
 	registry.pushEvent(detachedEventCrossMiss, key, originDir, owner+":"+state.String())
 }
 
@@ -794,7 +791,7 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) bool {
 		}
 	}
 	registry.entries[key] = entry
-	registry.detaches++
+	registry.Detaches++
 	registry.pushEvent(detachedEventAdmit, key, originDir, "")
 	return true
 }
@@ -813,15 +810,15 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 	delete(registry.entries, key)
 	switch cause {
 	case detachEvictCapacity:
-		registry.evicted++
+		registry.Evicted++
 	case detachEvictReplaced:
-		registry.replaced++
+		registry.Replaced++
 	case detachEvictAborted:
-		registry.aborted++
+		registry.Aborted++
 	case detachEvictClosed:
-		registry.closed++
+		registry.Closed++
 	default:
-		registry.expired++
+		registry.Expired++
 	}
 	entry.mu.Lock()
 	drainCancel := entry.drainCancel
@@ -833,13 +830,13 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 	originDir := entry.originDir
 	entry.mu.Unlock()
 	if orphan {
-		registry.orphans++
-		registry.orphanBuffered += int64(bufferedAfterDetach)
+		registry.Orphans++
+		registry.OrphanBufferedEvents += int64(bufferedAfterDetach)
 		if completed {
-			registry.orphanCompleted++
+			registry.OrphanCompleted++
 		}
 		if crossLane {
-			registry.orphansCrossLane++
+			registry.OrphansCrossLane++
 		}
 	}
 	registry.pushEvent(detachedEventEvict, key, originDir, cause)
@@ -889,13 +886,13 @@ func (registry *detachedRegistry) noteFinish(key, reason string, entry *detached
 	registry.mu.Lock()
 	switch reason {
 	case detachFinishCompleted:
-		registry.finishedCompleted++
+		registry.FinishedCompleted++
 	case detachFinishKilled:
-		registry.finishedKilled++
+		registry.FinishedKilled++
 	case detachFinishExpired:
-		registry.finishedExpired++
+		registry.FinishedExpired++
 	default:
-		registry.finishedFailed++
+		registry.FinishedFailed++
 	}
 	registry.pushEvent(detachedEventFinish, key, originDir, reason)
 	registry.mu.Unlock()
@@ -918,7 +915,7 @@ func (registry *detachedRegistry) noteTruncated(key string, entry *detachedEntry
 	entry.mu.Unlock()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	registry.truncated++
+	registry.Truncated++
 	registry.pushEvent(detachedEventTruncate, key, originDir, "")
 }
 
@@ -928,7 +925,7 @@ func (registry *detachedRegistry) noteTruncated(key string, entry *detachedEntry
 func (registry *detachedRegistry) noteBlobDrop() {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	registry.blobDrops++
+	registry.BlobDrops++
 }
 
 // pushEvent 追加一条生命周期事件；调用方须持 mu。key 截前 12 位——
@@ -951,7 +948,7 @@ func (registry *detachedRegistry) pushEvent(kind, key, originDir, detail string)
 		return
 	}
 	if registry.closing {
-		registry.ledgerDrops++
+		registry.LedgerDrops++
 		return
 	}
 	select {
@@ -959,7 +956,7 @@ func (registry *detachedRegistry) pushEvent(kind, key, originDir, detail string)
 		At: at, Lane: registry.lane, Key: key, OriginDir: originDir, Kind: kind, Detail: detail,
 	}:
 	default:
-		registry.ledgerDrops++
+		registry.LedgerDrops++
 		slog.Warn("detached event ledger write dropped: queue full", "lane", registry.lane, "kind", kind, "key", detachedRingKey(key))
 	}
 }
@@ -999,7 +996,7 @@ func (registry *detachedRegistry) writeLedgerRow(e store.DetachedEvent) {
 		return
 	}
 	registry.mu.Lock()
-	registry.ledgerDrops++
+	registry.LedgerDrops++
 	registry.mu.Unlock()
 	slog.Warn("detached event ledger write failed", "lane", e.Lane, "kind", e.Kind, "key", detachedRingKey(e.Key), "error", err)
 }
@@ -1073,27 +1070,7 @@ func (registry *detachedRegistry) stats() DetachedStats {
 		}
 	}
 	stats.Entries = len(registry.entries)
-	stats.Detaches = registry.detaches
-	stats.Attaches = registry.attaches
-	stats.AttachMisses = registry.attachMisses
-	stats.CrossLaneMisses = registry.crossLaneMisses
-	stats.FinishedCompleted = registry.finishedCompleted
-	stats.FinishedFailed = registry.finishedFailed
-	stats.FinishedKilled = registry.finishedKilled
-	stats.FinishedExpired = registry.finishedExpired
-	stats.Expired = registry.expired
-	stats.Evicted = registry.evicted
-	stats.Replaced = registry.replaced
-	stats.Aborted = registry.aborted
-	stats.Closed = registry.closed
-	stats.Truncated = registry.truncated
-	stats.Orphans = registry.orphans
-	stats.OrphanCompleted = registry.orphanCompleted
-	stats.OrphansCrossLane = registry.orphansCrossLane
-	stats.OrphanBufferedEvents = registry.orphanBuffered
-	stats.LedgerDrops = registry.ledgerDrops
-	stats.Seeded = registry.seeded
-	stats.BlobDrops = registry.blobDrops
+	stats.detachedCounters = registry.detachedCounters
 	stats.Events = registry.events.recent()
 	return stats
 }
@@ -1330,9 +1307,9 @@ func (s *attachStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 //  3. model 覆盖为别名/路由解析后的真实 uid——同一段提示词换个客户
 //     端模型名殊途同归。
 //
-// tools 键面与 prefixwarm.putTool 的 wire 身份清单同集——透传位不同
-// 的同名同 schema 工具走不同 wire 语义（custom 改参数编码、server
-// 触发托管跳），不得共享重放。
+// tools 键面即 prefixwarm.toolIdentity 的投影——与 putTool 的指纹
+// 编码同一字段集：透传位不同的同名同 schema 工具走不同 wire 语义
+// （custom 改参数编码、server 触发托管跳），不得共享重放。
 // json.Marshal 对 map 键排序，投影值全是已规范化结构，哈希确定。
 // 注意：键复用了为可观测性设计的调试投影，投影新增的审计位会静默
 // 进键——新增消息字段时须复核本函数口径（fingerprintRequest 同纪律：
@@ -1353,17 +1330,7 @@ func detachedRequestKey(request llm.RequestMessages, model string) string {
 	}
 	tools := make([]any, 0, len(request.Tools))
 	for _, tool := range request.Tools {
-		tools = append(tools, map[string]any{
-			"name":                    tool.Name,
-			"description":             tool.Description,
-			"input_schema":            tool.InputSchema,
-			"custom":                  tool.Custom,
-			"server":                  tool.Server,
-			"strict":                  tool.Strict,
-			"read_only_hint":          tool.ReadOnlyHint,
-			"server_name":             tool.ServerName,
-			"attribution_field_names": tool.AttributionFieldNames,
-		})
+		tools = append(tools, toolIdentity(tool))
 	}
 	projection["tools"] = tools
 	if request.CallerKeyHash != "" {

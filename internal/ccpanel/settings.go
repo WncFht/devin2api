@@ -2,7 +2,6 @@ package ccpanel
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,7 +18,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
-	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/store"
 )
@@ -167,106 +165,24 @@ func devinLive(deps SettingsDeps, get func(devin.Config) string) func() string {
 	return func() string { return get(deps.DevinConfig()) }
 }
 
-// mutateString 生成字符串字段的 mutate：trim 后可选校验再写入。
-func mutateString(field func(*devin.Config) *string, validate func(string) error) func(*devin.Config, string) error {
-	return func(c *devin.Config, v string) error {
-		v = strings.TrimSpace(v)
-		if validate != nil {
-			if err := validate(v); err != nil {
-				return err
-			}
-		}
-		*field(c) = v
-		return nil
+// devinSettingDef 由 devin 包字段登记表（devin.ConfigFieldByKey）派生一个
+// devin.* 面板键：path/def/live/apply 全部来自表内登记项，面板侧只携带
+// key/typ/desc 三元组。面板键词与 devin.* path 词的差仅是 devin_ 前缀；
+// 表内查不到是两侧词表漂移的编程错误，直接 panic。
+func devinSettingDef(deps SettingsDeps, d0 func() SettingDefaults, key, typ, desc string) settingDef {
+	f := devin.ConfigFieldByKey("devin." + strings.TrimPrefix(key, "devin_"))
+	if f == nil {
+		panic("devin config field not registered for panel key " + key)
 	}
-}
-
-// mutateInt 生成 int 字段的 mutate：十进制整数直接写入。
-func mutateInt(field func(*devin.Config) *int) func(*devin.Config, string) error {
-	return func(c *devin.Config, v string) error {
-		n, err := strconv.Atoi(strings.TrimSpace(v))
-		if err != nil {
-			return fmt.Errorf("value must be an integer: %w", err)
-		}
-		*field(c) = n
-		return nil
+	return settingDef{
+		key:   key,
+		path:  f.Key,
+		typ:   typ,
+		desc:  desc,
+		def:   func() string { return f.Get(d0().Devin) },
+		live:  devinLive(deps, f.Get),
+		apply: devinField(deps, f.Set),
 	}
-}
-
-// mutateSeconds 生成「秒→time.Duration」字段的 mutate（gate/warm 时长
-// 参数共用，<=0 语义由子系统归一化为默认值）。
-func mutateSeconds(field func(*devin.Config) *time.Duration) func(*devin.Config, string) error {
-	return func(c *devin.Config, v string) error {
-		n, err := strconv.Atoi(strings.TrimSpace(v))
-		if err != nil {
-			return fmt.Errorf("value must be an integer (seconds): %w", err)
-		}
-		if int64(n) > math.MaxInt64/int64(time.Second) || int64(n) < math.MinInt64/int64(time.Second) {
-			return fmt.Errorf("value overflows duration: %d", n)
-		}
-		*field(c) = time.Duration(n) * time.Second
-		return nil
-	}
-}
-
-// mutateNames 生成 []string 名表字段的 mutate：JSON 数组，元素 trim 后
-// 必须非空；空值/空数组归一成 nil（子系统回落内置默认表）。
-func mutateNames(field func(*devin.Config) *[]string) func(*devin.Config, string) error {
-	return func(c *devin.Config, v string) error {
-		var names []string
-		if strings.TrimSpace(v) != "" {
-			if err := json.Unmarshal([]byte(v), &names); err != nil {
-				return fmt.Errorf("value must be a JSON array of strings: %w", err)
-			}
-		}
-		for _, name := range names {
-			if strings.TrimSpace(name) == "" {
-				return errors.New("name list elements must be non-empty")
-			}
-		}
-		if len(names) == 0 {
-			names = nil
-		}
-		*field(c) = names
-		return nil
-	}
-}
-
-// requireNonEmpty 拦截空白输入：model/base_url 是上游必填项，空值会让
-// 全部请求失败（reload 端点有同款校验）。
-func requireNonEmpty(key string) func(string) error {
-	return func(v string) error {
-		if v == "" {
-			return fmt.Errorf("%s must be non-empty", key)
-		}
-		return nil
-	}
-}
-
-// requireAbsoluteURL 校验可解析的绝对 URL（scheme+host）。
-func requireAbsoluteURL(key string) func(string) error {
-	return func(v string) error {
-		u, err := url.Parse(v)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("%s must be an absolute URL", key)
-		}
-		return nil
-	}
-}
-
-// secondsOf 把时间字段读成秒字符串。
-func secondsOf(get func(devin.Config) time.Duration) func(devin.Config) string {
-	return func(c devin.Config) string { return strconv.FormatInt(int64(get(c)/time.Second), 10) }
-}
-
-// jsonString 把名表/别名类字段序列化成 JSON 字符串；nil/空落成 [] 或 {}
-// 的稳定展示形（不序列化成 null）。map 序列化键序确定（Go 排序）。
-func jsonString(v any, empty string) string {
-	data, err := json.Marshal(v)
-	if err != nil || string(data) == "null" {
-		return empty
-	}
-	return string(data)
 }
 
 // buildSettingDefs 注册全部可暴露键。凡有真实热应用通道的 config.yaml
@@ -278,411 +194,50 @@ func jsonString(v any, empty string) string {
 func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 	debug := deps.Debug
 	d0 := s.loadDefaults
+	// devin.* 键的 path/取值/热应用全部由 devin 包字段登记表派生
+	// （见 devinSettingDef）；此列表只携带面板侧三元组。
+	d := func(key, typ, desc string) settingDef {
+		return devinSettingDef(deps, d0, key, typ, desc)
+	}
 
 	defs := []settingDef{
 		// ---- 上游端点与模型 ----
-		{
-			key:  "devin_base_url",
-			path: "devin.base_url",
-			typ:  "string",
-			desc: "上游 Devin Connect 基础地址（devin.base_url）；换端点会重建上游连接束并清空 AssignModel 缓存",
-			def:  func() string { return d0().Devin.Endpoint.BaseURL },
-			live: devinLive(deps, func(c devin.Config) string { return c.Endpoint.BaseURL }),
-			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
-				return &c.Endpoint.BaseURL
-			}, requireAbsoluteURL("devin_base_url"))),
-		},
-		{
-			key:  "devin_proxy",
-			path: "devin.proxy",
-			typ:  "string",
-			desc: "上游代理地址（devin.proxy，http/https/socks5，可带 userinfo）；空为直连或走系统环境变量",
-			def:  func() string { return d0().Devin.Endpoint.Proxy },
-			live: devinLive(deps, func(c devin.Config) string { return c.Endpoint.Proxy }),
-			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
-				return &c.Endpoint.Proxy
-			}, nil)),
-		},
-		{
-			key:  "devin_force_http1",
-			path: "devin.force_http1",
-			typ:  "bool",
-			desc: "强制 HTTP/1.1 每请求独立连接（devin.force_http1）；关闭走 HTTP/2 单连接多路复用",
-			def:  func() string { return strconv.FormatBool(d0().Devin.Endpoint.ForceHTTP1) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.FormatBool(c.Endpoint.ForceHTTP1) }),
-			apply: devinField(deps, func(c *devin.Config, v string) error {
-				b, err := strconv.ParseBool(strings.TrimSpace(v))
-				if err != nil {
-					return fmt.Errorf("value must be a boolean: %w", err)
-				}
-				c.Endpoint.ForceHTTP1 = b
-				return nil
-			}),
-		},
-		{
-			key:  "devin_model",
-			path: "devin.model",
-			typ:  "string",
-			desc: "上游 chat model UID（devin.model）；请求未指定模型时的兜底目标",
-			def:  func() string { return d0().Devin.Model },
-			live: devinLive(deps, func(c devin.Config) string { return c.Model }),
-			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
-				return &c.Model
-			}, requireNonEmpty("devin_model"))),
-		},
-		{
-			key:  "devin_aliases",
-			path: "devin.aliases",
-			typ:  "json",
-			desc: "模型别名映射（devin.aliases），JSON 对象 {\"客户端模型名\":\"上游UID\"}；空/{} 为无别名",
-			def:  func() string { return jsonString(d0().Devin.Aliases, "{}") },
-			live: devinLive(deps, func(c devin.Config) string { return jsonString(c.Aliases, "{}") }),
-			apply: devinField(deps, func(c *devin.Config, v string) error {
-				var aliases map[string]string
-				if strings.TrimSpace(v) != "" {
-					if err := json.Unmarshal([]byte(v), &aliases); err != nil {
-						return fmt.Errorf("aliases must be a JSON object of string→string: %w", err)
-					}
-				}
-				normalized, err := config.NormalizeAliases(aliases)
-				if err != nil {
-					return err
-				}
-				if len(normalized) == 0 {
-					normalized = nil
-				}
-				c.Aliases = normalized
-				return nil
-			}),
-		},
+		d("devin_base_url", "string", "上游 Devin Connect 基础地址（devin.base_url）；换端点会重建上游连接束并清空 AssignModel 缓存"),
+		d("devin_proxy", "string", "上游代理地址（devin.proxy，http/https/socks5，可带 userinfo）；空为直连或走系统环境变量"),
+		d("devin_force_http1", "bool", "强制 HTTP/1.1 每请求独立连接（devin.force_http1）；关闭走 HTTP/2 单连接多路复用"),
+		d("devin_model", "string", "上游 chat model UID（devin.model）；请求未指定模型时的兜底目标"),
+		d("devin_aliases", "json", "模型别名映射（devin.aliases），JSON 对象 {\"客户端模型名\":\"上游UID\"}；空/{} 为无别名"),
 		// ---- 客户端身份（上游 metadata） ----
-		{
-			key:  "devin_client_name",
-			path: "devin.client_name",
-			typ:  "string",
-			desc: "发给上游的客户端名 metadata.extension_name/ide_name（devin.client_name）；空用内置默认",
-			def: func() string {
-				n, _, _ := d0().Devin.ClientIdentity()
-				return n
-			},
-			live: devinLive(deps, func(c devin.Config) string { n, _, _ := c.ClientIdentity(); return n }),
-			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
-				return &c.ClientName
-			}, nil)),
-		},
-		{
-			key:  "devin_client_version",
-			path: "devin.client_version",
-			typ:  "string",
-			desc: "客户端版本号 metadata.extension_version/ide_version（devin.client_version）；空用内置默认",
-			def: func() string {
-				_, v, _ := d0().Devin.ClientIdentity()
-				return v
-			},
-			live: devinLive(deps, func(c devin.Config) string { _, v, _ := c.ClientIdentity(); return v }),
-			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
-				return &c.ClientVersion
-			}, nil)),
-		},
-		{
-			key:  "devin_client_os",
-			path: "devin.client_os",
-			typ:  "string",
-			desc: "客户端系统 metadata.os（devin.client_os）；空用内置默认",
-			def: func() string {
-				_, _, o := d0().Devin.ClientIdentity()
-				return o
-			},
-			live: devinLive(deps, func(c devin.Config) string { _, _, o := c.ClientIdentity(); return o }),
-			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
-				return &c.ClientOS
-			}, nil)),
-		},
+		d("devin_client_name", "string", "发给上游的客户端名 metadata.extension_name/ide_name（devin.client_name）；空用内置默认"),
+		d("devin_client_version", "string", "客户端版本号 metadata.extension_version/ide_version（devin.client_version）；空用内置默认"),
+		d("devin_client_os", "string", "客户端系统 metadata.os（devin.client_os）；空用内置默认"),
 		// ---- 速率闸门 ----
-		{
-			key:  "devin_max_rpm",
-			path: "devin.max_rpm",
-			typ:  "int",
-			desc: "每个对齐分钟窗口发往上游的消息配额（devin.max_rpm，条/分钟）；<=0 不做窗口限速",
-			def:  func() string { return strconv.Itoa(devin.NormalizeGateConfig(d0().Devin.Gate).MaxRPM) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.Itoa(devin.NormalizeGateConfig(c.Gate).MaxRPM) }),
-			apply: devinField(deps, mutateInt(func(c *devin.Config) *int {
-				return &c.Gate.MaxRPM
-			})),
-		},
-		{
-			key:  "gate_max_hold_seconds",
-			path: "devin.gate_max_hold_seconds",
-			typ:  "int",
-			desc: "闩外排队最长等待秒数，超时快速失败 429+Retry-After（devin.gate_max_hold_seconds）；<=0 默认 30",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).MaxHold })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).MaxHold })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.MaxHold })),
-		},
-		{
-			key:  "gate_drip_interval_seconds",
-			path: "devin.gate_drip_interval_seconds",
-			typ:  "int",
-			desc: "冷却闩内放行探针的间隔秒数（devin.gate_drip_interval_seconds）；<=0 默认 8",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).DripInterval })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).DripInterval })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.DripInterval })),
-		},
-		{
-			key:  "gate_default_latch_seconds",
-			path: "devin.gate_default_latch_seconds",
-			typ:  "int",
-			desc: "上游限流未带 reset hint 时的兜底闩秒数（devin.gate_default_latch_seconds）；<=0 默认 60",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).DefaultLatch })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).DefaultLatch })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.DefaultLatch })),
-		},
-		{
-			key:  "gate_window_offset_seconds",
-			path: "devin.gate_window_offset_seconds",
-			typ:  "int",
-			desc: "上游分钟桶界在本地分钟内的估计位置（devin.gate_window_offset_seconds，第几秒）；负值按 mod 60 折算（-1=:59），默认 0",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).WindowOffset })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).WindowOffset })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.WindowOffset })),
-		},
-		{
-			key:  "gate_window_guard_seconds",
-			path: "devin.gate_window_guard_seconds",
-			typ:  "int",
-			desc: "桶界两侧停发死区秒数（devin.gate_window_guard_seconds）；<=0 或 >=30 默认 2",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).WindowGuard })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).WindowGuard })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.WindowGuard })),
-		},
-		{
-			key:  "gate_bg_max_hold_seconds",
-			path: "devin.gate_bg_max_hold_seconds",
-			typ:  "int",
-			desc: "bg 类请求闸内排队预算秒数（devin.gate_bg_max_hold_seconds，fg 走 gate_max_hold_seconds）；<=0 默认 120",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).BgMaxHold })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).BgMaxHold })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.BgMaxHold })),
-		},
-		{
-			key:  "gate_bg_reserve_margin",
-			path: "devin.gate_bg_reserve_margin",
-			typ:  "int",
-			desc: "bg 准入预留公式的固定安全边际条数（devin.gate_bg_reserve_margin）；<=0 默认 4",
-			def:  func() string { return strconv.Itoa(devin.NormalizeGateConfig(d0().Devin.Gate).BgReserveMargin) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.Itoa(devin.NormalizeGateConfig(c.Gate).BgReserveMargin) }),
-			apply: devinField(deps, mutateInt(func(c *devin.Config) *int {
-				return &c.Gate.BgReserveMargin
-			})),
-		},
+		d("devin_max_rpm", "int", "每个对齐分钟窗口发往上游的消息配额（devin.max_rpm，条/分钟）；<=0 不做窗口限速"),
+		d("gate_max_hold_seconds", "int", "闩外排队最长等待秒数，超时快速失败 429+Retry-After（devin.gate_max_hold_seconds）；<=0 默认 30"),
+		d("gate_drip_interval_seconds", "int", "冷却闩内放行探针的间隔秒数（devin.gate_drip_interval_seconds）；<=0 默认 8"),
+		d("gate_default_latch_seconds", "int", "上游限流未带 reset hint 时的兜底闩秒数（devin.gate_default_latch_seconds）；<=0 默认 60"),
+		d("gate_window_offset_seconds", "int", "上游分钟桶界在本地分钟内的估计位置（devin.gate_window_offset_seconds，第几秒）；负值按 mod 60 折算（-1=:59），默认 0"),
+		d("gate_window_guard_seconds", "int", "桶界两侧停发死区秒数（devin.gate_window_guard_seconds）；<=0 或 >=30 默认 2"),
+		d("gate_bg_max_hold_seconds", "int", "bg 类请求闸内排队预算秒数（devin.gate_bg_max_hold_seconds，fg 走 gate_max_hold_seconds）；<=0 默认 120"),
+		d("gate_bg_reserve_margin", "int", "bg 准入预留公式的固定安全边际条数（devin.gate_bg_reserve_margin）；<=0 默认 4"),
 		// ---- 前缀保温 ----
-		{
-			key:  "warm_prefix_enabled",
-			path: "devin.warm_prefix_enabled",
-			typ:  "bool",
-			desc: "前缀保温总开关（devin.warm_prefix_enabled）：静默会话按节拍重放请求体给上游 prompt cache 续期",
-			def:  func() string { return strconv.FormatBool(devin.NormalizeWarmConfig(d0().Devin.Warm).Enabled) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.FormatBool(devin.NormalizeWarmConfig(c.Warm).Enabled) }),
-			apply: devinField(deps, func(c *devin.Config, v string) error {
-				b, err := strconv.ParseBool(strings.TrimSpace(v))
-				if err != nil {
-					return fmt.Errorf("value must be a boolean: %w", err)
-				}
-				c.Warm.Enabled = b
-				return nil
-			}),
-		},
-		{
-			key:  "warm_prefix_interval_seconds",
-			path: "devin.warm_prefix_interval_seconds",
-			typ:  "int",
-			desc: "每条保温谱系的 ping 节拍秒数（devin.warm_prefix_interval_seconds，须明显低于上游 ~780s TTL）；<=0 默认 180",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).Interval })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).Interval })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Warm.Interval })),
-		},
-		{
-			key:  "warm_prefix_jitter_ratio",
-			path: "devin.warm_prefix_jitter_ratio",
-			typ:  "float",
-			desc: "ping 节拍抖动幅度 ±比例（devin.warm_prefix_jitter_ratio，防同刻齐射打满分钟桶）；取值 (0,1)，<=0 默认 0.15",
-			def: func() string {
-				return strconv.FormatFloat(devin.NormalizeWarmConfig(d0().Devin.Warm).JitterRatio, 'g', -1, 64)
-			},
-			live: devinLive(deps, func(c devin.Config) string {
-				return strconv.FormatFloat(devin.NormalizeWarmConfig(c.Warm).JitterRatio, 'g', -1, 64)
-			}),
-			apply: devinField(deps, func(c *devin.Config, v string) error {
-				f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-				if err != nil {
-					return fmt.Errorf("value must be a number: %w", err)
-				}
-				// !(f<1) 一并拦 NaN/+Inf：NaN 存进去下游 normalize 的
-				// <=0||>=1 比较全 false 会漏过，time.Duration(NaN) 是垃圾值。
-				if !(f < 1) {
-					return errors.New("warm_prefix_jitter_ratio must be < 1 (<=0 resets to default 0.15)")
-				}
-				c.Warm.JitterRatio = f
-				return nil
-			}),
-		},
-		{
-			key:   "warm_prefix_max_streams",
-			path:  "devin.warm_prefix_max_streams",
-			typ:   "int",
-			desc:  "同时保温的谱系数上限（devin.warm_prefix_max_streams）；<=0 默认 256",
-			def:   func() string { return strconv.Itoa(devin.NormalizeWarmConfig(d0().Devin.Warm).MaxStreams) },
-			live:  devinLive(deps, func(c devin.Config) string { return strconv.Itoa(devin.NormalizeWarmConfig(c.Warm).MaxStreams) }),
-			apply: devinField(deps, mutateInt(func(c *devin.Config) *int { return &c.Warm.MaxStreams })),
-		},
-		{
-			key:  "warm_prefix_max_retained_mb",
-			path: "devin.warm_prefix_max_retained_mb",
-			typ:  "int",
-			desc: "保留请求体内存总量上限 MB（devin.warm_prefix_max_retained_mb，超限按 LRU 驱逐）；<=0 默认 96",
-			def:  func() string { return strconv.FormatInt(devin.NormalizeWarmConfig(d0().Devin.Warm).MaxRetainedMB, 10) },
-			live: devinLive(deps, func(c devin.Config) string {
-				return strconv.FormatInt(devin.NormalizeWarmConfig(c.Warm).MaxRetainedMB, 10)
-			}),
-			apply: devinField(deps, func(c *devin.Config, v string) error {
-				n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-				if err != nil {
-					return fmt.Errorf("value must be an integer: %w", err)
-				}
-				c.Warm.MaxRetainedMB = n
-				return nil
-			}),
-		},
-		{
-			key:   "warm_prefix_min_prefix_tokens",
-			path:  "devin.warm_prefix_min_prefix_tokens",
-			typ:   "int",
-			desc:  "谱系可保温的最低前缀 token 数（devin.warm_prefix_min_prefix_tokens，低于此冷启动够便宜不烧 RPM）；<=0 默认 8192",
-			def:   func() string { return strconv.Itoa(devin.NormalizeWarmConfig(d0().Devin.Warm).MinPrefixTokens) },
-			live:  devinLive(deps, func(c devin.Config) string { return strconv.Itoa(devin.NormalizeWarmConfig(c.Warm).MinPrefixTokens) }),
-			apply: devinField(deps, mutateInt(func(c *devin.Config) *int { return &c.Warm.MinPrefixTokens })),
-		},
-		{
-			key:  "warm_prefix_blocked_max_idle_seconds",
-			path: "devin.warm_prefix_blocked_max_idle_seconds",
-			typ:  "int",
-			desc: "含阻塞型 pending 工具调用的谱系最长保温静默秒数（devin.warm_prefix_blocked_max_idle_seconds）；<=0 默认 14400",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).BlockedMaxIdle })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).BlockedMaxIdle })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Warm.BlockedMaxIdle })),
-		},
-		{
-			key:  "warm_prefix_userpaced_max_idle_seconds",
-			path: "devin.warm_prefix_userpaced_max_idle_seconds",
-			typ:  "int",
-			desc: "无 pending 或仅用户节奏 pending 的谱系最长静默秒数（devin.warm_prefix_userpaced_max_idle_seconds）；<=0 默认 2700",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).UserPacedMaxIdle })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).UserPacedMaxIdle })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Warm.UserPacedMaxIdle })),
-		},
-		{
-			key:  "warm_prefix_subdone_max_idle_seconds",
-			path: "devin.warm_prefix_subdone_max_idle_seconds",
-			typ:  "int",
-			desc: "已完成 subagent 谱系最长保温静默秒数（devin.warm_prefix_subdone_max_idle_seconds）；<=0 默认 600",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).SubDoneMaxIdle })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).SubDoneMaxIdle })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Warm.SubDoneMaxIdle })),
-		},
-		{
-			key:  "warm_prefix_unknown_max_idle_seconds",
-			path: "devin.warm_prefix_unknown_max_idle_seconds",
-			typ:  "int",
-			desc: "无法分类流的最长保温静默秒数兜底（devin.warm_prefix_unknown_max_idle_seconds）；<=0 默认 1800",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).UnknownMaxIdle })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).UnknownMaxIdle })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Warm.UnknownMaxIdle })),
-		},
-		{
-			key:   "warm_prefix_blocked_names",
-			path:  "devin.warm_prefix_blocked_names",
-			typ:   "json",
-			desc:  "判为阻塞型的 pending 工具名表（devin.warm_prefix_blocked_names），JSON 数组；空数组用内置默认",
-			def:   func() string { return jsonString(devin.NormalizeWarmConfig(d0().Devin.Warm).BlockedNames, "[]") },
-			live:  devinLive(deps, func(c devin.Config) string { return jsonString(devin.NormalizeWarmConfig(c.Warm).BlockedNames, "[]") }),
-			apply: devinField(deps, mutateNames(func(c *devin.Config) *[]string { return &c.Warm.BlockedNames })),
-		},
-		{
-			key:   "warm_prefix_userpaced_names",
-			path:  "devin.warm_prefix_userpaced_names",
-			typ:   "json",
-			desc:  "判为用户节奏型的 pending 工具名表（devin.warm_prefix_userpaced_names），JSON 数组；空数组用内置默认",
-			def:   func() string { return jsonString(devin.NormalizeWarmConfig(d0().Devin.Warm).UserPacedNames, "[]") },
-			live:  devinLive(deps, func(c devin.Config) string { return jsonString(devin.NormalizeWarmConfig(c.Warm).UserPacedNames, "[]") }),
-			apply: devinField(deps, mutateNames(func(c *devin.Config) *[]string { return &c.Warm.UserPacedNames })),
-		},
+		d("warm_prefix_enabled", "bool", "前缀保温总开关（devin.warm_prefix_enabled）：静默会话按节拍重放请求体给上游 prompt cache 续期"),
+		d("warm_prefix_interval_seconds", "int", "每条保温谱系的 ping 节拍秒数（devin.warm_prefix_interval_seconds，须明显低于上游 ~780s TTL）；<=0 默认 180"),
+		d("warm_prefix_jitter_ratio", "float", "ping 节拍抖动幅度 ±比例（devin.warm_prefix_jitter_ratio，防同刻齐射打满分钟桶）；取值 (0,1)，<=0 默认 0.15"),
+		d("warm_prefix_max_streams", "int", "同时保温的谱系数上限（devin.warm_prefix_max_streams）；<=0 默认 256"),
+		d("warm_prefix_max_retained_mb", "int", "保留请求体内存总量上限 MB（devin.warm_prefix_max_retained_mb，超限按 LRU 驱逐）；<=0 默认 96"),
+		d("warm_prefix_min_prefix_tokens", "int", "谱系可保温的最低前缀 token 数（devin.warm_prefix_min_prefix_tokens，低于此冷启动够便宜不烧 RPM）；<=0 默认 8192"),
+		d("warm_prefix_blocked_max_idle_seconds", "int", "含阻塞型 pending 工具调用的谱系最长保温静默秒数（devin.warm_prefix_blocked_max_idle_seconds）；<=0 默认 14400"),
+		d("warm_prefix_userpaced_max_idle_seconds", "int", "无 pending 或仅用户节奏 pending 的谱系最长静默秒数（devin.warm_prefix_userpaced_max_idle_seconds）；<=0 默认 2700"),
+		d("warm_prefix_subdone_max_idle_seconds", "int", "已完成 subagent 谱系最长保温静默秒数（devin.warm_prefix_subdone_max_idle_seconds）；<=0 默认 600"),
+		d("warm_prefix_unknown_max_idle_seconds", "int", "无法分类流的最长保温静默秒数兜底（devin.warm_prefix_unknown_max_idle_seconds）；<=0 默认 1800"),
+		d("warm_prefix_blocked_names", "json", "判为阻塞型的 pending 工具名表（devin.warm_prefix_blocked_names），JSON 数组；空数组用内置默认"),
+		d("warm_prefix_userpaced_names", "json", "判为用户节奏型的 pending 工具名表（devin.warm_prefix_userpaced_names），JSON 数组；空数组用内置默认"),
 		// ---- 号池调度与流超时 ----
-		{
-			key:  "devin_session_affinity_ttl_seconds",
-			path: "devin.session_affinity_ttl_seconds",
-			typ:  "int",
-			desc: "会话→账号绑定的滑动 TTL 秒数（devin.session_affinity_ttl_seconds）；命中即续期，<=0 默认 3600",
-			def:  func() string { return strconv.Itoa(d0().Devin.SessionAffinityTTLSeconds) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.Itoa(c.SessionAffinityTTLSeconds) }),
-			apply: devinField(deps, mutateInt(func(c *devin.Config) *int {
-				return &c.SessionAffinityTTLSeconds
-			})),
-		},
-		{
-			key:  "devin_quota_low_threshold_percent",
-			path: "devin.quota_low_threshold_percent",
-			typ:  "int",
-			desc: "weekly 剩余配额低于此百分比时新会话降档（devin.quota_low_threshold_percent）；<=0 默认 15，负值关闭降权",
-			def:  func() string { return strconv.Itoa(d0().Devin.QuotaLowThresholdPercent) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.Itoa(c.QuotaLowThresholdPercent) }),
-			apply: devinField(deps, mutateInt(func(c *devin.Config) *int {
-				return &c.QuotaLowThresholdPercent
-			})),
-		},
-		{
-			key:  "devin_no_progress_timeout_seconds",
-			path: "devin.no_progress_timeout_seconds",
-			typ:  "int",
-			desc: "产出过内容后的上游无进度期限秒数（devin.no_progress_timeout_seconds）；须盖住工具参数 15-25min 静默，<=0 默认 2700",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.NoProgressTimeout })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.NoProgressTimeout })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.NoProgressTimeout })),
-		},
-		{
-			key:  "devin_pre_event_no_progress_timeout_seconds",
-			path: "devin.pre_event_no_progress_timeout_seconds",
-			typ:  "int",
-			desc: "产出首个事件前每段无进度期限秒数（devin.pre_event_no_progress_timeout_seconds）；<=0 默认 600，pre-event 累计另有硬顶不突破",
-			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.PreEventNoProgressTimeout })(d0().Devin)
-			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.PreEventNoProgressTimeout })),
-			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.PreEventNoProgressTimeout })),
-		},
+		d("devin_session_affinity_ttl_seconds", "int", "会话→账号绑定的滑动 TTL 秒数（devin.session_affinity_ttl_seconds）；命中即续期，<=0 默认 3600"),
+		d("devin_quota_low_threshold_percent", "int", "weekly 剩余配额低于此百分比时新会话降档（devin.quota_low_threshold_percent）；<=0 默认 15，负值关闭降权"),
+		d("devin_no_progress_timeout_seconds", "int", "产出过内容后的上游无进度期限秒数（devin.no_progress_timeout_seconds）；须盖住工具参数 15-25min 静默，<=0 默认 2700"),
+		d("devin_pre_event_no_progress_timeout_seconds", "int", "产出首个事件前每段无进度期限秒数（devin.pre_event_no_progress_timeout_seconds）；<=0 默认 600，pre-event 累计另有硬顶不突破"),
 		// ---- 服务与日志 ----
 		{
 			key:  "max_concurrency",

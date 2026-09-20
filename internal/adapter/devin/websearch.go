@@ -114,11 +114,7 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 		response, err := link.api.GetWebSearchResults(traceCtx, connect.NewRequest(request))
 		if err != nil {
 			adapter.gate.noteUpstreamError(err)
-			stage := debuglog.ErrStageDevinConnect
-			if isTransientConnectError(err) {
-				stage = debuglog.ErrStageDevinTransport
-			}
-			recorder.WriteError(stage, err)
+			recorder.WriteError(stageOf(err), err)
 			return outcome, llm.Classify(err)
 		}
 		recorder.NoteUpstreamOpen()
