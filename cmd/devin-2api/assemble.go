@@ -203,26 +203,9 @@ func assemble(p bootParams) (*assembly, error) {
 	// 的数据源。纯进程内读取——不打上游、不写库，与配额采样不同，
 	// 交接进程同样起跑（重叠窗内它自己的历史也是有效观测）。
 	ccPanel.StartMetricsHistory()
-	// maskToken 常驻脱敏集合播种：config 声明的凭据与 upstream_accounts
-	// 仓的存量行都登记——重启后 recentTokens 环是空的，旧调试目录里的
-	// 凭据字面值照样罩得住。行内 token 含脱敏哈希形态也无妨（明文位
-	// 不命中就不替换）。
-	{
-		var tokenSeeds []string
-		for _, acc := range p.cfg.Devin.Accounts {
-			tokenSeeds = append(tokenSeeds, acc.Token)
-		}
-		if rows, err := p.db.ListAccounts(context.Background()); err == nil {
-			for _, row := range rows {
-				tokenSeeds = append(tokenSeeds, row.Token)
-			}
-		} else {
-			// 面板侧凭据失去脱敏登记——调试 payload 里这些 token 可能
-			// 以明文露面。静默吞掉会让降级无迹可查，按惯例留 WARN。
-			slog.Warn("debuglog: upstream account token seeds unavailable, panel credentials will not be masked", "error", err)
-		}
-		ccPanel.NoteUpstreamTokens(tokenSeeds...)
-	}
+	// maskToken 常驻脱敏集合播种归面板自理：重启后 recentTokens 环是
+	// 空的，旧调试目录里的凭据字面值照样罩得住。
+	ccPanel.SeedCredentialMasks(context.Background(), &p.cfg, p.db)
 	// 配额采样协程是托管职责：起跑即对每个账号打一次上游并写
 	// quota_samples，交接侧与托管实例的采样会重复且互相计数。
 	p.role.duty("quota sampler", func() {
