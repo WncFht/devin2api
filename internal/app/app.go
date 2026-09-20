@@ -110,6 +110,12 @@ type App struct {
 	// "sync: WaitGroup is reused before previous Wait has returned" panic，
 	// 会把正在排空的进程整段炸掉、掐死在途流。
 	inflight drainTracker
+	// routerBuilt/panelMounted 记录最近一次 Router() 构建时刻的面板
+	// 接线态：ccPanel 晚于 Router() 注入会静默丢路由（Register 只在
+	// 构建期跑一次），WiringGaps 据此把这种时序错误暴露成装配失败。
+	// Router() 可被并发调用（测试多路 ServeHTTP），走 atomic。
+	routerBuilt  atomic.Bool
+	panelMounted atomic.Bool
 }
 
 // New 创建一个使用指定供应商适配器的 HTTP 应用。
@@ -253,8 +259,30 @@ func (application *App) Router() http.Handler {
 		// gzip 只压 /admin|/dashboard 的 JSON 响应（见 gzipPanelMiddleware
 		// 的判定）；/v1 的 SSE/WS 不在该子树内。
 		application.ccPanel.Register(router.With(gzipPanelMiddleware))
+		application.panelMounted.Store(true)
 	}
+	application.routerBuilt.Store(true)
 	return router
+}
+
+// WiringGaps 报告生产服役必需但缺席或失序的接线项（装配期字段自省）：
+// tokens/models 未注入、面板未注入、面板在 Router() 构建之后才注入
+// （路由已定型、Register 不会再跑）。装配层在 settle 收口后调用它作
+// 启动门槛；返回 nil 表示接线完整。
+func (application *App) WiringGaps() []string {
+	var gaps []string
+	if application.tokens == nil {
+		gaps = append(gaps, "auth_tokens")
+	}
+	if application.models == nil {
+		gaps = append(gaps, "model_registry")
+	}
+	if application.ccPanel == nil {
+		gaps = append(gaps, "ccpanel")
+	} else if application.routerBuilt.Load() && !application.panelMounted.Load() {
+		gaps = append(gaps, "ccpanel injected after router built")
+	}
+	return gaps
 }
 
 // HTTPServer 创建带有应用路由和超时配置的 HTTP 服务。
