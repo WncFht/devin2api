@@ -16,35 +16,39 @@ import (
 	"strings"
 )
 
-// sanitizeJSON 把待写值序列化为脱敏后的 JSON 字节：先拿到原始 JSON
-// （json.Marshaler 用其 MarshalJSON——protoJSON/SSE 包装的惰性序列化
-// 留在编码协程；其余类型一次 json.Marshal），rawNeedsSanitize 预筛
-// 干净即原样采用——绝大多数记录是自产投影/SSE 帧，unmarshal 建树+
-// 树遍历+重排的三趟成本在每条 delta 上是纯开销；命中敏感键或内联
-// 图片才走完整脱敏。与旧 sanitize 的语义差异：map/slice 输入不再被
-// 原地改写（脱敏作用于 unmarshal 出的私有副本），返回值作
-// JSONLRecord.Data 时外层 marshal 只付一次 compaction 扫描。
-func (recorder *Recorder) sanitizeJSON(value any) []byte {
-	var data []byte
+// sanitizeJSON 把待写值序列化为脱敏后的 JSON 字节并报告其 marshal
+// 洁净度：先拿到原始 JSON（json.Marshaler 用其 MarshalJSON——
+// protoJSON/SSE 包装的惰性序列化留在编码协程；其余类型一次
+// json.Marshal），rawNeedsSanitize 预筛干净即原样采用——绝大多数
+// 记录是自产投影/SSE 帧，unmarshal 建树+树遍历+重排的三趟成本在
+// 每条 delta 上是纯开销；命中敏感键或内联图片才走完整脱敏。
+// marshalClean 表示返回字节是 json.Marshal 直产（紧凑+HTML 转义
+// 齐全，含脱敏慢路径与兜底的重 marshal）——Marshaler 快路径产物
+// 不保证，供 JSONLRecord.DataMarshalClean 决定是否跳过外层
+// compaction/转义复扫。与旧 sanitize 的语义差异：map/slice 输入
+// 不再被原地改写（脱敏作用于 unmarshal 出的私有副本）。
+func (recorder *Recorder) sanitizeJSON(value any) (data []byte, marshalClean bool) {
 	var err error
 	if marshaler, ok := value.(json.Marshaler); ok {
 		data, err = marshaler.MarshalJSON()
 	} else {
-		data, err = json.Marshal(value)
+		if data, err = json.Marshal(value); err == nil {
+			marshalClean = true
+		}
 	}
 	if err == nil {
 		if !rawNeedsSanitize(data) {
-			return data
+			return data, marshalClean
 		}
 		var generic any
 		if err = json.Unmarshal(data, &generic); err == nil {
 			if data, err = json.Marshal(recorder.sanitizeValue(generic, false)); err == nil {
-				return data
+				return data, true
 			}
 		}
 	}
 	fallback, _ := json.Marshal(map[string]any{"serialization_error": err.Error()})
-	return fallback
+	return fallback, true
 }
 
 // writeSanitizedJSONLine 把脱敏后的 JSON 连带结尾 '\n' 写进 buf——

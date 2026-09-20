@@ -195,6 +195,12 @@ type Manager struct {
 	// 复用 flate 内部表——sync.Pool 会被 GC 清空，专属实例把表重建
 	// 摊成一次性成本。
 	shardEncoders []*store.PayloadEncoder
+	// shardDeltaEncoders 与 shardEncoders 同分片持有 zstd delta 编码器：
+	// 各协程跨目录复用一份，目录间换基座只付 dict 哈希表 clear+重填
+	// 的 CPU——8MB window hist 与长短表永续复用，把每目录 ~16MB 的
+	// 编码器建造成本摊成零。底层 zstd writer 懒建，无 delta 候选的
+	// 分片不付常驻内存；热度上限是 encoderShards×~16MB。
+	shardDeltaEncoders []*store.PayloadDeltaEncoder
 	// writerEncoder 是写 worker 的专属 payload 编码器：flushAll 的
 	// chunk 编码与 queueCompletion 的 meta 编码在它上面跑；fallbackMu
 	// 兜底路径在 workerGone 后串行触碰，不构成并发。
@@ -514,10 +520,9 @@ type Recorder struct {
 	// 字节钉进来（含尾 \n，与库存 01 行解码结果逐字节一致），02/03*
 	// 任务以它为 zstd dict。同 dir 任务恒由同一分片协程串行执行，字段
 	// 无并发访问；releaseDir 时把字节量退回 deltaBaseBytes 预算。
+	// 编码器本体在 manager.shardDeltaEncoders 跨目录复用，本字段只记
+	// 基座——Encode 按指针判等认出同座复用、异座换 dict。
 	deltaBase []byte
-	// deltaEnc 是钉住基座后懒建的复用 delta 编码器：02/03* 逐文件的
-	// dict 哈希表构建只付一次；releaseDir 与基座同生死。
-	deltaEnc *store.PayloadDeltaEncoder
 
 	// 以下字段仅由写 worker 访问，无需加锁：
 	// stagedFiles 按文件名暂存已编码的整文件行；刷写周期与 chunkBufs
@@ -593,8 +598,9 @@ type completionItem struct {
 type JSONLRecord struct {
 	// Seq 是当前文件内从 1 开始的顺序号。
 	Seq int `json:"seq"`
-	// Time 是事件发生时带时区的 RFC3339Nano 时间。
-	Time string `json:"time"`
+	// Time 是事件发生时刻，拼装时按 RFC3339Nano 直写——与 marshal 对
+	// time.Time 的输出逐字节一致，省一次 Format 堆分配。
+	Time time.Time `json:"time"`
 	// ElapsedMS 是相对请求进入时间的毫秒数。
 	ElapsedMS int64 `json:"elapsed_ms"`
 	// Event 是协议事件名；没有独立事件名时省略。
@@ -603,6 +609,12 @@ type JSONLRecord struct {
 	//（sanitizeJSON），RawMessage 让信封 marshal 只付一次 compaction
 	// 扫描而不是重走反射编码。
 	Data json.RawMessage `json:"data"`
+	// DataMarshalClean 标记 Data 为 json.Marshal 直产字节（紧凑+HTML
+	// 转义齐全）：拼装免 Compact 复扫与转义回补——Compact 对 marshal
+	// 输出恒为空操作、回补恒找不到待转字节，直拷即逐字节等价。仅
+	// sanitizeJSON 置位（含脱敏慢路径的重 marshal）；protojson/SSE
+	// 包装与外来 RawMessage 不置位，走全量校验转义路径。
+	DataMarshalClean bool `json:"-"`
 }
 
 // marshalJSONLRecord 把 JSONLRecord 手写拼装成一行 JSON——与
@@ -612,14 +624,20 @@ type JSONLRecord struct {
 // 多次中间分配。流式期每请求数百行的热路径走这里。
 func marshalJSONLRecord(record JSONLRecord) ([]byte, error) {
 	var buf bytes.Buffer
-	// 信封本体约 80 字节+时间串与事件名原文——Grow 让全部拼装一次
-	// 分配内完成（escapes 超界时按 buffer 常规倍增兜底）。
-	buf.Grow(len(record.Data) + len(record.Event) + len(record.Time) + 96)
+	// 信封本体约 80 字节+时间串（RFC3339Nano ≤35B）与事件名原文——
+	// Grow 让全部拼装一次分配内完成（escapes 超界时按 buffer 常规
+	// 倍增兜底）。
+	buf.Grow(len(record.Data) + len(record.Event) + 136)
 	var num [20]byte
 	buf.WriteString(`{"seq":`)
 	buf.Write(strconv.AppendInt(num[:0], int64(record.Seq), 10))
 	buf.WriteString(`,"time":`)
-	writeJSONString(&buf, record.Time)
+	// RFC3339Nano 只产 [0-9T:.-+Z] 字符集，引号直拼即 marshal 的
+	// time.Time 编码——不经 writeJSONString 的逐字节扫描。
+	var ts [40]byte
+	buf.WriteByte('"')
+	buf.Write(record.Time.AppendFormat(ts[:0], time.RFC3339Nano))
+	buf.WriteByte('"')
 	buf.WriteString(`,"elapsed_ms":`)
 	buf.Write(strconv.AppendInt(num[:0], record.ElapsedMS, 10))
 	if record.Event != "" {
@@ -627,11 +645,14 @@ func marshalJSONLRecord(record JSONLRecord) ([]byte, error) {
 		writeJSONString(&buf, record.Event)
 	}
 	buf.WriteString(`,"data":`)
-	if record.Data == nil {
+	switch {
+	case record.Data == nil:
 		// 同 json.Marshal 对 nil RawMessage 的输出：null（空非 nil
 		// 切片在 marshal 路径是 error，交给 Compact 同口径报错）。
 		buf.WriteString("null")
-	} else {
+	case record.DataMarshalClean:
+		buf.Write(record.Data)
+	default:
 		start := buf.Len()
 		if err := json.Compact(&buf, record.Data); err != nil {
 			// json.Compact 与 marshal 对 RawMessage 的校验/compaction
@@ -785,26 +806,28 @@ func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 		policy.LogRowDays = DefaultLogRowRetentionDays
 	}
 	manager := &Manager{
-		root:          root,
-		now:           time.Now,
-		activeDirs:    make(map[string]*Recorder),
-		takenNames:    make(map[string]struct{}),
-		policy:        policy,
-		store:         st,
-		queues:        make([]chan writeTask, encoderShards),
-		shardEncoders: make([]*store.PayloadEncoder, encoderShards),
-		writerEncoder: store.NewPayloadEncoder(),
-		insertQ:       make(chan insertOp, insertQueueSize),
-		workerStop:    make(chan struct{}),
-		workerGone:    make(chan struct{}),
-		encodersDone:  make(chan struct{}),
-		encoderDone:   make([]chan struct{}, encoderShards),
-		dirtyBufs:     make(map[*Recorder]struct{}),
+		root:               root,
+		now:                time.Now,
+		activeDirs:         make(map[string]*Recorder),
+		takenNames:         make(map[string]struct{}),
+		policy:             policy,
+		store:              st,
+		queues:             make([]chan writeTask, encoderShards),
+		shardEncoders:      make([]*store.PayloadEncoder, encoderShards),
+		shardDeltaEncoders: make([]*store.PayloadDeltaEncoder, encoderShards),
+		writerEncoder:      store.NewPayloadEncoder(),
+		insertQ:            make(chan insertOp, insertQueueSize),
+		workerStop:         make(chan struct{}),
+		workerGone:         make(chan struct{}),
+		encodersDone:       make(chan struct{}),
+		encoderDone:        make([]chan struct{}, encoderShards),
+		dirtyBufs:          make(map[*Recorder]struct{}),
 	}
 	shardCap := max(2048, globalQueueSize/encoderShards)
 	for i := range manager.queues {
 		manager.queues[i] = make(chan writeTask, shardCap)
 		manager.shardEncoders[i] = store.NewPayloadEncoder()
+		manager.shardDeltaEncoders[i] = store.NewPayloadDeltaEncoder()
 		manager.encoderDone[i] = make(chan struct{})
 	}
 	manager.enabled.Store(true)
@@ -1798,7 +1821,7 @@ func (recorder *Recorder) noteIOErr(kind string, err error) {
 // NoteRequestReady 记录请求体解码+投影完成、泵协程即将调 adapter.Stream
 // 的时刻——此前全部耗时是入口段（读体+JSON 解码+消息投影）。
 func (recorder *Recorder) NoteRequestReady() {
-	if recorder == nil {
+	if recorder == nil || recorder.requestReadyMS.Load() != -1 {
 		return
 	}
 	recorder.requestReadyMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
@@ -1807,7 +1830,7 @@ func (recorder *Recorder) NoteRequestReady() {
 // NoteUpstreamSend 记录首个上游 RPC 真实发往连线的时刻（幂等，只记第一次）。
 // 与 requestReady 之差即适配器转换耗时（含本地速率闸门排队）。
 func (recorder *Recorder) NoteUpstreamSend() {
-	if recorder == nil {
+	if recorder == nil || recorder.upstreamSentMS.Load() != -1 {
 		return
 	}
 	recorder.upstreamSentMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
@@ -1816,7 +1839,7 @@ func (recorder *Recorder) NoteUpstreamSend() {
 // NoteUpstreamOpen 记录上游流建立成功（响应头到达）的时刻（幂等，只记第一次）。
 // 与 upstreamSent 之差是建流往返；与 firstUpstream 之差才是上游思考 TTFT。
 func (recorder *Recorder) NoteUpstreamOpen() {
-	if recorder == nil {
+	if recorder == nil || recorder.upstreamOpenMS.Load() != -1 {
 		return
 	}
 	recorder.upstreamOpenMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
@@ -1824,7 +1847,7 @@ func (recorder *Recorder) NoteUpstreamOpen() {
 
 // NoteUpstreamLatency 记录首个上游事件到达的相对毫秒数（幂等，只记第一次）。
 func (recorder *Recorder) NoteUpstreamLatency() {
-	if recorder == nil {
+	if recorder == nil || recorder.firstUpstreamMS.Load() != -1 {
 		return
 	}
 	recorder.firstUpstreamMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
@@ -1842,7 +1865,7 @@ func (recorder *Recorder) FirstUpstreamMS() int64 {
 // NoteClientLatency 记录首个下发给客户端的内容字节的相对毫秒数。
 // SSE 保活注释不计——它是链路保活不是内容。
 func (recorder *Recorder) NoteClientLatency() {
-	if recorder == nil {
+	if recorder == nil || recorder.firstClientMS.Load() != -1 {
 		return
 	}
 	recorder.firstClientMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
@@ -1853,7 +1876,7 @@ func (recorder *Recorder) NoteClientLatency() {
 // 一次性写出，出口延迟要量的是「流末→首字节」而非「首事件→首字节」。
 // 脱钩缓存的挂接重放同样经本打点——重放收完即「上游」收完。
 func (recorder *Recorder) NoteUpstreamDone() {
-	if recorder == nil {
+	if recorder == nil || recorder.upstreamDoneMS.Load() != -1 {
 		return
 	}
 	recorder.upstreamDoneMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
@@ -2362,13 +2385,8 @@ func (recorder *Recorder) encodeStageFile(name string, data []byte) stagedFile {
 		}
 	case name == StageRequestMessages || strings.HasPrefix(name, devinRequestStageStem):
 		if recorder.deltaBase != nil {
-			if recorder.deltaEnc == nil {
-				recorder.deltaEnc = store.NewPayloadDeltaEncoder(recorder.deltaBase)
-			}
-			if recorder.deltaEnc != nil {
-				stored, usize := recorder.deltaEnc.Encode(data)
-				return stagedFile{stored: stored, usize: usize}
-			}
+			stored, usize := recorder.manager.shardDeltaEncoders[recorder.shard].Encode(data, recorder.deltaBase)
+			return stagedFile{stored: stored, usize: usize}
 		}
 	}
 	stored, usize := recorder.encodePayload(data)
@@ -2409,12 +2427,14 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	// 测试回拨共用一把锁（生产路径字段不可变，拷贝与读原值等价）。
 	startedAt := recorder.startedAt
 	task := func() {
+		sanitized, marshalClean := recorder.sanitizeJSON(evalDeferred(value))
 		data, err := marshalJSONLRecord(JSONLRecord{
-			Seq:       seq,
-			Time:      at.Format(time.RFC3339Nano),
-			ElapsedMS: at.Sub(startedAt).Milliseconds(),
-			Event:     event,
-			Data:      recorder.sanitizeJSON(evalDeferred(value)),
+			Seq:              seq,
+			Time:             at,
+			ElapsedMS:        at.Sub(startedAt).Milliseconds(),
+			Event:            event,
+			Data:             sanitized,
+			DataMarshalClean: marshalClean,
 		})
 		if err != nil {
 			return
@@ -2457,11 +2477,12 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 		// error_message 逐字节一致，不随任务入队顺序漂移。
 		recorded := recorder.firstError.Load()
 		var data bytes.Buffer
-		if err := json.Indent(&data, recorder.sanitizeJSON(map[string]any{
+		sanitized, _ := recorder.sanitizeJSON(map[string]any{
 			"stage":      recorded.stage,
 			"message":    recorded.message,
 			"elapsed_ms": elapsedMS,
-		}), "", "  "); err != nil {
+		})
+		if err := json.Indent(&data, sanitized, "", "  "); err != nil {
 			return
 		}
 		data.WriteByte('\n')

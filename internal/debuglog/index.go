@@ -306,10 +306,6 @@ func (manager *Manager) releaseDir(recorder *Recorder) {
 		manager.deltaBaseBytes.Add(-int64(len(recorder.deltaBase)))
 		recorder.deltaBase = nil
 	}
-	if recorder.deltaEnc != nil {
-		recorder.deltaEnc.Close()
-		recorder.deltaEnc = nil
-	}
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
 	delete(manager.activeDirs, recorder.dir)
