@@ -578,7 +578,7 @@ func (registry *detachedRegistry) seed() {
 		}
 		registry.mu.Lock()
 		registry.entries[blob.Key] = entry
-		registry.seeded++
+		registry.Seeded++
 		registry.pushEvent(detachedEventSeed, blob.Key, blob.OriginDir, "")
 		registry.mu.Unlock()
 	}

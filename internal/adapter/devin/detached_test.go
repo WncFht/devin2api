@@ -1571,19 +1571,27 @@ func TestMergeDetachedStats(t *testing.T) {
 		},
 	}
 	merged := mergeDetachedStats(per)
-	// 数值字段全量逐 lane 求和——反射扫住整个结构体，新字段漏进归并
-	// 体即失败（Aborted 曾在结构体加入后漏加，顶层 detached.aborted
-	// 永久为 0）。
+	// 数值字段全量逐 lane 求和——反射扫住整个结构体（含内嵌计数器），
+	// 新字段漏进归并体即失败（Aborted 曾在结构体加入后漏加，顶层
+	// detached.aborted 永久为 0）。
 	va, vb, vm := reflect.ValueOf(per["a"]), reflect.ValueOf(per["b"]), reflect.ValueOf(merged)
-	for i := 0; i < va.NumField(); i++ {
-		f := va.Type().Field(i)
-		if f.Type.Kind() != reflect.Int && f.Type.Kind() != reflect.Int64 {
-			continue
-		}
-		if got, want := vm.Field(i).Int(), va.Field(i).Int()+vb.Field(i).Int(); got != want {
-			t.Fatalf("merged.%s = %d, want %d", f.Name, got, want)
+	var checkInts func(a, b, m reflect.Value)
+	checkInts = func(a, b, m reflect.Value) {
+		for i := 0; i < a.NumField(); i++ {
+			f := a.Type().Field(i)
+			if f.Anonymous && f.Type.Kind() == reflect.Struct {
+				checkInts(a.Field(i), b.Field(i), m.Field(i))
+				continue
+			}
+			if f.Type.Kind() != reflect.Int && f.Type.Kind() != reflect.Int64 {
+				continue
+			}
+			if got, want := m.Field(i).Int(), a.Field(i).Int()+b.Field(i).Int(); got != want {
+				t.Fatalf("merged.%s = %d, want %d", f.Name, got, want)
+			}
 		}
 	}
+	checkInts(va, vb, vm)
 	// 事件新在前、回填 lane；归并不改 per-lane 快照（lane 身份由透出
 	// 路径携带，per-lane 视图本字段留空）。
 	wantLane := []string{"b", "a", "a"}
