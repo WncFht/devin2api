@@ -104,17 +104,17 @@ func TestApplyMergesOverlay(t *testing.T) {
 	}
 	pool := testPool(t)
 	rt := New(configPath, dir, dbStore, pool)
-	resolved, _, err := rt.Apply(ctx, cfg, nil)
+	outcome, err := rt.Apply(ctx, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := sortedKeys(laneStates(pool)); !slices.Equal(got, []string{"alpha", "gamma"}) {
 		t.Fatalf("lanes = %v, want [alpha gamma]", got)
 	}
-	if findResolved(resolved, "beta") == nil || !findResolved(resolved, "beta").Disabled {
-		t.Fatalf("beta should stay in resolved view as disabled: %+v", resolved)
+	if findResolved(outcome.Resolved, "beta") == nil || !findResolved(outcome.Resolved, "beta").Disabled {
+		t.Fatalf("beta should stay in resolved view as disabled: %+v", outcome.Resolved)
 	}
-	if findResolved(resolved, "ghost") != nil {
+	if findResolved(outcome.Resolved, "ghost") != nil {
 		t.Fatal("dead tombstone must not appear in resolved view")
 	}
 	if _, ok, err := dbStore.GetAccount(ctx, "ghost"); err != nil || ok {
@@ -132,13 +132,13 @@ func TestApplyRejectsInvalidSet(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
 	rt := New(configPath, dir, dbStore, pool)
-	if _, _, err := rt.Apply(ctx, cfg, nil); err != nil {
+	if _, err := rt.Apply(ctx, cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := dbStore.UpsertAccount(ctx, &store.AccountRow{Name: "gamma", Token: "tok-alpha"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := rt.Apply(ctx, cfg, nil); err == nil ||
+	if _, err := rt.Apply(ctx, cfg, nil); err == nil ||
 		!strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("Apply() err = %v, want duplicate-token rejection", err)
 	}
@@ -155,12 +155,57 @@ func TestApplyEmptySet(t *testing.T) {
 	dbStore := testAccountStore(t, dir)
 	pool := testPool(t)
 	rt := New(configPath, dir, dbStore, pool)
-	resolved, applied, err := rt.Apply(context.Background(), cfg, nil)
+	outcome, err := rt.Apply(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resolved) != 0 || len(applied) != 0 || len(laneStates(pool)) != 0 {
-		t.Fatalf("empty pool expected: resolved=%v applied=%v lanes=%v", resolved, applied, laneStates(pool))
+	if len(outcome.Resolved) != 0 || len(outcome.Applied) != 0 || len(laneStates(pool)) != 0 {
+		t.Fatalf("empty pool expected: resolved=%v applied=%v lanes=%v", outcome.Resolved, outcome.Applied, laneStates(pool))
+	}
+}
+
+// TestApplyReportsEndpointChange 钉住端点变化的两路同源判定：
+// ApplyOutcome.EndpointChanged 按「上次成功提交的配置 vs 本次」文件级
+// 比对（同值不报）；UpdateDevin 按 lane 活配置生效值比对——动端点报
+// true、动非端点字段报 false。
+func TestApplyReportsEndpointChange(t *testing.T) {
+	dir := t.TempDir()
+	configPath, cfg := writeTestConfig(t, dir, testAccountsYAML)
+	dbStore := testAccountStore(t, dir)
+	ctx := context.Background()
+	pool := testPool(t)
+	rt := New(configPath, dir, dbStore, pool)
+	rt.CommitConfig(cfg)
+	outcome, err := rt.Apply(ctx, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.EndpointChanged {
+		t.Fatal("same committed config reported endpoint change")
+	}
+	mutated := cfg
+	mutated.Devin.BaseURL = "https://other.example.com"
+	outcome, err = rt.Apply(ctx, mutated, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.EndpointChanged {
+		t.Fatal("base_url change not reported")
+	}
+
+	changed, err := rt.UpdateDevin(func(c *devin.Config) error {
+		c.Model = "other-model"
+		return nil
+	})
+	if err != nil || changed {
+		t.Fatalf("non-endpoint mutate = (%v, %v), want false", changed, err)
+	}
+	changed, err = rt.UpdateDevin(func(c *devin.Config) error {
+		c.Endpoint.BaseURL = "https://third.example.com"
+		return nil
+	})
+	if err != nil || !changed {
+		t.Fatalf("endpoint mutate = (%v, %v), want true", changed, err)
 	}
 }
 
@@ -178,7 +223,7 @@ func TestSnapshot(t *testing.T) {
 	if got.Model != "m" || got.Endpoint.BaseURL != "https://example.com" || got.Identity.Name != "" {
 		t.Fatalf("empty-pool snapshot = %+v, want base template", got)
 	}
-	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+	if _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := rt.Snapshot(); got.Identity.Name != "alpha" {
@@ -245,7 +290,7 @@ func TestOpsLifecycle(t *testing.T) {
 	pool := testPool(t)
 	rt := New(configPath, dir, dbStore, pool)
 	rt.CommitConfig(cfg)
-	if _, _, err := rt.Apply(ctx, cfg, nil); err != nil {
+	if _, err := rt.Apply(ctx, cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	ops := rt.Ops(nil)
@@ -552,7 +597,7 @@ devin:
 	pool := testPool(t)
 	rt := New(configPath, dir, dbStore, pool)
 	rt.CommitConfig(cfg)
-	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+	if _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
 		t.Fatalf("Apply() error = %v, want degraded push, not rejection", err)
 	}
 	states := laneStates(pool)
@@ -599,7 +644,7 @@ devin:
 	dbStore := testAccountStore(t, dir)
 	pool := testPool(t)
 	rt := New(configPath, dir, dbStore, pool)
-	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+	if _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := pool.TokenFuncs()["beta"](); got != "file-tok-beta" {
@@ -610,7 +655,7 @@ devin:
 	if err := os.Remove(creds); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+	if _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
 		t.Fatalf("re-Apply() error = %v", err)
 	}
 	if got := pool.TokenFuncs()["beta"](); got != "file-tok-beta" {
@@ -637,7 +682,7 @@ devin:
 	dbStore := testAccountStore(t, dir)
 	pool := testPool(t)
 	rt := New(configPath, dir, dbStore, pool)
-	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+	if _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	for name, st := range laneStates(pool) {
@@ -656,7 +701,7 @@ func TestOpsCredentialOfRejectsMissingFile(t *testing.T) {
 	dbStore := testAccountStore(t, dir)
 	pool := testPool(t)
 	rt := New(configPath, dir, dbStore, pool)
-	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+	if _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	ops := rt.Ops(nil)

@@ -86,8 +86,11 @@ type AccountPatch struct {
 func (rt *Runtime) Ops(replaySettings func() error) AccountOps {
 	configDir := filepath.Dir(rt.configPath)
 	push := func(ctx context.Context) ([]store.ResolvedAccount, error) {
-		resolved, _, err := rt.Apply(ctx, rt.Config(), replaySettings)
-		return resolved, err
+		outcome, err := rt.Apply(ctx, rt.Config(), replaySettings)
+		if err != nil {
+			return nil, err
+		}
+		return outcome.Resolved, nil
 	}
 	return AccountOps{
 		Effective: func(ctx context.Context) ([]store.ResolvedAccount, error) {

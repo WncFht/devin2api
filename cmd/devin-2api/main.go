@@ -240,7 +240,7 @@ func main() {
 		rt.CommitConfig(serviceConfig)
 	}
 	rt.Lock()
-	_, _, err = rt.Apply(context.Background(), serviceConfig, nil)
+	_, err = rt.Apply(context.Background(), serviceConfig, nil)
 	rt.Unlock()
 	if err != nil {
 		slog.Error("apply account configs failed", "error", err)
@@ -396,14 +396,13 @@ func main() {
 		// 与 reset 回落会跟着空转——回落到文件投影的 base 模板。
 		DevinConfig: func() devin.Config { return rt.Snapshot() },
 		// 面板写入经 UpdateConfig 在 configMu 内克隆+提交（与 reload 共用
-		// 提交点）；端点三件套变化时面板自身的上游调用束跟随换绑。
+		// 提交点）；端点三件套按生效值变化时面板自身的上游调用束跟随换绑。
 		UpdateDevin: func(mutate func(*devin.Config) error) error {
-			applied, err := devinPool.UpdateConfig(mutate)
+			changed, err := rt.UpdateDevin(mutate)
 			if err != nil {
 				return err
 			}
-			if slices.Contains(applied, "devin.base_url") || slices.Contains(applied, "devin.proxy") ||
-				slices.Contains(applied, "devin.force_http1") {
+			if changed {
 				cur := devinPool.CurrentConfig()
 				return ccPanel.SetUpstream(cur.Endpoint.BaseURL, cur.Endpoint.Proxy, cur.Endpoint.ForceHTTP1)
 			}
@@ -709,24 +708,23 @@ func reloadRuntimeConfig(rt *accounts.Runtime, application *app.App, panel *ccpa
 	// ApplyConfigs。校验失败整单 422，lanes 与库行都没动——
 	// 旧配置继续服役。面板覆盖重放不在此做：下方字段差集 →
 	// ResampleDefaults → ApplyAll 的顺序必须保住（覆盖恒赢文件值）。
-	resolved, applied, err := rt.Apply(context.Background(), cfg, nil)
+	outcome, err := rt.Apply(context.Background(), cfg, nil)
 	if err != nil {
 		return nil, err
 	}
-	report.Applied = append(report.Applied, applied...)
+	report.Applied = append(report.Applied, outcome.Applied...)
 	// lane 增删不进任何单 lane 的字段差集：按「重推前池内名集 vs
 	// 新生效名集」比对单独上报——声明序不能当判据（overlay 行让
 	// 声明集与 lane 集分叉）。
-	if !slices.Equal(preLaneNames, accounts.LaneNames(resolved)) {
+	if !slices.Equal(preLaneNames, accounts.LaneNames(outcome.Resolved)) {
 		report.Applied = append(report.Applied, "devin.accounts")
 	}
 	// 端点三件套变化时面板自身的上游调用束跟随换绑（adapter 侧已在
 	// ApplyConfig 内换好，同参数构建成功是前提；展示地址经 BaseURL
-	// 透出，无需单独同步）。这里必须比文件级生效值而不是消费 applied
-	// 名单：applied 只汇总存活 lane 的 ApplyConfig 字段差集，lane 集
-	// 整体换届或空池期间改端点时新值烤进新 lane 不产生字段差，
-	// 走 applied 会漏掉面板换绑。
-	if accounts.BaseConfig(pcfg).Endpoint != accounts.BaseConfig(cfg).Endpoint {
+	// 透出，无需单独同步）。EndpointChanged 在 Apply 内按文件级生效值
+	// 判定：字段差集只汇总存活 lane，lane 集整体换届或空池期间改端点
+	// 时新值烤进新 lane 不产生字段差，消费 applied 会漏掉面板换绑。
+	if outcome.EndpointChanged {
 		if err := panel.SetUpstream(cfg.Devin.BaseURL, cfg.Devin.Proxy, *cfg.Devin.ForceHTTP1); err != nil {
 			return nil, err
 		}
