@@ -764,6 +764,38 @@ type LogCellTotals struct {
 	SumGenMS int64
 }
 
+// Add 返回 t+o 的逐字段和——格子指标全是可加量，跨槽/跨维再聚合
+// （per-model 累计、健康时间线桶、全局 total）在 Go 侧用本方法
+// 合并 LogCells 回调出的行。
+func (t LogCellTotals) Add(o LogCellTotals) LogCellTotals {
+	t.Requests += o.Requests
+	t.OK += o.OK
+	t.Gone += o.Gone
+	t.Limited += o.Limited
+	t.NDur += o.NDur
+	t.NDurOK += o.NDurOK
+	t.InTok += o.InTok
+	t.OutTok += o.OutTok
+	t.CacheRead += o.CacheRead
+	t.CacheWrite += o.CacheWrite
+	t.InTokNG += o.InTokNG
+	t.OutTokNG += o.OutTokNG
+	t.CacheReadNG += o.CacheReadNG
+	t.CacheWriteNG += o.CacheWriteNG
+	t.SumDurMS += o.SumDurMS
+	t.SumDurOKMS += o.SumDurOKMS
+	t.SumFirstOKMS += o.SumFirstOKMS
+	t.NFirstOK += o.NFirstOK
+	t.SumFirstStreamMS += o.SumFirstStreamMS
+	t.NFirstStream += o.NFirstStream
+	t.SumDurNonStreamMS += o.SumDurNonStreamMS
+	t.NNonStream += o.NNonStream
+	t.NStreamNG += o.NStreamNG
+	t.NNonStreamNG += o.NNonStreamNG
+	t.SumGenMS += o.SumGenMS
+	return t
+}
+
 // logCellCols 是 LogCells 的聚合列清单（顺序即扫描顺序）。
 const logCellCols = `
 	COUNT(*),

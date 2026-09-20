@@ -58,17 +58,12 @@ type healthPoint struct {
 	EffectiveCost    float64   `json:"effective_cost"`
 }
 
-// statScope 是一次统计查询收敛后的过滤值：kh 为限定 key_hash（api_token
-// 身份或 auth_token_id 参数命中时），api/model/modelLike 来自 query——
-// 与 store.LogScope 一一对应，经 logScope() 下推到 SQL。account 是
-// 上游账号 lane 名（读侧折叠口径），P2 逐号统计的支点，v1 无填充方。
-type statScope struct {
-	kh        string
-	api       string
-	model     string
-	modelLike string
-	account   string
-}
+// statScope 是一次统计查询收敛后的过滤值——store.LogScope 的面板侧
+// 别名（范围谓词的唯一事实源在 store）。KeyHash 为限定 key_hash
+// （api_token 身份或 auth_token_id 参数命中时），API/Model/ModelLike
+// 来自 query；Account 是上游账号 lane 名（读侧折叠口径），P2 逐号
+// 统计的支点，v1 无填充方。
+type statScope = store.LogScope
 
 // queryScope 把一次统计查询的数据范围折成 statScope。
 // 范围来源两类：api_token 身份（强制只看自己的行）与 query 筛选
@@ -77,12 +72,12 @@ type statScope struct {
 // 调用方直接回空集。
 func (h *Handler) queryScope(r *http.Request) (scope statScope, excluded bool) {
 	q := r.URL.Query()
-	if scope.kh, excluded = h.scopeKeyHash(r); excluded {
+	if scope.KeyHash, excluded = h.scopeKeyHash(r); excluded {
 		return scope, true
 	}
-	scope.api = strings.TrimSpace(q.Get("api"))
-	scope.model = strings.TrimSpace(q.Get("model"))
-	scope.modelLike = strings.TrimSpace(q.Get("model_like"))
+	scope.API = strings.TrimSpace(q.Get("api"))
+	scope.Model = strings.TrimSpace(q.Get("model"))
+	scope.ModelLike = strings.TrimSpace(q.Get("model_like"))
 	return scope, false
 }
 
@@ -117,7 +112,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	// （Σ输出 ÷ Σ生成时长，同表格速度列口径）；ttfb 沿用格子口径；
 	// cache_pct 同缓存命中列。
 	recentBlock := func(sec int64) map[string]any {
-		// excluded（筛选条件不可能命中）时连查询都不发：scope.kh 为空会
+		// excluded（筛选条件不可能命中）时连查询都不发：scope.KeyHash 为空会
 		// 返回全局真实计数，与 stats=[]/rpm=0 的排空口径自相矛盾。
 		var a store.LogRecentAgg
 		if !excluded {
@@ -173,7 +168,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 			a = &modelAgg{}
 			aggs[key.Model] = a
 		}
-		a.t = addCells(a.t, c)
+		a.t = a.t.Add(c)
 		a.cost += cellCost(key, c, prices)
 		n := c.Requests - c.Gone
 		if n > a.peak {
@@ -188,7 +183,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 
-	last := h.lastByModel(ctx, scope.kh)
+	last := h.lastByModel(ctx, scope.KeyHash)
 	models := make([]string, 0, len(aggs))
 	for m := range aggs {
 		models = append(models, m)
@@ -199,7 +194,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 
 	var recentByModel map[string]float64
 	if isToday {
-		recentByModel = h.recentRPMByModel(ctx, scope.kh)
+		recentByModel = h.recentRPMByModel(ctx, scope.KeyHash)
 	}
 	entries := make([]statsEntry, 0, len(models))
 	for _, m := range models {
@@ -273,7 +268,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		}
 		entries = append(entries, e)
 	}
-	data := build(entries, h.rpmStatsFiltered(ctx, since, until, scope, isToday, scope.model, rpmTotal, rpmPeak))
+	data := build(entries, h.rpmStatsFiltered(ctx, since, until, scope, isToday, scope.Model, rpmTotal, rpmPeak))
 	h.statsCache.store(cacheKey, data, cacheTTL)
 	respondOK(w, data)
 }
@@ -413,7 +408,7 @@ func (b *healthBuckets) finalize() map[string][]healthPoint {
 // 单槽峰值）折算成 rpm_stats 响应件——格子扫描由调用方一遍完成，
 // 不再为 total/peak 单独重扫。recent_rpm 仅 isToday 有效，取最近
 // 60s 的真实完成计数，并按 ccLoad 口径把 peak 抬到不低于 recent
-// （格子折算的峰值会低估瞬时峰值）；recentModel/scope.kh 分别按
+// （格子折算的峰值会低估瞬时峰值）；recentModel/scope.KeyHash 分别按
 // 模型与令牌收敛。
 func (h *Handler) rpmStatsFiltered(ctx context.Context, since, until time.Time, scope statScope, isToday bool, recentModel string, total, peak int64) map[string]any {
 	minutes := until.Sub(since).Minutes()
@@ -424,7 +419,7 @@ func (h *Handler) rpmStatsFiltered(ctx context.Context, since, until time.Time, 
 	avgRPM := float64(total) / minutes
 	recent := 0.0
 	if isToday {
-		recent = h.recentRPM(ctx, recentModel, scope.kh)
+		recent = h.recentRPM(ctx, recentModel, scope.KeyHash)
 		if peakRPM < recent {
 			peakRPM = recent
 		}

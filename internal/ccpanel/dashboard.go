@@ -222,9 +222,9 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 				mt = &store.LogCellTotals{}
 				a.byModel[key.Model] = mt
 			}
-			*mt = addCells(*mt, c)
+			*mt = mt.Add(c)
 			a.modelCost[key.Model] += cost
-			a.total = addCells(a.total, c)
+			a.total = a.total.Add(c)
 		})
 	}
 
