@@ -274,7 +274,7 @@ func (s *Service) checkView(tag string, err error) map[string]any {
 	if err != nil {
 		view["error"] = err.Error()
 	} else {
-		view["update_available"] = tag != "" && tag != s.version
+		view["update_available"] = updateAvailable(tag, s.version)
 	}
 	return view
 }
@@ -512,6 +512,14 @@ func (s *Service) pipeline(st Status) {
 			return
 		}
 		st.To = tag
+		// 「更新到最新」隐式路径只许前向：运行版领先 latest 时照走
+		// 管线会把新构建换成旧 release（startBtn 在 supported 下恒可
+		// 点，update_available=false 时前端传空 tag 也落到这）。显式
+		// 传 tag 是调用方的明确意图，不拦。
+		if !updateAvailable(st.To, st.From) {
+			_ = s.fail(ctx, st, fmt.Errorf("running %s is already at or ahead of latest release %s", st.From, st.To))
+			return
+		}
 	}
 	if err := s.download(ctx, st.To); err != nil {
 		_ = s.fail(ctx, st, fmt.Errorf("download %s: %w", st.To, err))
