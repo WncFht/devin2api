@@ -116,6 +116,20 @@ func (rt *Runtime) StoreReport(report *ReloadReport) {
 	rt.lastReload.Store(report)
 }
 
+// ApplyOutcome 是 Apply 一次重推的结果：生效视图、ApplyConfigs 的
+// 字段差集，与端点三件套是否按生效值变化的判定。
+type ApplyOutcome struct {
+	// Resolved 是 merge 后的生效账号集（config 声明 ∪ DB 行 − 墓碑/停用）。
+	Resolved []store.ResolvedAccount
+	// Applied 是 ApplyConfigs 返回的字段差集（仅汇总存活 lane）。
+	Applied []string
+	// EndpointChanged 报告端点三件套（base_url/proxy/force_http1）在上次
+	// 成功提交的配置与本次之间是否变化——按文件级生效值比对而非 Applied
+	// 名单：lane 集整体换届或空池期间改端点时，新值烤进新 lane 不产生
+	// 字段差，消费 Applied 会漏判。面板自身的上游调用束据此换绑。
+	EndpointChanged bool
+}
+
 // Apply 是账号集合的唯一重推入口（boot/reload/CRUD 三路共用，调用方
 // 须持 rt 锁）：DB 行与 config 声明 merge 出生效集 → 剔除墓碑与停用
 // → 整表干跑校验（校验失败即拒载、旧配置继续服役）→ 逐 lane 映射 →
@@ -123,19 +137,23 @@ func (rt *Runtime) StoreReport(report *ReloadReport) {
 // assignments/在途流，新增建 lane，摘下异步 Close）→ replaySettings
 // 非空时回调重放面板覆盖（必须在 ApplyConfigs 之后，新建 lane 才吃得
 // 到 devin_model 等覆盖）→ 收死墓碑。空生效集合法：空集即全部 lane
-// 被摘出。返回生效视图与 ApplyConfigs 的字段差集。
-func (rt *Runtime) Apply(ctx context.Context, cfg config.Config, replaySettings func() error) ([]store.ResolvedAccount, []string, error) {
+// 被摘出。返回本次重推的 ApplyOutcome。
+func (rt *Runtime) Apply(ctx context.Context, cfg config.Config, replaySettings func() error) (*ApplyOutcome, error) {
+	// 端点比对锚「上次成功提交的配置」：reload 在 CommitConfig 之前调用，
+	// 此刻 rt.Config() 即旧生效值；boot/CRUD 传入同一份已提交配置时
+	// EndpointChanged 恒 false——服役端点从未被本路径换过。
+	prevEndpoint := BaseConfig(rt.Config()).Endpoint
 	resolved, err := rt.db.EffectiveAccounts(ctx, cfg.Devin.Accounts)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	synthesized, err := config.ResolveAccounts(accountConfigs(resolved, false), filepath.Dir(rt.configPath))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	applied, err := rt.pool.ApplyConfigs(rt.devinConfigs(cfg, synthesized))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// credentials_file 解不出的账号：响亮记错并把「什么凭据都没有」的
 	// lane 打进凭据冷却（一条流量不吃；文件回填经 TokenSource/下一次
@@ -166,7 +184,25 @@ func (rt *Runtime) Apply(ctx context.Context, cfg config.Config, replaySettings 
 	} else if n > 0 {
 		slog.Info("collected dead tombstone accounts", "count", n)
 	}
-	return resolved, applied, nil
+	return &ApplyOutcome{
+		Resolved:        resolved,
+		Applied:         applied,
+		EndpointChanged: BaseConfig(cfg).Endpoint != prevEndpoint,
+	}, nil
+}
+
+// UpdateDevin 把面板设置写入的全局字段经 pool.UpdateConfig 热应用到
+// 每条 lane，并报告端点三件套是否按生效值变化——判据是首 lane 快照的
+// Endpoint 整比而不是 applied 字段名单，与 ApplyOutcome.EndpointChanged
+// 同一口径：空池时 mutate 不落任何 lane，名单与生效值同报「无变化」。
+// 面板的上游调用束据此换绑。只触 pool（自带锁），调用方在 rt 锁内
+// 外皆可（settings 回放路径已在锁内）。
+func (rt *Runtime) UpdateDevin(mutate func(*devin.Config) error) (endpointChanged bool, err error) {
+	prev := rt.pool.CurrentConfig().Endpoint
+	if _, err := rt.pool.UpdateConfig(mutate); err != nil {
+		return false, err
+	}
+	return rt.pool.CurrentConfig().Endpoint != prev, nil
 }
 
 // Snapshot 是 settings 的 devin 配置快照源：有 lane 时读首 lane 活

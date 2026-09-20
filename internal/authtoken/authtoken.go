@@ -15,7 +15,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -828,6 +830,60 @@ func (s *Store) AllowRPM(id int64) (used, limit int64, ok bool) {
 	}
 	t.rpmCount++
 	return t.rpmCount, int64(t.MaxRPM), true
+}
+
+// Deny 是一次令牌准入拒绝：HTTP 状态码与面向客户端的消息——检查序与
+// 文案逐字对齐 ccLoad enforceTokenLimits，调用方原样回写不改写。
+type Deny struct {
+	Status  int
+	Message string
+}
+
+// Error 让 Deny 能直接作 error 传给日志/响应出口。
+func (d *Deny) Error() string { return d.Message }
+
+// Admit 按 ccLoad enforceTokenLimits 同序执行 /v1 令牌准入：先占并发槽，
+// 再查模型白名单、RPM 窗口，最后查费用窗口。放行时 deny 为 nil；任一
+// 检查拒绝返回非 nil Deny，调用方按 Status/Message 回写客户端。
+// 占并发槽成功即返回非 nil release（含占槽后发生的拒绝路径）——
+// 调用方在请求收尾配对调用一次归还槽位；Acquire 失败的拒绝不占槽，
+// release 为 nil。
+func (s *Store) Admit(tok *Token, model string) (release func(), deny *Deny) {
+	active, limit, ok := s.Acquire(tok.ID)
+	if !ok {
+		return nil, &Deny{http.StatusTooManyRequests,
+			fmt.Sprintf("token concurrency limit exceeded: %d active of %d limit", active, limit)}
+	}
+	release = func() { s.Release(tok.ID) }
+	if !tok.IsModelAllowed(model) {
+		return release, &Deny{http.StatusForbidden,
+			fmt.Sprintf("model '%s' is not allowed for this token", model)}
+	}
+	if used, limit, ok := s.AllowRPM(tok.ID); !ok {
+		return release, &Deny{http.StatusTooManyRequests,
+			fmt.Sprintf("token rate limit exceeded: %d of %d requests per minute", used, limit)}
+	}
+	if used, limit, window, exceeded := s.CostLimitState(tok.ID); exceeded {
+		return release, &Deny{http.StatusTooManyRequests,
+			fmt.Sprintf("%s cost limit exceeded: $%.2f used of $%.2f limit", costWindowName(window), float64(used)/1e6, float64(limit)/1e6)}
+	}
+	return release, nil
+}
+
+// costWindowName 把 CostLimitState 的窗口名渲染成错误文案里的首词：
+// 词表内换 Title 形态，词表外的新窗口名原样透出，不静默渲染成空串。
+func costWindowName(window string) string {
+	switch window {
+	case "daily":
+		return "Daily"
+	case "weekly":
+		return "Weekly"
+	case "monthly":
+		return "Monthly"
+	case "total":
+		return "Total"
+	}
+	return window
 }
 
 // AddResult 回写一次完成请求的统计与费用窗口，并把该行写回表——与文件

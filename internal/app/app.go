@@ -110,6 +110,12 @@ type App struct {
 	// "sync: WaitGroup is reused before previous Wait has returned" panic，
 	// 会把正在排空的进程整段炸掉、掐死在途流。
 	inflight drainTracker
+	// routerBuilt/panelMounted 记录最近一次 Router() 构建时刻的面板
+	// 接线态：ccPanel 晚于 Router() 注入会静默丢路由（Register 只在
+	// 构建期跑一次），WiringGaps 据此把这种时序错误暴露成装配失败。
+	// Router() 可被并发调用（测试多路 ServeHTTP），走 atomic。
+	routerBuilt  atomic.Bool
+	panelMounted atomic.Bool
 }
 
 // New 创建一个使用指定供应商适配器的 HTTP 应用。
@@ -253,8 +259,30 @@ func (application *App) Router() http.Handler {
 		// gzip 只压 /admin|/dashboard 的 JSON 响应（见 gzipPanelMiddleware
 		// 的判定）；/v1 的 SSE/WS 不在该子树内。
 		application.ccPanel.Register(router.With(gzipPanelMiddleware))
+		application.panelMounted.Store(true)
 	}
+	application.routerBuilt.Store(true)
 	return router
+}
+
+// WiringGaps 报告生产服役必需但缺席或失序的接线项（装配期字段自省）：
+// tokens/models 未注入、面板未注入、面板在 Router() 构建之后才注入
+// （路由已定型、Register 不会再跑）。装配层在 settle 收口后调用它作
+// 启动门槛；返回 nil 表示接线完整。
+func (application *App) WiringGaps() []string {
+	var gaps []string
+	if application.tokens == nil {
+		gaps = append(gaps, "auth_tokens")
+	}
+	if application.models == nil {
+		gaps = append(gaps, "model_registry")
+	}
+	if application.ccPanel == nil {
+		gaps = append(gaps, "ccpanel")
+	} else if application.routerBuilt.Load() && !application.panelMounted.Load() {
+		gaps = append(gaps, "ccpanel injected after router built")
+	}
+	return gaps
 }
 
 // HTTPServer 创建带有应用路由和超时配置的 HTTP 服务。
@@ -793,11 +821,11 @@ func (application *App) createCompletion(
 	startedAt := time.Now()
 	responseBytes := 0
 	// authTok 是本次请求解析到的下游令牌（开放模式为 nil——空仓无凭据
-	// 准入，无行可归因）；tokenAcquired 标记并发槽已占，defer 据此配对
-	// Release；tokenBlocked 标记准入拒绝——被拒请求不进令牌统计
-	//（ccLoad 在代理层前就返回）。
+	// 准入，无行可归因）；tokenRelease 是并发槽的归还函数（准入占槽
+	// 成功即非 nil，defer 配对调用一次）；tokenBlocked 标记准入拒绝——
+	// 被拒请求不进令牌统计（ccLoad 在代理层前就返回）。
 	var authTok *authtoken.Token
-	tokenAcquired := false
+	var tokenRelease func()
 	tokenBlocked := false
 	// recorder 在请求体读成后才创建：连完整请求都没到达的读失败
 	//（超时/断连/对端 RST）不产生调试记录与 logs 行——它们与鉴权、
@@ -856,8 +884,8 @@ func (application *App) createCompletion(
 			}
 			application.tokens.AddResult(authTok.ID, res)
 		}
-		if tokenAcquired {
-			application.tokens.Release(authTok.ID)
+		if tokenRelease != nil {
+			tokenRelease()
 		}
 		slog.Info("request",
 			"api", api, "method", request.Method, "path", request.URL.Path,
@@ -991,39 +1019,13 @@ func (application *App) createCompletion(
 		// 脱钩完成缓存的等价键按调用方身份隔离：同 body 的跨令牌请求
 		// 不得互相挂接（usage 归属与轨迹隔离都靠它）。
 		messages.CallerKeyHash = authTok.KeyHash()
-		active, limit, ok := application.tokens.Acquire(authTok.ID)
-		if !ok {
+		// 额度准入（并发槽/模型白名单/RPM/费用窗口的检查序与文案）
+		// 收口在 tokens.Admit——ccLoad enforceTokenLimits 同序。
+		release, deny := application.tokens.Admit(authTok, messages.Model)
+		tokenRelease = release
+		if deny != nil {
 			tokenBlocked = true
-			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("token concurrency limit exceeded: %d active of %d limit", active, limit))
-			return
-		}
-		tokenAcquired = true
-		if !authTok.IsModelAllowed(messages.Model) {
-			tokenBlocked = true
-			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusForbidden, fmt.Errorf("model '%s' is not allowed for this token", messages.Model))
-			return
-		}
-		if used, limit, ok := application.tokens.AllowRPM(authTok.ID); !ok {
-			tokenBlocked = true
-			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("token rate limit exceeded: %d of %d requests per minute", used, limit))
-			return
-		}
-		if used, limit, window, exceeded := application.tokens.CostLimitState(authTok.ID); exceeded {
-			tokenBlocked = true
-			// 窗口词表以 CostLimitState 为准；词表外的新窗口名原样透出，
-			// 不静默渲染成空串。
-			windowName := window
-			switch window {
-			case "daily":
-				windowName = "Daily"
-			case "weekly":
-				windowName = "Weekly"
-			case "monthly":
-				windowName = "Monthly"
-			case "total":
-				windowName = "Total"
-			}
-			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("%s cost limit exceeded: $%.2f used of $%.2f limit", windowName, float64(used)/1e6, float64(limit)/1e6))
+			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, deny.Status, deny)
 			return
 		}
 	}
