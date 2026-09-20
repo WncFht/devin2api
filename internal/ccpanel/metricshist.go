@@ -85,14 +85,16 @@ func (r *metricsHistory) since(cutoff int64) []metricsSample {
 // 快照源），不打上游、不写库——排空期与交接进程照跑，部署重叠窗内它
 // 自己的历史同样是有效观测；进程退出即历史归零。
 func (h *Handler) StartMetricsHistory() {
-	go func() {
-		h.captureMetricsSample()
-		ticker := time.NewTicker(metricsHistoryInterval)
-		defer ticker.Stop()
-		for range ticker.C {
+	h.historyOnce.Do(func() {
+		go func() {
 			h.captureMetricsSample()
-		}
-	}()
+			ticker := time.NewTicker(metricsHistoryInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				h.captureMetricsSample()
+			}
+		}()
+	})
 }
 
 // captureMetricsSample 采一拍进程指标写入历史环，信号集即 runtime-metrics

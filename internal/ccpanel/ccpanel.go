@@ -105,7 +105,10 @@ type Handler struct {
 	metrics *obs.Metrics
 	// history 是进程指标历史环（runtime-metrics/history 端点数据源）：
 	// StartMetricsHistory 起的采样协程单写，admin 读侧短锁拷出。
-	history metricsHistory
+	// historyOnce 保证采样协程至多起一个——它是全库唯一无 stop 面的
+	// 常驻循环（进程退出即历史归零），重复启动会让环被两个写者交错。
+	history     metricsHistory
+	historyOnce sync.Once
 	// pool 是面板对号池的全部依赖：遥测一次 Snapshot 取齐（读侧每
 	// 请求一次求值，拿到的是同一时间切面而非逐方法拼出的混合切面），
 	// 动作口各自独立可缺席。nil 视为无池：gate/warm/detached/accounts
