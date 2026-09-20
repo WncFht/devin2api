@@ -51,12 +51,16 @@ func (h *Handler) maskToken(data []byte) []byte {
 		// 跳过 marshal 与第二次扫描。
 		if strings.IndexFunc(token, jsonEscapable) >= 0 {
 			if escaped, err := json.Marshal(token); err == nil {
-				if esc := escaped[1 : len(escaped)-1]; !bytes.Equal(esc, []byte(token)) {
+				if esc := escaped[1 : len(escaped)-1]; !bytes.Equal(esc, []byte(token)) && bytes.Contains(data, esc) {
 					data = bytes.ReplaceAll(data, esc, []byte("<redacted>"))
 				}
 			}
 		}
-		data = bytes.ReplaceAll(data, []byte(token), []byte("<redacted>"))
+		// Contains 预扫跳过未命中：ReplaceAll 未命中也返回全量拷贝，
+		// 绝大多数 payload 不含 token，逐 token 白扫一份 MB 级字节。
+		if bytes.Contains(data, []byte(token)) {
+			data = bytes.ReplaceAll(data, []byte(token), []byte("<redacted>"))
+		}
 	}
 	return data
 }

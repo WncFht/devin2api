@@ -358,6 +358,30 @@ func statusTermSQL(t string) (string, int, bool) {
 // 首页 ~45ms），独立标量计数只走索引扫描，页查询靠主键逆序 LIMIT
 // 只读本页行。
 func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, total int64, err error) {
+	return s.searchLogs(ctx, q, logColumns, scanLogRow)
+}
+
+// logMatrixCols 是健康矩阵条目的窄列集：覆盖 matrixEntry 投影与
+// debuglog.ErrorOwner 归因（Result/StatusCode/ErrorStage/RateLimited）
+// 所需字段。矩阵端点一次拉满 requestsFetchCap 行，全列投影在每行
+// ~50 列的 Scan 编组上白付约四倍开销。
+var logMatrixCols = []string{
+	"started_at", "model", "requested_model", "status_code", "result",
+	"error_stage", "error_message", "account", "account_switches",
+	"duration_ms", "first_upstream_ms", "rate_limited",
+}
+
+var logMatrixColumns = strings.Join(logMatrixCols, ", ")
+
+// SearchLogMatrix 是 SearchLogs 的窄列变体：只回填 matrixEntry 与
+// ErrorOwner 消费的字段，其余 LogRow 字段保持零值。
+func (s *Store) SearchLogMatrix(ctx context.Context, q LogQuery) (rows []*LogRow, total int64, err error) {
+	return s.searchLogs(ctx, q, logMatrixColumns, scanLogMatrixRow)
+}
+
+// searchLogs 是行检索的共用体：列清单与扫行器由调用方定（全列走
+// logSelectCols 派生序，窄列走字面定长序）。
+func (s *Store) searchLogs(ctx context.Context, q LogQuery, cols string, scan func(*sql.Rows) (*LogRow, error)) (rows []*LogRow, total int64, err error) {
 	where, args := q.where()
 	limit := q.Limit
 	if limit <= 0 {
@@ -365,7 +389,7 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 	}
 	offset := max(q.Offset, 0)
 	sqlRows, err := s.ro.QueryContext(ctx,
-		`SELECT `+logColumns+` FROM logs`+where+
+		`SELECT `+cols+` FROM logs`+where+
 			` ORDER BY id DESC LIMIT ? OFFSET ?`,
 		append(args, limit, offset)...)
 	if err != nil {
@@ -373,7 +397,7 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 	}
 	defer func() { _ = sqlRows.Close() }()
 	for sqlRows.Next() {
-		r, err := scanLogRow(sqlRows)
+		r, err := scan(sqlRows)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -390,6 +414,29 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 		return nil, 0, err
 	}
 	return rows, total, nil
+}
+
+// scanLogMatrixRow 按 logMatrixCols 字面序扫一行——列集是固定字面量
+// 而非派生清单，dests 用定长字面量，省掉 scanLogRow 的逐列 switch
+// 编组。
+func scanLogMatrixRow(rows *sql.Rows) (*LogRow, error) {
+	var r LogRow
+	var started string
+	var firstUp sql.NullInt64
+	var rateLimited int64
+	if err := rows.Scan(&started, &r.Model, &r.RequestedModel, &r.StatusCode,
+		&r.Result, &r.ErrorStage, &r.ErrorMessage, &r.Account, &r.AccountSwitches,
+		&r.DurationMS, &firstUp, &rateLimited); err != nil {
+		return nil, err
+	}
+	var err error
+	r.StartedAt, err = time.Parse(time.RFC3339Nano, started)
+	if err != nil {
+		return nil, fmt.Errorf("logs.started_at %q: %w", started, err)
+	}
+	r.FirstUpstreamMS = nullInt64Ptr(firstUp)
+	r.RateLimited = rateLimited != 0
+	return &r, nil
 }
 
 // MatrixCell 是按 (slot, account) 聚合的健康矩阵桶：账号页 48×30min

@@ -317,7 +317,7 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 	var total int64
 	if !excluded {
 		var err error
-		rows, total, err = h.store.SearchLogs(r.Context(), lq)
+		rows, total, err = h.store.SearchLogMatrix(r.Context(), lq)
 		if err != nil {
 			slog.Warn("ccpanel: logs matrix query failed", "error", err)
 			respondError(w, http.StatusInternalServerError, "logs query failed")

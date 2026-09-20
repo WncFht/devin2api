@@ -118,7 +118,8 @@ func stripHTTPResponseEnvelope(raw string) string {
 	if headerBreak < 0 {
 		return strings.TrimSpace(raw)
 	}
-	firstLine := strings.TrimSpace(strings.Split(raw, "\n")[0])
+	first, _, _ := strings.Cut(raw, "\n")
+	firstLine := strings.TrimSpace(first)
 	if !strings.HasPrefix(strings.ToUpper(firstLine), "HTTP/") {
 		return strings.TrimSpace(raw)
 	}
@@ -135,7 +136,14 @@ func parseSSEJSONPayloads(body string) []map[string]any {
 		if len(dataLines) == 0 {
 			return
 		}
-		raw := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		// 单行 data 是常态（SSE 规范允许多行拼接但上游实际恒单行），
+		// 跳过 Join 的整串拷贝。
+		var raw string
+		if len(dataLines) == 1 {
+			raw = strings.TrimSpace(dataLines[0])
+		} else {
+			raw = strings.TrimSpace(strings.Join(dataLines, "\n"))
+		}
 		dataLines = dataLines[:0]
 		if raw == "" || raw == "[DONE]" {
 			return
@@ -146,7 +154,9 @@ func parseSSEJSONPayloads(body string) []map[string]any {
 		}
 	}
 
-	for _, line := range strings.Split(body, "\n") {
+	// strings.Lines 逐行惰性迭代：Split 会一次性物化全部行切片，
+	// 大 04 文件的非 SSE 预扫（找 data: 前缀）纯付一遍分配。
+	for line := range strings.Lines(body) {
 		if strings.HasPrefix(line, "data:") {
 			value := strings.TrimPrefix(line, "data:")
 			value = strings.TrimPrefix(value, " ")
