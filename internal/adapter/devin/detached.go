@@ -1296,9 +1296,9 @@ func (s *attachStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 //  3. model 覆盖为别名/路由解析后的真实 uid——同一段提示词换个客户
 //     端模型名殊途同归。
 //
-// tools 键面与 prefixwarm.putTool 的 wire 身份清单同集——透传位不同
-// 的同名同 schema 工具走不同 wire 语义（custom 改参数编码、server
-// 触发托管跳），不得共享重放。
+// tools 键面即 prefixwarm.toolIdentity 的投影——与 putTool 的指纹
+// 编码同一字段集：透传位不同的同名同 schema 工具走不同 wire 语义
+// （custom 改参数编码、server 触发托管跳），不得共享重放。
 // json.Marshal 对 map 键排序，投影值全是已规范化结构，哈希确定。
 // 注意：键复用了为可观测性设计的调试投影，投影新增的审计位会静默
 // 进键——新增消息字段时须复核本函数口径（fingerprintRequest 同纪律：
@@ -1319,17 +1319,7 @@ func detachedRequestKey(request llm.RequestMessages, model string) string {
 	}
 	tools := make([]any, 0, len(request.Tools))
 	for _, tool := range request.Tools {
-		tools = append(tools, map[string]any{
-			"name":                    tool.Name,
-			"description":             tool.Description,
-			"input_schema":            tool.InputSchema,
-			"custom":                  tool.Custom,
-			"server":                  tool.Server,
-			"strict":                  tool.Strict,
-			"read_only_hint":          tool.ReadOnlyHint,
-			"server_name":             tool.ServerName,
-			"attribution_field_names": tool.AttributionFieldNames,
-		})
+		tools = append(tools, toolIdentity(tool))
 	}
 	projection["tools"] = tools
 	if request.CallerKeyHash != "" {

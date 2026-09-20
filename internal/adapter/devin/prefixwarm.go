@@ -1040,11 +1040,32 @@ func hashFieldWriters(h hash.Hash) (put func(string), putBytes func([]byte)) {
 	return put, putBytes
 }
 
-// putTool 把一份工具声明的全部身份字段按序写进 h：名/说明/schema/
-// ServerName/custom·server·strict·只读位合成的 flags/归因名单——「哪些
-// wire 字段构成工具身份」的清单只在这里存在一份，ToolDefinition 增
-// 字段只改这里。put 由调用方提供：fingerprintRequest 的版本顺带累加
-// 体量估计。
+// toolIdentity 投影一份工具声明的完整身份字段：「哪些 wire 字段构成
+// 工具身份」的清单只在这里存在一份。detachedRequestKey 把返回值作
+// JSON 投影进语义键（map 键序由 json.Marshal 规范排序）；putTool 把
+// 同一字段集按固定二进制编码写进保温指纹与会话种子——覆盖面以这里
+// 为准，编码细节以 putTool 为准。ToolDefinition 新增要进身份的字段：
+// 此处加键 + putTool 内决定它的编码序。
+func toolIdentity(tool llm.ToolDefinition) map[string]any {
+	return map[string]any{
+		"name":                    tool.Name,
+		"description":             tool.Description,
+		"input_schema":            tool.InputSchema,
+		"custom":                  tool.Custom,
+		"server":                  tool.Server,
+		"strict":                  tool.Strict,
+		"read_only_hint":          tool.ReadOnlyHint,
+		"server_name":             tool.ServerName,
+		"attribution_field_names": tool.AttributionFieldNames,
+	}
+}
+
+// putTool 把 toolIdentity 的字段集按固定二进制编码按序写进 h：长度
+// 前缀的名/说明/schema/ServerName、四个布尔位打包的 flags、逐条归因
+// 名单。编码序与打包方式是 digest 契约——hashTools 经 sessionSeed
+// 进 trajectory/cascade/亲和键（同种子契约）与保温指纹，都靠它跨
+// 版本稳定；字段覆盖面对齐 toolIdentity，编码细节不得顺手重排。
+// put 由调用方提供：fingerprintRequest 的版本顺带累加体量估计。
 func putTool(h hash.Hash, put func(string), putBytes func([]byte), tool llm.ToolDefinition) {
 	put(tool.Name)
 	put(tool.Description)
