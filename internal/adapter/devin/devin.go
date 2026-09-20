@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net"
 	"net/http"
 	"slices"
@@ -517,122 +516,20 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 		adapter.assignmentsMu.Unlock()
 	}
 
-	if prev.Model != next.Model {
-		applied = append(applied, "devin.model")
-	}
-	if !maps.Equal(prev.Aliases, next.Aliases) {
-		applied = append(applied, "devin.aliases")
-	}
-	if prev.ClientName != next.ClientName {
-		applied = append(applied, "devin.client_name")
-	}
-	if prev.ClientVersion != next.ClientVersion {
-		applied = append(applied, "devin.client_version")
-	}
-	if prev.ClientOS != next.ClientOS {
-		applied = append(applied, "devin.client_os")
-	}
-	if prev.Identity.Token != next.Identity.Token {
-		adapter.tokenMu.Lock()
-		adapter.token = next.Identity.Token
-		// 声明凭据换值即夺回服役位：minted 是按旧声明铸出的，留下会
-		// 让新 token 永不服役。
-		adapter.minted = ""
-		adapter.tokenMu.Unlock()
-		applied = append(applied, "devin.accounts."+next.Identity.Name+".token")
-	}
-	if prev.Identity.APIKey != next.Identity.APIKey {
-		// mint key 换值意味着铸币身份可能换号——旧 key 铸出的 minted
-		// 一并作废，下一次需要时按新 key 重铸。
-		adapter.tokenMu.Lock()
-		adapter.minted = ""
-		adapter.tokenMu.Unlock()
-		applied = append(applied, "devin.accounts."+next.Identity.Name+".api_key")
-	}
 	adapter.gate.setParams(next.Gate)
-	if prev.Gate.MaxRPM != next.Gate.MaxRPM {
-		applied = append(applied, "devin.max_rpm")
-	}
-	if prev.Gate.MaxHold != next.Gate.MaxHold {
-		applied = append(applied, "devin.gate_max_hold_seconds")
-	}
-	if prev.Gate.DripInterval != next.Gate.DripInterval {
-		applied = append(applied, "devin.gate_drip_interval_seconds")
-	}
-	if prev.Gate.DefaultLatch != next.Gate.DefaultLatch {
-		applied = append(applied, "devin.gate_default_latch_seconds")
-	}
-	if prev.Gate.WindowOffset != next.Gate.WindowOffset {
-		applied = append(applied, "devin.gate_window_offset_seconds")
-	}
-	if prev.Gate.WindowGuard != next.Gate.WindowGuard {
-		applied = append(applied, "devin.gate_window_guard_seconds")
-	}
-	if prev.Gate.BgMaxHold != next.Gate.BgMaxHold {
-		applied = append(applied, "devin.gate_bg_max_hold_seconds")
-	}
-	if prev.Gate.BgReserveMargin != next.Gate.BgReserveMargin {
-		applied = append(applied, "devin.gate_bg_reserve_margin")
-	}
 	adapter.warm.setParams(next.Warm)
-	if prev.Warm.Enabled != next.Warm.Enabled {
-		applied = append(applied, "devin.warm_prefix_enabled")
-	}
-	if prev.Warm.Interval != next.Warm.Interval {
-		applied = append(applied, "devin.warm_prefix_interval_seconds")
-	}
-	if prev.Warm.JitterRatio != next.Warm.JitterRatio {
-		applied = append(applied, "devin.warm_prefix_jitter_ratio")
-	}
-	if prev.Warm.MaxStreams != next.Warm.MaxStreams {
-		applied = append(applied, "devin.warm_prefix_max_streams")
-	}
-	if prev.Warm.MaxRetainedMB != next.Warm.MaxRetainedMB {
-		applied = append(applied, "devin.warm_prefix_max_retained_mb")
-	}
-	if prev.Warm.MinPrefixTokens != next.Warm.MinPrefixTokens {
-		applied = append(applied, "devin.warm_prefix_min_prefix_tokens")
-	}
-	if prev.Warm.BlockedMaxIdle != next.Warm.BlockedMaxIdle {
-		applied = append(applied, "devin.warm_prefix_blocked_max_idle_seconds")
-	}
-	if prev.Warm.UserPacedMaxIdle != next.Warm.UserPacedMaxIdle {
-		applied = append(applied, "devin.warm_prefix_userpaced_max_idle_seconds")
-	}
-	if prev.Warm.SubDoneMaxIdle != next.Warm.SubDoneMaxIdle {
-		applied = append(applied, "devin.warm_prefix_subdone_max_idle_seconds")
-	}
-	if prev.Warm.UnknownMaxIdle != next.Warm.UnknownMaxIdle {
-		applied = append(applied, "devin.warm_prefix_unknown_max_idle_seconds")
-	}
-	if !slices.Equal(prev.Warm.BlockedNames, next.Warm.BlockedNames) {
-		applied = append(applied, "devin.warm_prefix_blocked_names")
-	}
-	if !slices.Equal(prev.Warm.UserPacedNames, next.Warm.UserPacedNames) {
-		applied = append(applied, "devin.warm_prefix_userpaced_names")
-	}
-	if prev.Endpoint.BaseURL != next.Endpoint.BaseURL {
-		applied = append(applied, "devin.base_url")
-	}
-	if prev.Endpoint.Proxy != next.Endpoint.Proxy {
-		applied = append(applied, "devin.proxy")
-	}
-	if prev.Endpoint.ForceHTTP1 != next.Endpoint.ForceHTTP1 {
-		applied = append(applied, "devin.force_http1")
-	}
-	// 池级调度旋钮：config 整体换值即生效（affinityTTL/NoteQuotaSample
-	// 每次经 CurrentConfig 现读），无 adapter 侧回写动作。
-	if prev.SessionAffinityTTLSeconds != next.SessionAffinityTTLSeconds {
-		applied = append(applied, "devin.session_affinity_ttl_seconds")
-	}
-	if prev.QuotaLowThresholdPercent != next.QuotaLowThresholdPercent {
-		applied = append(applied, "devin.quota_low_threshold_percent")
-	}
-	if prev.NoProgressTimeout != next.NoProgressTimeout {
-		applied = append(applied, "devin.no_progress_timeout_seconds")
-	}
-	if prev.PreEventNoProgressTimeout != next.PreEventNoProgressTimeout {
-		applied = append(applied, "devin.pre_event_no_progress_timeout_seconds")
+	// applied 差集、凭据回写与面板键全部从 configFields 登记表驱动
+	// （词表见 configfields.go）；池级调度旋钮（affinityTTL/quota 阈值/
+	// 无进度期限）同列——config 整体换值即生效，无 adapter 侧回写。
+	for i := range configFields {
+		f := &configFields[i]
+		if !f.changed(prev, next) {
+			continue
+		}
+		if f.onChange != nil {
+			f.onChange(adapter, next)
+		}
+		applied = append(applied, f.appliedKey(next))
 	}
 	return applied
 }
