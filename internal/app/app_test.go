@@ -1030,8 +1030,7 @@ func (b *blockedStreamAdapter) ListModels(context.Context) ([]adapter.ModelInfo,
 }
 
 func rejectCount(application *App, reason obs.RejectReason) uint64 {
-	byReason, _ := application.metrics.Rejects()["by_reason"].(map[string]uint64)
-	return byReason[string(reason)]
+	return application.metrics.Rejects().ByReason[string(reason)]
 }
 
 // TestReadFailureRejectedWithoutDir 验证请求体读取失败（非超限）按管线前

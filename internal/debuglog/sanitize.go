@@ -1,8 +1,9 @@
 // 本文件实现调试日志写盘值的脱敏与附件落库——recorder.go 的净化器实现。
 //
 // sanitize/sanitizeValue 把投影产物归一成 any 树并遮盖敏感键；extractImage 族
-// 把 data URL / base64 图片从树中摘出写入 attachments/ 名下并留引用指针。脱敏规则
-// 表（secretKeyNames 等）是写盘前最后一道闸，键名匹配口径在本文件收拢。
+// 把 data URL / base64 图片从树中摘出写入 attachments/ 名下并留引用指针。敏感
+// 键名单的唯一事实源在 internal/logvocab（obs 的自由文本正则也从它派生），
+// 本文件只保留 metadata 作用域私表与预筛字节比较器。
 package debuglog
 
 import (
@@ -14,6 +15,8 @@ import (
 	"fmt"
 	"mime"
 	"strings"
+
+	"github.com/WncFht/devin2api/internal/logvocab"
 )
 
 // sanitizeJSON 把待写值序列化为脱敏后的 JSON 字节并报告其 marshal
@@ -102,7 +105,7 @@ func (recorder *Recorder) sanitizeValue(value any, metadataScope bool) any {
 		return value
 	case map[string]any:
 		for key := range value {
-			if secretKey(key) || (metadataScope && metadataSecretKey(key)) {
+			if logvocab.SecretKey(key) || (metadataScope && metadataSecretKey(key)) {
 				value[key] = "<redacted>"
 			}
 		}
@@ -139,41 +142,15 @@ func (recorder *Recorder) sanitizeValue(value any, metadataScope bool) any {
 	}
 }
 
-// secretKeyNames 是会被脱敏的 JSON 键名（剔除 '_'/'-'、小写归一化后的形态）。
-// secretKey 与 rawNeedsSanitize 共用同一份名单，避免两处漂移。
-// obs/diagnostic.go 的 sensitiveAssignmentPattern 是本名单在自由文本错误上的
-// 正则形态（那边按 [\s_-]* 分隔匹配原文键名）——增删要两侧同步。
-var secretKeyNames = []string{
-	"authorization", "cookie", "setcookie", "apikey", "accesskey", "token",
-	"sessiontoken", "accesstoken", "refreshtoken", "bearertoken", "password",
-	"clientsecret", "devicefingerprint",
-	// modelAssignmentJwt 是 AssignModel 按请求签发的 router jwt，03 请求
-	// 体里的凭证级字段；归一化形态（去 _/-、小写）列入名单。
-	"modelassignmentjwt",
-}
-
-// keyNormalizer 归一化 JSON 键名：剔除 '_' 与 '-'，配合小写折叠让
-// api_key / api-key / APIKEY 等变体命中同一份名单。
-var keyNormalizer = strings.NewReplacer("_", "", "-", "")
-
 // metadataSecretKeyNames 是只在 metadata 对象内才算敏感的键名：上游
 // Metadata.f 是设备指纹必须脱敏，但 "f" 作为通用短键名在客户端负载里
-// 合法存在，放到全局名单会误伤排障现场。
+// 合法存在，放到全局名单会误伤排障现场。归一化形态（去 '_'/'-'、小写）。
 var metadataSecretKeyNames = []string{"f"}
 
-func secretKey(key string) bool {
-	normalized := strings.ToLower(keyNormalizer.Replace(key))
-	for _, name := range secretKeyNames {
-		if normalized == name {
-			return true
-		}
-	}
-	return false
-}
-
-// metadataSecretKey 判定仅 metadata 作用域内敏感的键名，归一方式同 secretKey。
+// metadataSecretKey 判定仅 metadata 作用域内敏感的键名，归一方式同
+// logvocab.SecretKey。
 func metadataSecretKey(key string) bool {
-	normalized := strings.ToLower(keyNormalizer.Replace(key))
+	normalized := logvocab.NormalizeKey(key)
 	for _, name := range metadataSecretKeyNames {
 		if normalized == name {
 			return true
@@ -184,7 +161,7 @@ func metadataSecretKey(key string) bool {
 
 // isMetadataKey 判定键是否进入 metadata 作用域（归一方式同 secretKey）。
 func isMetadataKey(key string) bool {
-	return strings.ToLower(keyNormalizer.Replace(key)) == "metadata"
+	return logvocab.NormalizeKey(key) == "metadata"
 }
 
 // rawNeedsSanitize 预筛 JSON 记录：含内联图片或敏感键名才需要完整的
@@ -230,7 +207,7 @@ func rawNeedsSanitize(data []byte) bool {
 // 一致：忽略 '_' 与 '-'、大小写不敏感。预筛分不清嵌套层级，metadata 专属
 // 键名也算命中——宁多进一次慢路径，由 sanitizeValue 按作用域定夺。
 func secretKeySpan(span []byte) bool {
-	for _, name := range secretKeyNames {
+	for _, name := range logvocab.SecretKeysNormalized {
 		if equalFoldKey(span, name) {
 			return true
 		}

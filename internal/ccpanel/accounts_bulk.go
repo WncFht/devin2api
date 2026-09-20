@@ -185,10 +185,13 @@ func (h *Handler) adminImportAccounts(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	snap := h.accountSnapshots(r.Context(), "")
+	names := make([]string, len(resolved))
+	for i := range resolved {
+		names[i] = resolved[i].Name
+	}
+	snap := h.accountSnapshots(r.Context(), names)
 	views := make([]map[string]any, 0, len(resolved))
 	for i := range resolved {
-		snap.usage[resolved[i].Name] = h.accountUsage(r.Context(), resolved[i].Name)
 		views = append(views, buildAccountView(&resolved[i], snap))
 	}
 	respondOK(w, map[string]any{"imported": views})

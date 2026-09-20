@@ -90,5 +90,5 @@ func statsCacheKey(rangeName string, since, until time.Time, scope statScope, no
 		endUnix = endUnix / bucket * bucket
 	}
 	return fmt.Sprintf("%s|%d|%d|%s|%s|%s|%s|%s",
-		rangeName, since.Unix(), endUnix, scope.kh, scope.api, scope.model, scope.modelLike, scope.account), ttl
+		rangeName, since.Unix(), endUnix, scope.KeyHash, scope.API, scope.Model, scope.ModelLike, scope.Account), ttl
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/obs"
 	"github.com/WncFht/devin2api/internal/store"
 )
 
@@ -192,7 +193,7 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 			a = &tokenAgg{}
 			byKH[key.KeyHash] = a
 		}
-		a.t = addCells(a.t, c)
+		a.t = a.t.Add(c)
 		a.cost += cellCost(key, c, prices)
 		if n := c.Requests - c.Gone; n > a.peak {
 			a.peak = n
@@ -270,73 +271,48 @@ func (h *Handler) adminModelPricing(w http.ResponseWriter, r *http.Request) {
 // 另投 gate/rejects/rates/trend/debuglog/usage/warm 组承接旧面板
 // stats 端点的排障口径。responses_websocket 组本服务无会话仓，给零值。
 func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
-	snap := map[string]any{}
+	var snap obs.Snapshot
 	if h.metrics != nil {
 		snap = h.metrics.Snapshot()
 	}
-	proc, _ := snap["process"].(map[string]any)
-	getU64 := func(m map[string]any, k string) uint64 {
-		switch v := m[k].(type) {
-		case uint64:
-			return v
-		case uint32:
-			return uint64(v)
-		case int64:
-			return uint64(v)
-		case int:
-			return uint64(v)
-		}
-		return 0
-	}
-	getI64 := func(m map[string]any, k string) int64 {
-		v, _ := m[k].(int64)
-		return v
-	}
-	getF64 := func(m map[string]any, k string) float64 {
-		v, _ := m[k].(float64)
-		return v
-	}
-	getInt := func(m map[string]any, k string) int {
-		v, _ := m[k].(int)
-		return v
-	}
+	proc := snap.Process
 	// cpu_seconds 是 user+system 合计（rusage 采样不拆），全部归 user
 	// 一栏——总量正确，拆分字段留 0。
 	process := map[string]any{
 		"uptime_seconds":           int64(time.Since(h.startedAt).Seconds()),
-		"concurrency_slots_in_use": getI64(snap, "active_requests"),
+		"concurrency_slots_in_use": snap.ActiveRequests,
 		"max_concurrency":          h.maxConcurrency(),
-		"goroutines":               getInt(proc, "goroutines"),
-		"cpu_usage_percent":        getF64(proc, "cpu_percent"),
-		"cpu_user_seconds":         getF64(proc, "cpu_seconds"),
+		"goroutines":               proc.Goroutines,
+		"cpu_usage_percent":        proc.CPUPercent,
+		"cpu_user_seconds":         proc.CPUSeconds,
 		"cpu_system_seconds":       0.0,
 		// rss_bytes/rss_current_bytes 是瞬时 RSS（linux 取 /proc/self/statm
 		// 常驻页口径），随真实占用起伏；max_rss_bytes 保留 ru_maxrss
 		// 只涨不降的峰值水印。无瞬时数据源的平台两字段为 0。
-		"rss_bytes":           getU64(proc, "rss_current_bytes"),
-		"rss_current_bytes":   getU64(proc, "rss_current_bytes"),
-		"max_rss_bytes":       getU64(proc, "max_rss_bytes"),
-		"heap_alloc_bytes":    getU64(proc, "heap_alloc_bytes"),
-		"heap_sys_bytes":      getU64(proc, "heap_sys_bytes"),
-		"gc_count":            getU64(proc, "num_gc"),
-		"gc_pause_total_ns":   uint64(getF64(proc, "gc_pause_total_ms") * 1e6),
-		"gc_cpu_percent":      getF64(proc, "gc_cpu_fraction") * 100,
+		"rss_bytes":           proc.RSSCurrentBytes,
+		"rss_current_bytes":   proc.RSSCurrentBytes,
+		"max_rss_bytes":       proc.MaxRSSBytes,
+		"heap_alloc_bytes":    proc.HeapAllocBytes,
+		"heap_sys_bytes":      proc.HeapSysBytes,
+		"gc_count":            proc.NumGC,
+		"gc_pause_total_ns":   uint64(proc.GCPauseTotalMS * 1e6),
+		"gc_cpu_percent":      proc.GCCPUFraction * 100,
 		"sse_framing_repairs": 0,
 		// 监听归属看门狗（reuseport 静默并组的运行期兜底）：当轮外部持有
 		// 进程数与最近一次非零扫描时刻；未开 reuseport 的平台/部署恒为 0。
-		"foreign_listen_holders":           getI64(snap, "foreign_listen_holders"),
-		"foreign_listen_holders_last_seen": getI64(snap, "foreign_listen_holders_last_seen"),
+		"foreign_listen_holders":           snap.ForeignListenHolders,
+		"foreign_listen_holders_last_seen": snap.ForeignListenLastSeen,
 	}
 	httpProxy := map[string]any{
-		"active_requests":        getI64(snap, "active_requests"),
-		"completed_requests":     getU64(snap, "completed_requests"),
-		"non_error_responses":    getU64(snap, "ok_responses"),
-		"client_error_responses": getU64(snap, "client_error_responses"),
-		"server_error_responses": getU64(snap, "server_error_responses"),
-		"streaming_requests":     getU64(snap, "streaming_requests"),
-		"non_streaming_requests": getU64(snap, "non_streaming_requests"),
-		"request_body_bytes":     getU64(snap, "request_body_bytes"),
-		"response_body_bytes":    getU64(snap, "response_body_bytes"),
+		"active_requests":        snap.ActiveRequests,
+		"completed_requests":     snap.CompletedRequests,
+		"non_error_responses":    snap.OKResponses,
+		"client_error_responses": snap.ClientErrorResponses,
+		"server_error_responses": snap.ServerErrorResponses,
+		"streaming_requests":     snap.StreamingRequests,
+		"non_streaming_requests": snap.NonStreamingRequests,
+		"request_body_bytes":     snap.RequestBodyBytes,
+		"response_body_bytes":    snap.ResponseBodyBytes,
 	}
 	data := map[string]any{
 		"process":             process,
@@ -344,29 +320,30 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 		"responses_websocket": map[string]any{},
 	}
 	if stats := h.debug.Stats(); stats != nil {
+		logStats := decodeDebugStats(stats)
 		data["logs"] = map[string]any{
-			"backlog_entries":            stats["queued_log_events"],
-			"queue_capacity_entries":     stats["queue_capacity"],
-			"dropped_entries":            stats["dropped_log_events"],
-			"dropped_payload_bytes":      stats["dropped_payload_bytes"],
-			"late_writes":                stats["late_writes"],
-			"persistence_failed_entries": stats["io_errors"],
-			"pending_bytes":              stats["pending_bytes"],
-			"pending_bytes_max":          stats["pending_bytes_max"],
-			"pending_bytes_cap":          stats["pending_bytes_cap"],
-			"errors_only":                stats["errors_only"],
+			"backlog_entries":            logStats.QueuedLogEvents,
+			"queue_capacity_entries":     logStats.QueueCapacity,
+			"dropped_entries":            logStats.DroppedLogEvents,
+			"dropped_payload_bytes":      logStats.DroppedPayloadBytes,
+			"late_writes":                logStats.LateWrites,
+			"persistence_failed_entries": logStats.IOErrors,
+			"pending_bytes":              logStats.PendingBytes,
+			"pending_bytes_max":          logStats.PendingBytesMax,
+			"pending_bytes_cap":          logStats.PendingBytesCap,
+			"errors_only":                logStats.ErrorsOnly,
 		}
 		// debuglog 组是全量自观测（含 last_bind_failure 监听争夺取证、
 		// 保留策略回显）；logs 组是 ccLoad 契约四键 + 写侧在飞水位三档、
 		// 丢弃体积、errors_only 开关与 late_writes 迟到写计数的投影。
 		data["debuglog"] = stats
 	}
-	// rates/trend 是 Snapshot 原生键（RPM/QPS、60 分钟 10s 桶）；
+	// rates/trend 是 Snapshot 原生段（RPM/QPS、60 分钟 10s 桶）；
 	// rejects 是管线前拒绝的分原因计数与最近事件环（不产生调试目录，
 	// 环是唯一实时面），rejectsView 另并入留存行写失败数 insert_failed。
 	if h.metrics != nil {
-		data["rates"] = snap["rates"]
-		data["trend"] = snap["trend_minutes"]
+		data["rates"] = snap.Rates
+		data["trend"] = snap.TrendMinutes
 		data["rejects"] = h.rejectsView()
 	}
 	// usage 组只投全局延迟分位数两行（ttfb/duration）；全量聚合视图

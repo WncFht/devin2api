@@ -289,50 +289,29 @@ func (h *Handler) respondLogEntries(w http.ResponseWriter, r *http.Request, entr
 // 仅首页返回——深页翻页时全窗计数 ~0.7-1s/页是纯税，字段缺席走前端
 // 既有降级分支）；limit 默认 200、上限 1000。has_more=还有未翻到的
 // 命中行（深页用 limit+1 探测），或时间窗下界之外仍有更早历史。
+// 翻页编排（页参数归一化/limit+1 探测/计数省略/更早历史回落）归
+// store.SearchLogsPage——本 handler 只剩参数解析与 wire 投影。
 func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 {
-		limit = 200
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	offset, _ := strconv.Atoi(q.Get("offset"))
-	if offset < 0 {
-		offset = 0
-	}
 	lq, excluded := h.logQuery(r)
-	lq.Offset = offset
+	lq.Limit, _ = strconv.Atoi(q.Get("limit"))
+	lq.Offset, _ = strconv.Atoi(q.Get("offset"))
 	// before_id 是 keyset 翻页游标（传上一页最旧行的 id）：深页
 	// OFFSET 随页深线性退化，id 范围谓词走主键恒定成本。两参数
 	// 并存时谓词取交（id<before_id 且按 offset 跳行），前端只传其一。
 	if beforeID, err := strconv.ParseInt(q.Get("before_id"), 10, 64); err == nil && beforeID > 0 {
 		lq.BeforeID = beforeID
 	}
-	// 首页（无 offset/before_id）才付精确 COUNT(*)；深页多取一行
-	// 判 has_more，与 count 缺席的前端降级语义一致。
-	firstPage := lq.Offset == 0 && lq.BeforeID == 0
-	lq.Limit = limit
-	if !firstPage {
-		lq.Limit = limit + 1
-		lq.SkipCount = true
-	}
 	if h.store == nil || excluded {
 		h.respondLogEntries(w, r, []logEntry{}, nil, false)
 		return
 	}
-	rows, total, err := h.store.SearchLogs(r.Context(), lq)
+	rows, total, hasMore, err := h.store.SearchLogsPage(r.Context(), lq)
 	if err != nil {
 		// 静默回空 200 会让前端分不出「没数据」与「查询挂了」。
 		slog.Warn("ccpanel: logs search failed", "error", err)
 		respondError(w, http.StatusInternalServerError, "logs query failed")
 		return
-	}
-	hasMore := false
-	if !firstPage && len(rows) > limit {
-		rows = rows[:limit]
-		hasMore = true
 	}
 	prices := h.CatalogPrices(r.Context())
 	var tokensByHash map[string]*authtoken.Token
@@ -349,16 +328,8 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		entries = append(entries, h.projectLogEntry(row, prices, tokensByHash))
 	}
-	if firstPage {
-		hasMore = total > int64(len(rows))
-	}
-	if !hasMore {
-		if before, err := h.store.ExistsLogBefore(r.Context(), lq); err == nil {
-			hasMore = before
-		}
-	}
 	var count *int
-	if firstPage {
+	if total >= 0 {
 		count = intPtr(int(total))
 	}
 	h.respondLogEntries(w, r, entries, count, hasMore)

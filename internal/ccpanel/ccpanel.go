@@ -22,6 +22,7 @@ import (
 	"github.com/WncFht/devin2api/internal/accounts"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/authtoken"
+	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/modelreg"
 	"github.com/WncFht/devin2api/internal/obs"
@@ -371,6 +372,27 @@ func (h *Handler) NoteUpstreamTokens(tokens ...string) {
 			h.seedTokens[token] = struct{}{}
 		}
 	}
+}
+
+// SeedCredentialMasks 给常驻脱敏集合播种：config 声明的账号 token 与
+// upstream_accounts 仓的存量行——重启后 recentTokens 环是空的，旧调试
+// 目录里的凭据字面值照样罩得住。行内 token 含脱敏哈希形态也无妨（明文
+// 位不命中就不替换）。哪些字段承载可脱敏凭据的知识归脱敏集合的所有者。
+func (h *Handler) SeedCredentialMasks(ctx context.Context, cfg *config.Config, db *store.Store) {
+	var seeds []string
+	for _, acc := range cfg.Devin.Accounts {
+		seeds = append(seeds, acc.Token)
+	}
+	if rows, err := db.ListAccounts(ctx); err == nil {
+		for _, row := range rows {
+			seeds = append(seeds, row.Token)
+		}
+	} else {
+		// 面板侧凭据失去脱敏登记——调试 payload 里这些 token 可能以明文
+		// 露面。静默吞掉会让降级无迹可查，按惯例留 WARN。
+		slog.Warn("debuglog: upstream account token seeds unavailable, panel credentials will not be masked", "error", err)
+	}
+	h.NoteUpstreamTokens(seeds...)
 }
 
 // SetConfigOps 注入配置自省与热重载操作面（/admin/config*）。

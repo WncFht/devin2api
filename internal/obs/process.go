@@ -15,10 +15,29 @@ import (
 // 报 0 且不推进采样基准——cpu 差值累积进下一窗口，长期均值不失真。
 const minCPUSampleWindow = time.Millisecond
 
+// ProcessSnapshot 是进程级指标快照：内存、GC、goroutine、CPU、RSS。
+type ProcessSnapshot struct {
+	Goroutines     int     `json:"goroutines"`
+	NumCPU         int     `json:"num_cpu"`
+	HeapAllocBytes uint64  `json:"heap_alloc_bytes"`
+	HeapSysBytes   uint64  `json:"heap_sys_bytes"`
+	StackInuse     uint64  `json:"stack_inuse"`
+	AllocTotal     uint64  `json:"alloc_total"`
+	NumGC          uint32  `json:"num_gc"`
+	GCPauseTotalMS float64 `json:"gc_pause_total_ms"`
+	GCCPUFraction  float64 `json:"gc_cpu_fraction"`
+	CPUSeconds     float64 `json:"cpu_seconds"`
+	CPUPercent     float64 `json:"cpu_percent"`
+	MaxRSSBytes    int64   `json:"max_rss_bytes"`
+	// 瞬时 RSS：随真实占用起伏，区别于只涨不降的 max_rss_bytes 峰值；
+	// 无瞬时数据源的平台（见 process_*.go 的 currentRSSBytes）恒为 0。
+	RSSCurrentBytes int64 `json:"rss_current_bytes"`
+}
+
 // process 返回进程级指标快照：内存、GC、goroutine、CPU。
 // cpu_percent 是相邻两次 Snapshot 之间 cpu_seconds/wall_seconds×100，
 // 首次调用返回自启动以来的平均占用（top 式 %CPU，多核可超 100）。
-func (m *Metrics) process() map[string]any {
+func (m *Metrics) process() ProcessSnapshot {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 	cpuSeconds, maxRSS := rusageSample()
@@ -37,21 +56,19 @@ func (m *Metrics) process() map[string]any {
 	}
 	m.procMu.Unlock()
 
-	return map[string]any{
-		"goroutines":        runtime.NumGoroutine(),
-		"num_cpu":           runtime.NumCPU(),
-		"heap_alloc_bytes":  mem.HeapAlloc,
-		"heap_sys_bytes":    mem.HeapSys,
-		"stack_inuse":       mem.StackInuse,
-		"alloc_total":       mem.TotalAlloc,
-		"num_gc":            mem.NumGC,
-		"gc_pause_total_ms": float64(mem.PauseTotalNs) / 1e6,
-		"gc_cpu_fraction":   mem.GCCPUFraction,
-		"cpu_seconds":       cpuSeconds,
-		"cpu_percent":       cpuPercent,
-		"max_rss_bytes":     maxRSS,
-		// 瞬时 RSS：随真实占用起伏，区别于只涨不降的 max_rss_bytes 峰值；
-		// 无瞬时数据源的平台（见 process_*.go 的 currentRSSBytes）恒为 0。
-		"rss_current_bytes": currentRSS,
+	return ProcessSnapshot{
+		Goroutines:      runtime.NumGoroutine(),
+		NumCPU:          runtime.NumCPU(),
+		HeapAllocBytes:  mem.HeapAlloc,
+		HeapSysBytes:    mem.HeapSys,
+		StackInuse:      mem.StackInuse,
+		AllocTotal:      mem.TotalAlloc,
+		NumGC:           mem.NumGC,
+		GCPauseTotalMS:  float64(mem.PauseTotalNs) / 1e6,
+		GCCPUFraction:   mem.GCCPUFraction,
+		CPUSeconds:      cpuSeconds,
+		CPUPercent:      cpuPercent,
+		MaxRSSBytes:     maxRSS,
+		RSSCurrentBytes: currentRSS,
 	}
 }

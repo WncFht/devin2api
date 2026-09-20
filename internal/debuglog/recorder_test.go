@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1550,6 +1551,40 @@ func TestCloseStopsBackgroundWorkers(t *testing.T) {
 		case <-ch:
 		default:
 			t.Fatalf("%s still open after Close", name)
+		}
+	}
+}
+
+// TestNilReceiverTolerance 把 *Recorder 与 *Manager 的全部导出方法各调
+// 一遍 nil 接收者：app.go 的调用点（debugManager.Start、recorder.Complete
+// 等）刻意不做 nil 守卫——Start 在 debug 关闭时返回 nil，整条链路靠
+// 「每个方法自身容忍 nil 接收者」成立。反射枚举方法集并喂零值参数，
+// 某个方法失去 nil 守卫时这里直接 panic 现形，而不是等生产路径踩中。
+func TestNilReceiverTolerance(t *testing.T) {
+	for _, typ := range []reflect.Type{
+		reflect.TypeOf((*Recorder)(nil)),
+		reflect.TypeOf((*Manager)(nil)),
+	} {
+		for i := 0; i < typ.NumMethod(); i++ {
+			method := typ.Method(i)
+			// method.Func 的签名把接收者放在 In(0)；零值参数按签名现取。
+			// 变参函数走 CallSlice（末参零值即 nil slice），普通走 Call。
+			args := []reflect.Value{reflect.Zero(typ)}
+			for j := 1; j < method.Type.NumIn(); j++ {
+				args = append(args, reflect.Zero(method.Type.In(j)))
+			}
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("%s.%s panicked on nil receiver: %v", typ, method.Name, r)
+					}
+				}()
+				if method.Type.IsVariadic() {
+					method.Func.CallSlice(args)
+				} else {
+					method.Func.Call(args)
+				}
+			}()
 		}
 	}
 }

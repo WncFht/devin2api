@@ -115,7 +115,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	}
 	rt := accounts.New(configPath, dir, dbStore, devinPool)
 	rt.CommitConfig(prev)
-	if _, _, err := rt.Apply(context.Background(), prev, nil); err != nil {
+	if _, err := rt.Apply(context.Background(), prev, nil); err != nil {
 		t.Fatal(err)
 	}
 	application := app.New(devinPool, config.ServerConfig{}, manager)
@@ -351,7 +351,7 @@ dashboard:
 			}
 			rt := accounts.New(configPath, dir, dbStore, devinPool)
 			rt.CommitConfig(prev)
-			if _, _, err := rt.Apply(context.Background(), prev, nil); err != nil {
+			if _, err := rt.Apply(context.Background(), prev, nil); err != nil {
 				t.Fatal(err)
 			}
 			application := app.New(devinPool, config.ServerConfig{}, manager)

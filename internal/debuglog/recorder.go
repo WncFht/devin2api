@@ -3,7 +3,15 @@
 // 两表——整文件（meta/01/02/03/error/attachments）是 files 行，流式
 // JSONL（04/05/06）按 flush 批追加为 chunks 行。
 //
-// Package debuglog 负责记录兼容 API 请求在 HTTP、中间模型和供应商协议之间的转换过程。
+// Package debuglog 是 /v1 请求链路的取证面与在飞请求台账。取证面：
+// 每次请求一包分阶段证据（meta/01-06/error/attachments → store 的
+// debug_files/debug_chunks 两表），目录名即请求身份
+// （X-Request-Id/debug_ref），排障端点与 logs 摘要行都按它回指。
+// 台账：Manager 把在飞 recorder 登记进 activeDirs——ActiveRequests
+// 的实时视图、清理器的跳过集与 Abort/AbortAll 的中断寻址共用这份
+// 注册表（面板单点中断与排空强掐走同一入口），takenNames 另记已占
+// 目录名供 claim 避撞。
+//
 // 写路径是两段流水线：请求 goroutine 只把任务排进按目录名哈希的分片队列
 // （热路径一次 channel send），encoderShards 个编码协程并行消费——
 // sanitize/marshal/压缩这些 CPU 密集段在多核上摊平，同一 recorder 恒落
@@ -134,8 +142,11 @@ type RetentionPolicy struct {
 	LogRowDays int64
 }
 
-// Manager 在固定 logs 根目录下为每次请求创建独立 recorder，并持有
-// 日志行的 store 句柄与后台清理器。
+// Manager 持有调试系统的全部共享态：按目录名为每次请求创建独立
+// recorder（Start），activeDirs/takenNames 两份注册表支撑在飞请求
+// 视图（ActiveRequests）、清理器跳过集与 Abort/AbortAll 中断寻址；
+// 另持有日志行 store 句柄、两段写流水线的队列与协程组、保留策略与
+// 后台清理器。
 type Manager struct {
 	// root 是所有请求日志目录的根路径；空值表示禁用调试日志。
 	root string

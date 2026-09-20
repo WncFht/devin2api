@@ -25,18 +25,19 @@ func (h *Handler) accountOpsUnavailable(w http.ResponseWriter) bool {
 // accountSnapshots 是一次聚合组装用的全部运行时快照：快照源各取一次
 // 按名分发，列表路径不必逐号重查 quota 历史（SQL）与活跃请求集。
 // 无该名条目一律缺席（map 零值），由 view 落成 null。
-// quotaOnly 非空时只读该名的样本序列——单号视图（写端点回包）不必为
-// 一条序列扫全表；空串走全量 quota report（列表路径一次取齐）。
+// names 是视图要投出的账号名集合：usage 走 store 批量聚合（一条调用
+// 全覆盖）；quota 在单名时只读该名的样本序列（单号视图不为一条序列
+// 扫全表），其余走全量 quota report 一次取齐。
 type accountSnapshots struct {
 	laneStates map[string]devin.LaneState
 	gates      map[string]devin.GateStats
 	warms      map[string]devin.WarmStats
 	inflight   map[string]int
 	quota      map[string]any            // quota report 的 accounts 子表
-	usage      map[string]map[string]any // 逐号 usage 投影，由调用方按名填
+	usage      map[string]map[string]any // 逐号 usage 投影
 }
 
-func (h *Handler) accountSnapshots(ctx context.Context, quotaOnly string) accountSnapshots {
+func (h *Handler) accountSnapshots(ctx context.Context, names []string) accountSnapshots {
 	snap := accountSnapshots{
 		laneStates: map[string]devin.LaneState{},
 		gates:      map[string]devin.GateStats{},
@@ -62,17 +63,28 @@ func (h *Handler) accountSnapshots(ctx context.Context, quotaOnly string) accoun
 			snap.inflight[ar.Account]++
 		}
 	}
-	if quotaOnly != "" {
+	if len(names) == 1 {
 		if h.store != nil {
-			series, err := h.store.ListQuotaSamples(ctx, quotaOnly, 0, quotaHistoryCap)
+			series, err := h.store.ListQuotaSamples(ctx, names[0], 0, quotaHistoryCap)
 			if err != nil {
-				slog.Warn("quota history read failed", "account", quotaOnly, "error", err)
+				slog.Warn("quota history read failed", "account", names[0], "error", err)
 			} else if len(series) > 0 {
-				snap.quota[quotaOnly] = h.quotaSub().seriesReport(quotaOnly, series)
+				snap.quota[names[0]] = h.quotaSub().seriesReport(names[0], series)
 			}
 		}
 	} else if accounts, ok := h.quotaSub().report(ctx)["accounts"].(map[string]any); ok {
 		snap.quota = accounts
+	}
+	// usage 是观测字段不挡视图：store 未接线或批量查询失败时整组缺席，
+	// view 侧落成 null。
+	if h.store != nil {
+		if usage, err := h.store.AccountsUsage(ctx, names); err != nil {
+			slog.Warn("account usage query failed", "err", err)
+		} else {
+			for name, row := range usage {
+				snap.usage[name] = accountUsageView(row)
+			}
+		}
 	}
 	return snap
 }
@@ -81,9 +93,7 @@ func (h *Handler) accountSnapshots(ctx context.Context, quotaOnly string) accoun
 // 身份字段 + lane/gate/warm 快照 + inflight + quota 摘要 + usage。
 // 写端点回包与 GET 列表共用同一投影，schema 只有这一处来源。
 func (h *Handler) accountView(ctx context.Context, acc *store.ResolvedAccount) map[string]any {
-	snap := h.accountSnapshots(ctx, acc.Name)
-	snap.usage[acc.Name] = h.accountUsage(ctx, acc.Name)
-	return buildAccountView(acc, snap)
+	return buildAccountView(acc, h.accountSnapshots(ctx, []string{acc.Name}))
 }
 
 func buildAccountView(acc *store.ResolvedAccount, snap accountSnapshots) map[string]any {
@@ -149,20 +159,6 @@ func buildAccountView(acc *store.ResolvedAccount, snap accountSnapshots) map[str
 	return view
 }
 
-// accountUsage 取单号 usage 原始量并投影；store 未接线或查询失败落
-// null（usage 是观测字段，不挡视图）。'default' 折叠口径在 store 内做。
-func (h *Handler) accountUsage(ctx context.Context, name string) map[string]any {
-	if h.store == nil {
-		return nil
-	}
-	row, err := h.store.AccountUsage(ctx, name)
-	if err != nil {
-		slog.Warn("account usage query failed", "account", name, "err", err)
-		return nil
-	}
-	return accountUsageView(row)
-}
-
 // accountUsageView 把 AccountUsageRow 投影成冻结形状
 // {rpm_now,tps_now,ttfb_avg,ttfb_p50,ttfb_p90,cache_rate,today:{requests,
 // success_rate,tokens}}。ttfb 单位 ms；比率字段分母为 0 落 null（「无
@@ -209,10 +205,13 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	snap := h.accountSnapshots(r.Context(), "")
+	names := make([]string, len(accounts))
+	for i := range accounts {
+		names[i] = accounts[i].Name
+	}
+	snap := h.accountSnapshots(r.Context(), names)
 	views := make([]map[string]any, 0, len(accounts))
 	for i := range accounts {
-		snap.usage[accounts[i].Name] = h.accountUsage(r.Context(), accounts[i].Name)
 		views = append(views, buildAccountView(&accounts[i], snap))
 	}
 	writeEnvelope(w, http.StatusOK, apiResponse{

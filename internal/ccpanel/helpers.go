@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
@@ -169,38 +168,6 @@ func boolAny(vals ...any) bool {
 		}
 	}
 	return false
-}
-
-// numAny 返回首个数值形态值（数值类型原样透传，非空字符串也接受——
-// 上游偶发把数字序列化成字符串）。用于 JSON 里键名漂移的数值字段。
-func numAny(vals ...any) any {
-	for _, v := range vals {
-		if v == nil {
-			continue
-		}
-		switch t := v.(type) {
-		case float64, float32, int, int32, int64, json.Number:
-			return t
-		case string:
-			if t != "" {
-				return t
-			}
-		}
-	}
-	return nil
-}
-
-// rfc3339Any 把 Connect-JSON 的 Timestamp 字段（RFC3339 字符串）归一成
-// UTC RFC3339；解析失败保留原文——外部输入边界上原样暴露比吞掉更可排障。
-func rfc3339Any(vals ...any) string {
-	s := strAny(vals...)
-	if s == "" {
-		return ""
-	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t.UTC().Format(time.RFC3339)
-	}
-	return s
 }
 
 // truncate 把 s 截到至多 n 字节并以 "..." 结尾；不切在多字节 rune 中间，

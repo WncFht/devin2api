@@ -322,10 +322,11 @@ func TestAccountAggsFold(t *testing.T) {
 	}
 }
 
-// TestAccountUsage 验证 AccountUsage 的原始量：今日计数（requests/ok/
+// TestAccountsUsage 验证 AccountsUsage 的原始量：今日计数（requests/ok/
 // non499/tokens）、60s 完成窗聚合（rpm_now/tps_now/cache_rate 原料）、
-// 首字延迟样本分位与均值；并覆盖 'default' 折叠 ” 历史行。
-func TestAccountUsage(t *testing.T) {
+// 首字延迟样本分位与均值；并覆盖 'default' 折叠 ” 历史行与零活动名
+// 的零值行保证。
+func TestAccountsUsage(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()
 	now := time.Now()
@@ -357,10 +358,14 @@ func TestAccountUsage(t *testing.T) {
 		}
 	}
 
-	row, err := s.AccountUsage(ctx, "alpha")
+	usage, err := s.AccountsUsage(ctx, []string{"alpha", "default", "charlie"})
 	if err != nil {
-		t.Fatalf("AccountUsage: %v", err)
+		t.Fatalf("AccountsUsage: %v", err)
 	}
+	if len(usage) != 3 {
+		t.Fatalf("usage keys = %d, want 3（请求名全覆盖）", len(usage))
+	}
+	row := usage["alpha"]
 	// 今日：3 完成行（含 499），1 个 2xx，2 个非 499，tokens=160。
 	if row.Today.Requests != 3 || row.Today.OK != 1 || row.Today.Non499 != 2 || row.Today.Tokens != 160 {
 		t.Fatalf("today = %+v", row.Today)
@@ -377,10 +382,7 @@ func TestAccountUsage(t *testing.T) {
 	}
 
 	// 'default' 折叠 ''+'default' 两群（e1+d1）。
-	def, err := s.AccountUsage(ctx, "default")
-	if err != nil {
-		t.Fatalf("AccountUsage default: %v", err)
-	}
+	def := usage["default"]
 	if def.Today.Requests != 2 || def.Today.OK != 2 || def.Today.Tokens != 5 {
 		t.Fatalf("default today = %+v", def.Today)
 	}
@@ -390,6 +392,11 @@ func TestAccountUsage(t *testing.T) {
 	// 样本 [10,30]：pick=int(q*(n-1))，p50=p90=sorted[0]=10，均值 20。
 	if def.TTFB.Samples != 2 || def.TTFB.P50 != 10 || def.TTFB.P90 != 10 || def.TTFBAvgMS != 20 {
 		t.Fatalf("default ttfb = %+v avg=%v", def.TTFB, def.TTFBAvgMS)
+	}
+
+	// 零活动名仍回零值行：视图侧数字字段要出 0 而非缺席。
+	if z := usage["charlie"]; z == nil || z.Today.Requests != 0 || z.Recent.Req != 0 || z.TTFB.Samples != 0 {
+		t.Fatalf("zero-activity row = %+v", z)
 	}
 }
 

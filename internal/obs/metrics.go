@@ -233,28 +233,73 @@ func (m *Metrics) NoteForeignListenHolders(n int) {
 	}
 }
 
+// Snapshot 是 Metrics 全部计数的即时快照：字段即 JSON 键，直接序列化
+// 给面板与 /statsz——消费侧按字段取数，键名写错在编译期爆炸而非静默零值。
+type Snapshot struct {
+	UptimeSeconds        int64           `json:"uptime_seconds"`
+	ActiveRequests       int64           `json:"active_requests"`
+	CompletedRequests    uint64          `json:"completed_requests"`
+	RejectedRequests     uint64          `json:"rejected_requests"`
+	OKResponses          uint64          `json:"ok_responses"`
+	ClientErrorResponses uint64          `json:"client_error_responses"`
+	ServerErrorResponses uint64          `json:"server_error_responses"`
+	StreamingRequests    uint64          `json:"streaming_requests"`
+	NonStreamingRequests uint64          `json:"non_streaming_requests"`
+	RequestBodyBytes     uint64          `json:"request_body_bytes"`
+	ResponseBodyBytes    uint64          `json:"response_body_bytes"`
+	TrendMinutes         []TrendPoint    `json:"trend_minutes"`
+	Rates                Rates           `json:"rates"`
+	Process              ProcessSnapshot `json:"process"`
+	Rejects              Rejects         `json:"rejects"`
+	// 监听归属看门狗：未开 reuseport（或未跑看门狗）时恒为 0——
+	// 没有扫描数据源不伪造「安全」，0 只表示「最近一轮没发现」。
+	ForeignListenHolders  int64 `json:"foreign_listen_holders"`
+	ForeignListenLastSeen int64 `json:"foreign_listen_holders_last_seen"`
+}
+
+// TrendPoint 是趋势环一个 10 秒桶的请求/错误数，面板直接铺 sparkline。
+type TrendPoint struct {
+	At       int64  `json:"at"`
+	Requests uint64 `json:"requests"`
+	Errors   uint64 `json:"errors"`
+}
+
+// Rates 是从趋势桶派生的 RPM/QPS 读数：current/peak 按自然分钟合并
+// 相邻桶取值，avg 覆盖趋势环内窗口。
+type Rates struct {
+	RPMCurrent uint64  `json:"rpm_current"`
+	RPMPeak    uint64  `json:"rpm_peak"`
+	RPMAvg     float64 `json:"rpm_avg"`
+	QPSCurrent float64 `json:"qps_current"`
+}
+
+// Rejects 是管线前拒绝的分原因计数、最近事件环（新在前）与面板标签表。
+type Rejects struct {
+	ByReason map[string]uint64 `json:"by_reason"`
+	Recent   []RejectEvent     `json:"recent"`
+	Labels   []RejectLabel     `json:"labels"`
+}
+
 // Snapshot 返回全部计数的即时快照，供 JSON 序列化给面板或 /statsz。
-func (m *Metrics) Snapshot() map[string]any {
-	return map[string]any{
-		"uptime_seconds":         int64(time.Since(m.startedAt).Seconds()),
-		"active_requests":        m.active.Load(),
-		"completed_requests":     m.completed.Load(),
-		"rejected_requests":      m.rejected.Load(),
-		"ok_responses":           m.okResponses.Load(),
-		"client_error_responses": m.clientErrs.Load(),
-		"server_error_responses": m.serverErrs.Load(),
-		"streaming_requests":     m.streaming.Load(),
-		"non_streaming_requests": m.buffered.Load(),
-		"request_body_bytes":     m.reqBytes.Load(),
-		"response_body_bytes":    m.respBytes.Load(),
-		"trend_minutes":          m.trend(),
-		"rates":                  m.rates(),
-		"process":                m.process(),
-		"rejects":                m.Rejects(),
-		// 监听归属看门狗：未开 reuseport（或未跑看门狗）时恒为 0——
-		// 没有扫描数据源不伪造「安全」，0 只表示「最近一轮没发现」。
-		"foreign_listen_holders":           m.foreignListenHolders.Load(),
-		"foreign_listen_holders_last_seen": m.foreignListenLastSeen.Load(),
+func (m *Metrics) Snapshot() Snapshot {
+	return Snapshot{
+		UptimeSeconds:         int64(time.Since(m.startedAt).Seconds()),
+		ActiveRequests:        m.active.Load(),
+		CompletedRequests:     m.completed.Load(),
+		RejectedRequests:      m.rejected.Load(),
+		OKResponses:           m.okResponses.Load(),
+		ClientErrorResponses:  m.clientErrs.Load(),
+		ServerErrorResponses:  m.serverErrs.Load(),
+		StreamingRequests:     m.streaming.Load(),
+		NonStreamingRequests:  m.buffered.Load(),
+		RequestBodyBytes:      m.reqBytes.Load(),
+		ResponseBodyBytes:     m.respBytes.Load(),
+		TrendMinutes:          m.trend(),
+		Rates:                 m.rates(),
+		Process:               m.process(),
+		Rejects:               m.Rejects(),
+		ForeignListenHolders:  m.foreignListenHolders.Load(),
+		ForeignListenLastSeen: m.foreignListenLastSeen.Load(),
 	}
 }
 
@@ -262,7 +307,7 @@ func (m *Metrics) Snapshot() map[string]any {
 // 与 /admin/logs 复用同一份数据。
 // 计数是进程内存值，重启清零；跨重启痕迹是 logs 表 log_source=rejected
 // 行与 stderr.log 的 "request rejected" 行（reason 字段与这里同源）。
-func (m *Metrics) Rejects() map[string]any {
+func (m *Metrics) Rejects() Rejects {
 	m.rejectsMu.Lock()
 	byReason := make(map[string]uint64, len(m.rejectCounts))
 	for reason, n := range m.rejectCounts {
@@ -273,13 +318,13 @@ func (m *Metrics) Rejects() map[string]any {
 		recent = append(recent, m.rejectRing[(m.rejectHead-i+rejectEventCap)%rejectEventCap])
 	}
 	m.rejectsMu.Unlock()
-	return map[string]any{"by_reason": byReason, "recent": recent, "labels": rejectLabels}
+	return Rejects{ByReason: byReason, Recent: recent, Labels: rejectLabels}
 }
 
 // rates 从 10 秒桶派生 RPM/QPS（同类代理 RPM 统计同款：current/peak/avg + QPS）。
 // current/peak 先按自然分钟合并相邻桶再取值，语义与分钟粒度时代一致；
 // avg 覆盖趋势环内窗口。
-func (m *Metrics) rates() map[string]any {
+func (m *Metrics) rates() Rates {
 	now := time.Now().Unix()
 	m.bucketsMu.Lock()
 	snapshot := m.buckets
@@ -320,28 +365,28 @@ func (m *Metrics) rates() map[string]any {
 	}
 	// QPS 用当前分钟已计请求 ÷ 本分钟已过秒数；首秒内按 1 秒防除零。
 	secondsIntoMinute := now%60 + 1
-	return map[string]any{
-		"rpm_current": current,
-		"rpm_peak":    peak,
-		"rpm_avg":     float64(window) / float64(elapsed),
-		"qps_current": float64(current) / float64(secondsIntoMinute),
+	return Rates{
+		RPMCurrent: current,
+		RPMPeak:    peak,
+		RPMAvg:     float64(window) / float64(elapsed),
+		QPSCurrent: float64(current) / float64(secondsIntoMinute),
 	}
 }
 
 // trend 返回最近 60 分钟的逐 10 秒请求/错误数（旧→新，含零值桶），
 // 供面板直接画 sparkline，无需客户端再聚合。
-func (m *Metrics) trend() []map[string]any {
+func (m *Metrics) trend() []TrendPoint {
 	current := time.Now().Unix() / trendBucketSecs
 	m.bucketsMu.Lock()
 	snapshot := m.buckets
 	m.bucketsMu.Unlock()
-	out := make([]map[string]any, 0, trendBuckets)
+	out := make([]TrendPoint, 0, trendBuckets)
 	for slot := current - trendBuckets + 1; slot <= current; slot++ {
 		bucket := snapshot[int(slot%trendBuckets)]
-		point := map[string]any{"at": slot * trendBucketSecs, "requests": uint64(0), "errors": uint64(0)}
+		point := TrendPoint{At: slot * trendBucketSecs}
 		if bucket.at == slot*trendBucketSecs {
-			point["requests"] = bucket.requests
-			point["errors"] = bucket.errors
+			point.Requests = bucket.requests
+			point.Errors = bucket.errors
 		}
 		out = append(out, point)
 	}

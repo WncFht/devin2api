@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net"
 	"net/http"
 	"slices"
@@ -517,122 +516,20 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 		adapter.assignmentsMu.Unlock()
 	}
 
-	if prev.Model != next.Model {
-		applied = append(applied, "devin.model")
-	}
-	if !maps.Equal(prev.Aliases, next.Aliases) {
-		applied = append(applied, "devin.aliases")
-	}
-	if prev.ClientName != next.ClientName {
-		applied = append(applied, "devin.client_name")
-	}
-	if prev.ClientVersion != next.ClientVersion {
-		applied = append(applied, "devin.client_version")
-	}
-	if prev.ClientOS != next.ClientOS {
-		applied = append(applied, "devin.client_os")
-	}
-	if prev.Identity.Token != next.Identity.Token {
-		adapter.tokenMu.Lock()
-		adapter.token = next.Identity.Token
-		// 声明凭据换值即夺回服役位：minted 是按旧声明铸出的，留下会
-		// 让新 token 永不服役。
-		adapter.minted = ""
-		adapter.tokenMu.Unlock()
-		applied = append(applied, "devin.accounts."+next.Identity.Name+".token")
-	}
-	if prev.Identity.APIKey != next.Identity.APIKey {
-		// mint key 换值意味着铸币身份可能换号——旧 key 铸出的 minted
-		// 一并作废，下一次需要时按新 key 重铸。
-		adapter.tokenMu.Lock()
-		adapter.minted = ""
-		adapter.tokenMu.Unlock()
-		applied = append(applied, "devin.accounts."+next.Identity.Name+".api_key")
-	}
 	adapter.gate.setParams(next.Gate)
-	if prev.Gate.MaxRPM != next.Gate.MaxRPM {
-		applied = append(applied, "devin.max_rpm")
-	}
-	if prev.Gate.MaxHold != next.Gate.MaxHold {
-		applied = append(applied, "devin.gate_max_hold_seconds")
-	}
-	if prev.Gate.DripInterval != next.Gate.DripInterval {
-		applied = append(applied, "devin.gate_drip_interval_seconds")
-	}
-	if prev.Gate.DefaultLatch != next.Gate.DefaultLatch {
-		applied = append(applied, "devin.gate_default_latch_seconds")
-	}
-	if prev.Gate.WindowOffset != next.Gate.WindowOffset {
-		applied = append(applied, "devin.gate_window_offset_seconds")
-	}
-	if prev.Gate.WindowGuard != next.Gate.WindowGuard {
-		applied = append(applied, "devin.gate_window_guard_seconds")
-	}
-	if prev.Gate.BgMaxHold != next.Gate.BgMaxHold {
-		applied = append(applied, "devin.gate_bg_max_hold_seconds")
-	}
-	if prev.Gate.BgReserveMargin != next.Gate.BgReserveMargin {
-		applied = append(applied, "devin.gate_bg_reserve_margin")
-	}
 	adapter.warm.setParams(next.Warm)
-	if prev.Warm.Enabled != next.Warm.Enabled {
-		applied = append(applied, "devin.warm_prefix_enabled")
-	}
-	if prev.Warm.Interval != next.Warm.Interval {
-		applied = append(applied, "devin.warm_prefix_interval_seconds")
-	}
-	if prev.Warm.JitterRatio != next.Warm.JitterRatio {
-		applied = append(applied, "devin.warm_prefix_jitter_ratio")
-	}
-	if prev.Warm.MaxStreams != next.Warm.MaxStreams {
-		applied = append(applied, "devin.warm_prefix_max_streams")
-	}
-	if prev.Warm.MaxRetainedMB != next.Warm.MaxRetainedMB {
-		applied = append(applied, "devin.warm_prefix_max_retained_mb")
-	}
-	if prev.Warm.MinPrefixTokens != next.Warm.MinPrefixTokens {
-		applied = append(applied, "devin.warm_prefix_min_prefix_tokens")
-	}
-	if prev.Warm.BlockedMaxIdle != next.Warm.BlockedMaxIdle {
-		applied = append(applied, "devin.warm_prefix_blocked_max_idle_seconds")
-	}
-	if prev.Warm.UserPacedMaxIdle != next.Warm.UserPacedMaxIdle {
-		applied = append(applied, "devin.warm_prefix_userpaced_max_idle_seconds")
-	}
-	if prev.Warm.SubDoneMaxIdle != next.Warm.SubDoneMaxIdle {
-		applied = append(applied, "devin.warm_prefix_subdone_max_idle_seconds")
-	}
-	if prev.Warm.UnknownMaxIdle != next.Warm.UnknownMaxIdle {
-		applied = append(applied, "devin.warm_prefix_unknown_max_idle_seconds")
-	}
-	if !slices.Equal(prev.Warm.BlockedNames, next.Warm.BlockedNames) {
-		applied = append(applied, "devin.warm_prefix_blocked_names")
-	}
-	if !slices.Equal(prev.Warm.UserPacedNames, next.Warm.UserPacedNames) {
-		applied = append(applied, "devin.warm_prefix_userpaced_names")
-	}
-	if prev.Endpoint.BaseURL != next.Endpoint.BaseURL {
-		applied = append(applied, "devin.base_url")
-	}
-	if prev.Endpoint.Proxy != next.Endpoint.Proxy {
-		applied = append(applied, "devin.proxy")
-	}
-	if prev.Endpoint.ForceHTTP1 != next.Endpoint.ForceHTTP1 {
-		applied = append(applied, "devin.force_http1")
-	}
-	// 池级调度旋钮：config 整体换值即生效（affinityTTL/NoteQuotaSample
-	// 每次经 CurrentConfig 现读），无 adapter 侧回写动作。
-	if prev.SessionAffinityTTLSeconds != next.SessionAffinityTTLSeconds {
-		applied = append(applied, "devin.session_affinity_ttl_seconds")
-	}
-	if prev.QuotaLowThresholdPercent != next.QuotaLowThresholdPercent {
-		applied = append(applied, "devin.quota_low_threshold_percent")
-	}
-	if prev.NoProgressTimeout != next.NoProgressTimeout {
-		applied = append(applied, "devin.no_progress_timeout_seconds")
-	}
-	if prev.PreEventNoProgressTimeout != next.PreEventNoProgressTimeout {
-		applied = append(applied, "devin.pre_event_no_progress_timeout_seconds")
+	// applied 差集、凭据回写与面板键全部从 configFields 登记表驱动
+	// （词表见 configfields.go）；池级调度旋钮（affinityTTL/quota 阈值/
+	// 无进度期限）同列——config 整体换值即生效，无 adapter 侧回写。
+	for i := range configFields {
+		f := &configFields[i]
+		if !f.changed(prev, next) {
+			continue
+		}
+		if f.onChange != nil {
+			f.onChange(adapter, next)
+		}
+		applied = append(applied, f.appliedKey(next))
 	}
 	return applied
 }
@@ -835,11 +732,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	model, assignmentJWT, err := adapter.resolveModelRouting(ctx, request, model)
 	if err != nil {
 		// AssignModel 同属上游建连期 RPC：传输断裂与语义拒绝分层。
-		stage := debuglog.ErrStageDevinConnect
-		if isTransientConnectError(err) {
-			stage = debuglog.ErrStageDevinTransport
-		}
-		recorder.WriteError(stage, err)
+		recorder.WriteError(stageOf(err), err)
 		return nil, err
 	}
 	// 别名与路由判定到此完结：记下发上线 uid，进行中列表即刻
@@ -993,12 +886,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// 失败——传输断裂与上游语义拒绝（devin_connect）分层，前者是
 		// 连接/帧级事故，后者才是上游配额或参数动作。
 		if !parentDone {
-			stage := debuglog.ErrStageDevinConnect
-			if isTransientConnectError(err) {
-				// 建连期的传输断裂与中流断裂同层，不混进上游语义拒绝桶。
-				stage = debuglog.ErrStageDevinTransport
-			}
-			recorder.WriteError(stage, err)
+			recorder.WriteError(stageOf(err), err)
 		}
 		// 错误分类记录随车携带——下游经 llm.Classify 取回结构事实，
 		// 不再按文本反推。
@@ -1008,28 +896,67 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 的合成 "continue"、extend 的内部编码续轮/续传）客户端下一发不会
 	// 逐字节复现，存了就是保温死分支。
 	adapter.warm.retain(warmKey, request, model, warmRouter)
+	return adapter.newResponseStream(streamDeps{
+		clientCtx:  ctx,
+		streamBase: streamBase,
+		streamCtx:  streamCtx,
+		upstream:   stream,
+		cancel:     cancel,
+		runner:     runner,
+		model:      model,
+		detachKey:  detachKey,
+	}), nil
+}
+
+// streamDeps 收拢开流成功后装配 responseStream 的外部输入。三个 ctx
+// 同源（客户端请求 ctx）但取消语义各异、不可互替：clientCtx 是客户端
+// ctx——断连哨兵盯它；streamBase 是它剥离取消后的基底，reopen/extend
+// 的续试 ctx 由它派生；streamCtx 是本条流的生命周期根（首发泵与
+// cancel 随它）。upstream/cancel 是刚建立的上游流与其打断手段。
+// runner 是本次开流的发送面：续试重发经它，装配所需配料（request/
+// cfg/warmKey/recorder）也经它取用——与首发同一份，不各自传参。
+type streamDeps struct {
+	clientCtx  context.Context
+	streamBase context.Context
+	streamCtx  context.Context
+	upstream   devinResponseReceiver
+	cancel     context.CancelFunc
+	runner     *attemptRunner
+	// model 是路由定稿的 wire uid（解码器身份）；detachKey 是完成
+	// 缓存语义键的惰性兑现（OnceValue，见 Stream 的 detachKey 说明）。
+	model     string
+	detachKey func() string
+}
+
+// newResponseStream 把刚建立的上游流装配成 responseStream：看门狗
+// 期限、解码器、pre-content 重开/续轮/续传三套续试闭包与完成缓存
+// 挂接面在此成形；Stream 管「流怎么开出来」，本函数管「开出来的流
+// 长什么样」。
+func (adapter *Adapter) newResponseStream(deps streamDeps) *responseStream {
+	runner := deps.runner
+	request := runner.request
 	serverTools := serverToolNames(request.Tools)
-	decoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools), serverTools)
+	decoder := newResponseDecoder(deps.model, request.StopSequences, customToolNames(request.Tools), serverTools)
 	// postProgressTimeout 解析 post-content 无进度档（工具调用参数的
 	// 长静默计算）——cfg <=0 回落默认；Stream 构造的流恒有值，测试
 	// 裸流留零走 deadlines.progress 的回落档。preProgressTimeout 是
 	// 它的 pre 对偶档，同法回落 upstreamNoProgressTimeout。
-	postProgressTimeout := cfg.NoProgressTimeout
+	postProgressTimeout := runner.cfg.NoProgressTimeout
 	if postProgressTimeout <= 0 {
 		postProgressTimeout = defaultPostProgressTimeout
 	}
-	preProgressTimeout := cfg.PreEventNoProgressTimeout
+	preProgressTimeout := runner.cfg.PreEventNoProgressTimeout
 	if preProgressTimeout <= 0 {
 		preProgressTimeout = upstreamNoProgressTimeout
 	}
 	response := &responseStream{
-		frames:   pumpUpstream(streamCtx, stream),
-		cancel:   cancel,
+		frames:   pumpUpstream(deps.streamCtx, deps.upstream),
+		cancel:   deps.cancel,
 		decoder:  decoder,
-		recorder: recorder,
+		recorder: runner.env.recorder,
 		gate:     adapter.gate,
 		warm:     adapter.warm,
-		warmKey:  warmKey,
+		warmKey:  runner.warmKey,
 		deadlines: streamDeadlines{
 			postProgress: postProgressTimeout,
 			preProgress:  preProgressTimeout,
@@ -1037,7 +964,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			// 往返，pre-event 死等预算从这一刻起跨换流累计。
 			firstSentAt: time.Now(),
 		},
-		detachKey: detachKey,
+		detachKey: deps.detachKey,
 		registry:  adapter.detached,
 		entry:     &detachedEntry{},
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
@@ -1065,7 +992,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			default:
 				return nil, nil, cause
 			}
-			retryCtx, retryCancel := context.WithCancel(streamBase)
+			retryCtx, retryCancel := context.WithCancel(deps.streamBase)
 			reopened, err := runner.resend(retryCtx, causeText, mutate, continueEmpty)
 			if err != nil {
 				retryCancel()
@@ -1074,7 +1001,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			return pumpUpstream(retryCtx, reopened), retryCancel, nil
 		},
 		newDecoder: func() *responseDecoder {
-			return newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools), serverTools)
+			return newResponseDecoder(deps.model, request.StopSequences, customToolNames(request.Tools), serverTools)
 		},
 	}
 	// extend 以「原始历史 + 追加消息」重发并返回播种旧内容的新流：
@@ -1083,7 +1010,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 清掉 tool_choice——首发期的指名/强制约束会让上游每跳都强发
 	// 同一调用（实测 named web_search 滚到 hops 封顶）。
 	response.extend = func(cause string, extra []llm.Message, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
-		nextCtx, nextCancel := context.WithCancel(streamBase)
+		nextCtx, nextCancel := context.WithCancel(deps.streamBase)
 		next, err := runner.resend(nextCtx, cause, func(request *llm.RequestMessages) {
 			request.ToolChoice = nil
 			request.Messages = append(append([]llm.Message{}, request.Messages...), extra...)
@@ -1092,7 +1019,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			nextCancel()
 			return nil, nil, nil, err
 		}
-		nextDecoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools), serverTools)
+		nextDecoder := newResponseDecoder(deps.model, request.StopSequences, customToolNames(request.Tools), serverTools)
 		// start 先跑：partial 元数据初始化后再播种旧内容——客户端
 		// 已见过本轮的 start，续发不产第二个（started 已置位，
 		// Recv 里 pendingStart 为空）。
@@ -1109,7 +1036,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		response.search = func(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32) (webSearchOutcome, error) {
 			searchSeq++
 			stem := fmt.Sprintf("%s%d", debuglog.StageDevinSearchStem, searchSeq)
-			return adapter.runWebSearch(ctx, query, allowedDomains, blockedDomains, limit, stem, warmKey)
+			return adapter.runWebSearch(ctx, query, allowedDomains, blockedDomains, limit, stem, runner.warmKey)
 		}
 	}
 	// 客户端哨兵：streamCtx 从 streamBase 派生不随客户端取消。断连时刻
@@ -1119,8 +1046,8 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 残留形态（如未来不排干 items 就退场的消费方）；泵侧交班才是
 	// 定序保障——泵退出即蕴含判定已定，消费方排干到 close 才放
 	// unwind 进 Complete。
-	go response.watchClientCtx(ctx)
-	return response, nil
+	go response.watchClientCtx(deps.clientCtx)
+	return response
 }
 
 // watchClientCtx 是客户端哨兵主体：ctx.Done 醒来先走 admitIntent 占位
@@ -1193,6 +1120,17 @@ func isTransientConnectError(err error) bool {
 	code := connectErr.Code()
 	return (code == connect.CodeInvalidArgument || code == connect.CodeInternal) &&
 		strings.HasPrefix(connectErr.Message(), "protocol error:")
+}
+
+// stageOf 把上游侧失败归到首个失败点的 stage 词：传输断裂记
+// devin_transport——连接/帧级事故，建连期与中流断裂同层，不混进
+// 上游语义拒绝桶（判定见 isTransientConnectError）；上游语义拒绝
+// （配额/参数/权限动作）记 devin_connect。
+func stageOf(err error) string {
+	if isTransientConnectError(err) {
+		return debuglog.ErrStageDevinTransport
+	}
+	return debuglog.ErrStageDevinConnect
 }
 
 // validateImagesForModel 在本地尽早拒绝「无视觉能力模型 + 图片」组合，错误信息对客户端可读。
@@ -2262,11 +2200,7 @@ func (stream *responseStream) recordUpstreamFailure(cause error) {
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		return
 	}
-	stage := debuglog.ErrStageDevinConnect
-	if isTransientConnectError(cause) {
-		stage = debuglog.ErrStageDevinTransport
-	}
-	stream.recorder.WriteError(stage, cause)
+	stream.recorder.WriteError(stageOf(cause), cause)
 	// 走到这里说明 reopen/resume 都已拒绝：把两侧门禁快照落成 04 标记行，
 	// 「为什么没续」（典型：在飞工具调用）不必靠反推 retries=0。
 	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_declined", map[string]any{

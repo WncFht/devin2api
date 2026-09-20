@@ -263,7 +263,7 @@ var schemaStatements = []string{
 
 	// lane_attempt_causes：号池被放弃 lane 尝试的日粒度聚合账
 	// （meta.json 的 upstream_attempts 明细随目录淘汰后，「为什么
-	// 换号」只剩这里的口径）。cause 词表由写方 debuglog 定版：
+	// 换号」只剩这里的口径）。cause 词表的唯一事实源在 logvocab：
 	// local_gate[:reason] 本地闸门快败的幻影换号（零上游发送）、
 	// connect code 真实 failover 发送、nocode 无 code 传输断裂。
 	// PK 以 day 打头：读（day>=?）与 prune（day<?）同走前缀范围扫。

@@ -104,19 +104,17 @@ func (h *Handler) captureMetricsSample() {
 	s := metricsSample{At: time.Now().Unix()}
 	if h.metrics != nil {
 		snap := h.metrics.Snapshot()
-		s.ActiveRequests = numI64(snap["active_requests"])
-		s.CompletedTotal = numU64(snap["completed_requests"])
-		s.RejectedTotal = numU64(snap["rejected_requests"])
-		if proc, ok := snap["process"].(map[string]any); ok {
-			s.HeapAllocBytes = numU64(proc["heap_alloc_bytes"])
-			s.HeapSysBytes = numU64(proc["heap_sys_bytes"])
-			s.RSSBytes = numU64(proc["rss_current_bytes"])
-			s.Goroutines = int(numI64(proc["goroutines"]))
-			s.CPUPercent = floatAny(proc["cpu_percent"])
-		}
+		s.ActiveRequests = snap.ActiveRequests
+		s.CompletedTotal = snap.CompletedRequests
+		s.RejectedTotal = snap.RejectedRequests
+		s.HeapAllocBytes = snap.Process.HeapAllocBytes
+		s.HeapSysBytes = snap.Process.HeapSysBytes
+		s.RSSBytes = uint64(snap.Process.RSSCurrentBytes)
+		s.Goroutines = snap.Process.Goroutines
+		s.CPUPercent = snap.Process.CPUPercent
 	}
 	if stats := h.debug.Stats(); stats != nil {
-		s.LogPendingBytes = numI64(stats["pending_bytes"])
+		s.LogPendingBytes = decodeDebugStats(stats).PendingBytes
 	}
 	// 闩态按 lane 聚合：任一 lane 在闩都计入 latched 数；LatchTotal 是
 	// 全 lane 累计闩次数之和。与 runtime-metrics 的 accounts 组同源
@@ -130,31 +128,6 @@ func (h *Handler) captureMetricsSample() {
 		}
 	}
 	h.history.add(s)
-}
-
-// numI64/numU64 把快照 map 里的宽松数值断言成定宽类型；缺席/异型按零值。
-func numI64(v any) int64 {
-	switch n := v.(type) {
-	case int64:
-		return n
-	case int:
-		return int64(n)
-	case uint64:
-		return int64(n)
-	}
-	return 0
-}
-
-func numU64(v any) uint64 {
-	switch n := v.(type) {
-	case uint64:
-		return n
-	case int64:
-		return uint64(n)
-	case int:
-		return uint64(n)
-	}
-	return 0
 }
 
 // adminRuntimeMetricsHistory 实现 GET /admin/runtime-metrics/history：

@@ -20,37 +20,36 @@ func TestMetricsLifecycle(t *testing.T) {
 	m.Reject(RejectDraining, RejectEvent{Status: http.StatusServiceUnavailable, Path: "/v1/messages"})
 
 	snap := m.Snapshot()
-	if snap["completed_requests"].(uint64) != 2 || snap["ok_responses"].(uint64) != 1 || snap["client_error_responses"].(uint64) != 1 {
-		t.Fatalf("snapshot = %v", snap)
+	if snap.CompletedRequests != 2 || snap.OKResponses != 1 || snap.ClientErrorResponses != 1 {
+		t.Fatalf("snapshot = %+v", snap)
 	}
-	if snap["active_requests"].(int64) != 0 || snap["rejected_requests"].(uint64) != 1 {
-		t.Fatalf("snapshot = %v", snap)
+	if snap.ActiveRequests != 0 || snap.RejectedRequests != 1 {
+		t.Fatalf("snapshot = %+v", snap)
 	}
-	rejects, _ := snap["rejects"].(map[string]any)
-	if rejects["by_reason"].(map[string]uint64)[string(RejectDraining)] != 1 {
-		t.Fatalf("rejects = %v", rejects)
+	if snap.Rejects.ByReason[string(RejectDraining)] != 1 {
+		t.Fatalf("rejects = %+v", snap.Rejects)
 	}
-	recent, _ := rejects["recent"].([]RejectEvent)
+	recent := snap.Rejects.Recent
 	if len(recent) != 1 || recent[0].Path != "/v1/messages" || recent[0].Reason != string(RejectDraining) {
 		t.Fatalf("recent = %+v", recent)
 	}
-	if snap["streaming_requests"].(uint64) != 1 || snap["response_body_bytes"].(uint64) != 500 {
-		t.Fatalf("snapshot = %v", snap)
+	if snap.StreamingRequests != 1 || snap.ResponseBodyBytes != 500 {
+		t.Fatalf("snapshot = %+v", snap)
 	}
 }
 
 func TestForeignListenHolders(t *testing.T) {
 	m := NewMetrics()
 	snap := m.Snapshot()
-	if snap["foreign_listen_holders"].(int64) != 0 || snap["foreign_listen_holders_last_seen"].(int64) != 0 {
-		t.Fatalf("fresh snapshot = %v", snap)
+	if snap.ForeignListenHolders != 0 || snap.ForeignListenLastSeen != 0 {
+		t.Fatalf("fresh snapshot = %+v", snap)
 	}
 	m.NoteForeignListenHolders(2)
 	m.NoteForeignListenHolders(0)
 	snap = m.Snapshot()
 	// gauge 随当轮归零，last_seen 保留「曾经见过」的口径。
-	if snap["foreign_listen_holders"].(int64) != 0 || snap["foreign_listen_holders_last_seen"].(int64) == 0 {
-		t.Fatalf("snapshot = %v", snap)
+	if snap.ForeignListenHolders != 0 || snap.ForeignListenLastSeen == 0 {
+		t.Fatalf("snapshot = %+v", snap)
 	}
 }
 
@@ -84,12 +83,12 @@ func TestTrendBuckets(t *testing.T) {
 	// SSE 已提交 200 后客户端断连：HTTP 状态是 2xx，但趋势应计为错误。
 	m.Begin().Finish(200, 0, "disconnected")
 	m.Reject(RejectConcurrencyLimit, RejectEvent{Status: http.StatusTooManyRequests})
-	trend, _ := m.Snapshot()["trend_minutes"].([]map[string]any)
+	trend := m.Snapshot().TrendMinutes
 	if len(trend) != trendBuckets {
 		t.Fatalf("trend len = %d, want %d", len(trend), trendBuckets)
 	}
 	last := trend[len(trend)-1]
-	if last["requests"] != uint64(4) || last["errors"] != uint64(3) {
+	if last.Requests != 4 || last.Errors != 3 {
 		t.Fatalf("last bucket = %+v, want requests=4 errors=3", last)
 	}
 }
@@ -100,36 +99,32 @@ func TestRatesDerived(t *testing.T) {
 	m.Begin().Finish(200, 0, "completed")
 	m.Begin().Finish(200, 0, "completed")
 	m.Begin().Finish(500, 0, "failed")
-	rates, _ := m.Snapshot()["rates"].(map[string]any)
-	if rates["rpm_current"] != uint64(3) || rates["rpm_peak"] != uint64(3) {
+	rates := m.Snapshot().Rates
+	if rates.RPMCurrent != 3 || rates.RPMPeak != 3 {
 		t.Fatalf("rates = %+v", rates)
 	}
-	if qps, _ := rates["qps_current"].(float64); qps <= 0 {
-		t.Fatalf("qps_current = %v", rates["qps_current"])
+	if rates.QPSCurrent <= 0 {
+		t.Fatalf("qps_current = %v", rates.QPSCurrent)
 	}
-	if avg, _ := rates["rpm_avg"].(float64); avg != 3 {
-		t.Fatalf("rpm_avg = %v, want 3 (first minute)", rates["rpm_avg"])
+	if rates.RPMAvg != 3 {
+		t.Fatalf("rpm_avg = %v, want 3 (first minute)", rates.RPMAvg)
 	}
 }
 
 // TestProcessMetrics 验证进程级指标存在且值域合理。
 func TestProcessMetrics(t *testing.T) {
 	m := NewMetrics()
-	proc, _ := m.Snapshot()["process"].(map[string]any)
-	if proc["goroutines"].(int) <= 0 {
-		t.Fatalf("goroutines = %v", proc["goroutines"])
+	proc := m.Snapshot().Process
+	if proc.Goroutines <= 0 {
+		t.Fatalf("goroutines = %v", proc.Goroutines)
 	}
-	if proc["heap_alloc_bytes"].(uint64) == 0 {
-		t.Fatalf("heap_alloc_bytes = %v", proc["heap_alloc_bytes"])
-	}
-	// 瞬时 RSS 字段必须在快照中（无数据源的平台为 0，不能缺席）。
-	if _, ok := proc["rss_current_bytes"]; !ok {
-		t.Fatalf("process snapshot missing rss_current_bytes: %v", proc)
+	if proc.HeapAllocBytes == 0 {
+		t.Fatalf("heap_alloc_bytes = %v", proc.HeapAllocBytes)
 	}
 	// 第二次快照应有非负 CPU 百分比（相邻 rusage 差分）。
 	m.Snapshot()
-	proc, _ = m.Snapshot()["process"].(map[string]any)
-	if cpu, _ := proc["cpu_percent"].(float64); cpu < 0 {
-		t.Fatalf("cpu_percent = %v", cpu)
+	proc = m.Snapshot().Process
+	if proc.CPUPercent < 0 {
+		t.Fatalf("cpu_percent = %v", proc.CPUPercent)
 	}
 }

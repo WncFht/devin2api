@@ -274,6 +274,54 @@ var errBoundYield = &llm.Failure{
 	Message:    "bound lane yielded at pick: a strictly healthier sibling leads",
 }
 
+// failoverBudgetBlocked 是换号累计预算的拦截判定，开流级（Stream）与
+// 流内级（swap）共用同一份策略：首个换号候选（priorFailovers==0，跨
+// 两级共享计数——Stream 传 tried-1、swap 传 failovers）在非硬故障时
+// 保底放行——首 lane 挂到上游开流 deadline 已烧穿预算，此处查账必然
+// 拦截换号，健康兄弟 lane 永远接不到管。硬故障候选不保底：池侧冷却
+// 判死的 lane 再点一次只会复烧整条自愈链。第 2+ 次换号恢复查账——
+// 烧满一条再败的场景不再串行点燃第三条。拦截处各调用方自行留痕，
+// 否则「为什么没换第二条」只能靠 elapsed 反推。
+func failoverBudgetBlocked(entered time.Time, class string, priorFailovers int, next *poolLane) bool {
+	return time.Since(entered) > failoverBudget(class) && (priorFailovers > 0 || next.hardDown())
+}
+
+// openAttempt 是一次候选开流尝试的结局：成功带 stream+laneStart，失败
+// 带 err；terminal 标记 err 不过 failoverable 词表（任何候选都不该再试）。
+type openAttempt struct {
+	laneStart time.Time
+	stream    llm.ResponseStream
+	err       error
+	terminal  bool
+}
+
+// openOnLane 试开一条候选 lane，是两级换号循环的公共躯干：
+// account_attempt 分界行、laneStart 记时、让位探针装填与
+// adapter.Stream 调用逐字一致；SetUpstreamAccount 成败恒记（「哪号
+// 拒的我」），failoverable 不过标 terminal，可换号失败记
+// NoteAccountAttempt+noteFailure 并把探针点名的兄弟 preferSibling
+// 提队。ctx 由调用方按自己链路装好（Stream 入口已 attach env，
+// swap 每次经 env.attach 现挂）；lane 的弹出与计数簿记留在调用方
+// ——两侧各自不同（tried/pin 对 failovers/字段回写）。
+func openOnLane(ctx context.Context, request llm.RequestMessages, class string, lane *poolLane, rest []*poolLane, recorder *debuglog.Recorder) (openAttempt, []*poolLane) {
+	recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": lane.name})
+	laneStart := time.Now()
+	probe := newGateYieldProbe(class, rest)
+	stream, err := lane.adapter.Stream(probe.attach(ctx), request)
+	recorder.SetUpstreamAccount(lane.name)
+	attempt := openAttempt{laneStart: laneStart, stream: stream, err: err}
+	if err == nil {
+		return attempt, rest
+	}
+	if !failoverable(ctx, err) {
+		attempt.terminal = true
+		return attempt, rest
+	}
+	recorder.NoteAccountAttempt(lane.name, err)
+	lane.noteFailure(err)
+	return attempt, preferSibling(rest, probe.target.Load(), recorder)
+}
+
 // Stream 按亲和键选 lane 发起请求，失败按 failoverable 词表换号。
 // 开流级换号发生在本函数内；开流成功后返回 poolStream，由它在 Recv
 // 里处理流内 error 事件的 pre-content 换号（死 token 的 unauthenticated
@@ -334,15 +382,9 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 	var lastErr error
 	tried := 0
 	for len(rest) > 0 {
-		// 换号累计预算：首个候选恒试，首个换号候选（tried==1）在非
-		// 硬故障时保底放行——首 lane 挂到上游开流 deadline 已烧穿预
-		// 算，此处查账必然拦截换号，健康兄弟 lane 永远接不到管。硬故
-		// 障候选不保底：池侧冷却判死的 lane 再点一次只会复烧整条自
-		// 愈链。第 2+ 次换号（tried>1）恢复查账——烧满一条再败的场
-		// 景不再串行点燃第三条。拦截留痕，否则「为什么没换第二条」
-		// 只能靠 elapsed 反推。
-		if lastErr != nil && time.Since(entered) > failoverBudget(env.class()) &&
-			(tried != 1 || rest[0].hardDown()) {
+		// 首个候选恒试（lastErr 空）；换号预算判定见
+		// failoverBudgetBlocked——开流级以 tried-1 作已换号数。
+		if lastErr != nil && failoverBudgetBlocked(entered, class, tried-1, rest[0]) {
 			recorder.AppendJSONL(debuglog.StageDevinResponse, "failover_budget_exhausted", map[string]any{"elapsed_ms": time.Since(entered).Milliseconds(), "skipped": rest[0].name})
 			break
 		}
@@ -350,28 +392,19 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		rest = rest[1:]
 		tried++
 		pin.setLane(lane)
-		// 04 里插账号分界行：各 lane 的上游帧直接续写同一文件，
-		// 没有分界行无法区分一段帧属于哪号。
-		recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": lane.name})
-		laneStart := time.Now()
-		probe := newGateYieldProbe(class, rest)
-		stream, err := lane.adapter.Stream(probe.attach(ctx), request)
-		if err == nil {
-			recorder.SetUpstreamAccount(lane.name)
+		var attempt openAttempt
+		attempt, rest = openOnLane(ctx, request, class, lane, rest, recorder)
+		if attempt.err == nil {
 			// 开流成功即写绑定：无论它是否是命中那条——绑定记录的是
 			// 「上次产出内容的 lane」，胜者接管会话谱系。
 			pool.bind(affinity, lane, request.SessionKey)
-			return &poolStream{request: request, recorder: recorder, env: env, pool: pool, affinity: affinity, entered: entered, lane: lane, laneStart: laneStart, inner: stream, rest: rest, failovers: tried - 1}, nil
+			return &poolStream{request: request, recorder: recorder, env: env, pool: pool, affinity: affinity, entered: entered, lane: lane, laneStart: attempt.laneStart, inner: attempt.stream, rest: rest, failovers: tried - 1}, nil
 		}
-		lastErr = err
-		recorder.SetUpstreamAccount(lane.name)
-		if !failoverable(ctx, err) {
-			return nil, err
+		lastErr = attempt.err
+		if attempt.terminal {
+			return nil, lastErr
 		}
-		recorder.NoteAccountAttempt(lane.name, err)
-		lane.noteFailure(err)
-		rest = preferSibling(rest, probe.target.Load(), recorder)
-		slog.Warn("devin account lane failed, failing over", "account", lane.name, "error", err)
+		slog.Warn("devin account lane failed, failing over", "account", lane.name, "error", lastErr)
 	}
 	return nil, lastErr
 }
@@ -491,52 +524,40 @@ func (s *poolStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 func (s *poolStream) swap(ctx context.Context) (bool, error) {
 	var lastErr error
 	for len(s.rest) > 0 {
-		// 与 Stream 开流级同一份累计预算：swap 只在 pre-content 触发
-		//（committed 后不再换号），s.entered 起算的 elapsed 全是未产出
-		// 内容的烧时。首个换号候选（failovers==0，跨开流/流内两级共
-		// 享计数）在非硬故障时保底放行——本 lane 流内烧穿预算后查账
-		// 必然拦截，健康兄弟永远接不到管；硬故障候选不保底，池侧冷
-		// 却判死的 lane 不值得复烧一条自愈链。第 2+ 次换号恢复查账，
-		// 拦住串行点燃第三条。未试候选时返回 (false, nil)，由 Recv
-		// 把本 lane 的真实错误事件透传给客户端。
-		if time.Since(s.entered) > failoverBudget(s.env.class()) &&
-			(s.failovers > 0 || s.rest[0].hardDown()) {
+		// 与 Stream 开流级同一份累计预算（failoverBudgetBlocked）：
+		// swap 只在 pre-content 触发（committed 后不再换号），s.entered
+		// 起算的 elapsed 全是未产出内容的烧时；failovers 跨两级共享
+		// 计数。未试候选时返回 (false, nil)，由 Recv 把本 lane 的真实
+		// 错误事件透传给客户端。
+		if failoverBudgetBlocked(s.entered, s.env.class(), s.failovers, s.rest[0]) {
 			s.recorder.AppendJSONL(debuglog.StageDevinResponse, "failover_budget_exhausted", map[string]any{"elapsed_ms": time.Since(s.entered).Milliseconds(), "skipped": s.rest[0].name})
 			break
 		}
 		next := s.rest[0]
 		s.rest = s.rest[1:]
 		s.failovers++
-		s.recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": next.name})
-		laneStart := time.Now()
 		// Recv 的 ctx 与开流 ctx 是两个对象：本包挂进开流 ctx 的值
 		//（peers 登记表、调试记录器）不会自动跟过来——env.attach 是
-		// 唯一重挂点；peers 取换号时刻的最新 lane 集（lane 可热变），
-		// 新 lane 的让位探针由 probe.attach 逐 lane 装填。
+		// 唯一重挂点；peers 取换号时刻的最新 lane 集（lane 可热变）。
 		env := s.env
 		env.peers = s.pool.detachedPeerRegistries()
-		probe := newGateYieldProbe(env.class(), s.rest)
-		inner, err := next.adapter.Stream(probe.attach(env.attach(ctx)), s.request)
-		if err == nil {
+		var attempt openAttempt
+		attempt, s.rest = openOnLane(env.attach(ctx), s.request, env.class(), next, s.rest, s.recorder)
+		if attempt.err == nil {
 			s.lane = next
-			s.laneStart = laneStart
-			s.inner = inner
-			s.recorder.SetUpstreamAccount(next.name)
+			s.laneStart = attempt.laneStart
+			s.inner = attempt.stream
 			// 换号接管即改绑：会话谱系转到新 lane，后续请求直落这里。
 			s.pool.bind(s.affinity, next, s.request.SessionKey)
 			// 重选审计覆盖首轮快照——meta 留下的是最新一轮决策现场。
 			s.recorder.NotePoolCandidates(poolCandidateRows(s.swapRanked(next, env.class())))
 			return true, nil
 		}
-		lastErr = err
-		s.recorder.SetUpstreamAccount(next.name)
-		if !failoverable(ctx, err) {
-			return false, err
+		lastErr = attempt.err
+		if attempt.terminal {
+			return false, lastErr
 		}
-		s.recorder.NoteAccountAttempt(next.name, err)
-		next.noteFailure(err)
-		s.rest = preferSibling(s.rest, probe.target.Load(), s.recorder)
-		slog.Warn("devin account lane failed to open during in-stream failover", "account", next.name, "error", err)
+		slog.Warn("devin account lane failed to open during in-stream failover", "account", next.name, "error", lastErr)
 	}
 	return false, lastErr
 }

@@ -3,6 +3,8 @@ package ccpanel
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/WncFht/devin2api/internal/obs"
 )
 
 // apiResponse 与 ccLoad 的 {success,data,error,count} 信封逐字段一致，
@@ -29,19 +31,60 @@ func respondOK(w http.ResponseWriter, data any) {
 	writeEnvelope(w, http.StatusOK, apiResponse{Success: true, Data: data})
 }
 
-// rejectsView 组装管线前拒绝视图：obs 侧的分原因计数与最近事件环，并入
-// debuglog 侧的 rejected 留存行写失败数——该行走同步直写绕开 sheddable
-// 队列，dropped_*/io_errors 口径盖不住它，insert_failed 是「拒绝证据没
-// 落库」这一损耗在面板侧的唯一透出。metrics 为 nil 时返回 nil（端点降级）。
-func (h *Handler) rejectsView() map[string]any {
+// rejectsView 是管线前拒绝视图：obs.Rejects 内嵌展开（by_reason/recent/
+// labels），外加 debuglog 侧的 rejected 留存行写失败数——该行走同步直写
+// 绕开 sheddable 队列，dropped_*/io_errors 口径盖不住它，insert_failed
+// 是「拒绝证据没落库」这一损耗在面板侧的唯一透出。
+type rejectsView struct {
+	obs.Rejects
+	// InsertFailed 仅在 debug.Stats() 缺席时缺席（omitempty 保留「未知」
+	// 与「零失败」的区别）。
+	InsertFailed *uint64 `json:"insert_failed,omitempty"`
+}
+
+// rejectsView 组装管线前拒绝视图；metrics 为 nil 时返回 nil（端点降级）。
+func (h *Handler) rejectsView() *rejectsView {
 	if h.metrics == nil {
 		return nil
 	}
-	view := h.metrics.Rejects()
+	view := rejectsView{Rejects: h.metrics.Rejects()}
 	if stats := h.debug.Stats(); stats != nil {
-		view["insert_failed"] = stats["rejected_insert_failed"]
+		failed := decodeDebugStats(stats).RejectedInsertFailed
+		view.InsertFailed = &failed
 	}
-	return view
+	return &view
+}
+
+// debugStats 是 debuglog.Manager.Stats() 自观测 map 里面板消费键的定宽
+// 投影。Stats 的 map 形状是它的对外契约——runtime-metrics 的 debuglog
+// 组整份透传给前端；面板侧消费的键在这里一次性定宽，键名漂移在编译期
+// 爆炸而非静默零值。
+type debugStats struct {
+	QueuedLogEvents      int    `json:"queued_log_events"`
+	QueueCapacity        int    `json:"queue_capacity"`
+	DroppedLogEvents     uint64 `json:"dropped_log_events"`
+	DroppedPayloadBytes  uint64 `json:"dropped_payload_bytes"`
+	LateWrites           uint64 `json:"late_writes"`
+	IOErrors             uint64 `json:"io_errors"`
+	PendingBytes         int64  `json:"pending_bytes"`
+	PendingBytesMax      int64  `json:"pending_bytes_max"`
+	PendingBytesCap      int64  `json:"pending_bytes_cap"`
+	ErrorsOnly           bool   `json:"errors_only"`
+	RejectedInsertFailed uint64 `json:"rejected_insert_failed"`
+}
+
+// decodeDebugStats 把 Stats() map 投成定宽结构：走一轮 JSON 编解码而非
+// 逐键断言——Stats 产出的值本就是 JSON wire 形状，调用频率低（admin
+// 端点 + 30s 采样一拍），一次解码换掉整族断言助手。
+func decodeDebugStats(stats map[string]any) debugStats {
+	var out debugStats
+	raw, err := json.Marshal(stats)
+	if err != nil {
+		return out
+	}
+	// Stats 是本进程自产数据，值域封闭；未识别的值按缺席处理。
+	_ = json.Unmarshal(raw, &out)
+	return out
 }
 
 func respondError(w http.ResponseWriter, code int, msg string) {
