@@ -909,14 +909,17 @@ func (application *App) createCompletion(
 		return
 	}
 	startRecorder()
-	if recorder != nil {
-		// 投影会对 body 再做一次 generic unmarshal；recorder 为 nil 时
-		// WriteJSON 是 no-op，参数表达式却仍会求值——必须在外层门控。
-		recorder.WriteJSON(debuglog.StageHTTPRequest, httpRequestProjection(request, body))
-	}
 	// collectDropped 门控解码期对请求体的二次全量扫描（顶层未消费字段
 	// 收集）——Dropped 的唯一读者是 02 投影，recorder 为 nil 时纯烧 CPU。
 	messages, options, err := protocol.DecodeRequest(body, recorder != nil)
+	if recorder != nil {
+		// 01 在解码之后写：DecodeRequest 通过即 body 已证合法 JSON，
+		// 投影直嵌 RawMessage 免 json.Valid 的第三次全量扫描；解码
+		// 失败的留证路径仍做有效性判定（body 可能根本不是 JSON）。
+		// 先于 error.json 的 enqueue 序与原实现一致；WriteJSON 参数
+		// 表达式必须外层门控——nil recorder 时投影仍会被求值。
+		recorder.WriteJSON(debuglog.StageHTTPRequest, httpRequestProjection(request, body, err == nil))
+	}
 	if err != nil {
 		writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageHTTPDecode, http.StatusBadRequest, err)
 		return
@@ -1233,13 +1236,16 @@ func debugRef(recorder *debuglog.Recorder) string {
 	return recorder.Dir()
 }
 
-func httpRequestProjection(request *http.Request, body []byte) map[string]any {
+func httpRequestProjection(request *http.Request, body []byte, bodyValid bool) map[string]any {
 	// body 以 RawMessage 原样交给日志 worker：请求 goroutine 不做全量
 	// unmarshal 建树——worker 侧 rawNeedsSanitize 预筛后，干净 body 直接
 	// 落盘，含敏感键/图片才走完整脱敏（语义与旧的全量投影一致）。
-	// 非 JSON body 退化为字符串（此时 decode 必然 400，只为留证）。
+	// bodyValid 未经证实时按 json.Valid 判定：非法 body 退化为字符串
+	//（此时 decode 必然 400，只为留证）——RawMessage 的字面嵌入若
+	// 带非法字节，整个 01 投影会在 worker marshal 时塌成
+	// serialization_error，method/headers 一并陪葬。
 	var parsedBody any = json.RawMessage(body)
-	if !json.Valid(body) {
+	if !bodyValid && !json.Valid(body) {
 		parsedBody = string(body)
 	}
 	headers := map[string]string{
