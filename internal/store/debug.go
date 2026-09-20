@@ -174,15 +174,22 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 	// 删除路径由 RETURNING 直接汇总被删行——计数器只随提交成功的
 	// 真实变更走，回滚不记账。
 	var delta int64
-	// 非 IfAbsent 文件行的 LENGTH 预读发生在写事务内：BEGIN IMMEDIATE
-	// 自 BEGIN 持写锁，读之前没有快照可过期——本批是冲刷 tick 上最频的
-	// 多语句写事务。
 	err := writeTx(ctx, s.db.DB, "WriteDebugBatch", func(ctx context.Context, q dbtx) error {
+		nowMS := time.Now().UnixMilli()
+		// 非 IfAbsent 文件行的旧长度批首一条行值 IN 查询全量取回——
+		// 逐行 SELECT 曾是本事务最频的语句来源；BEGIN IMMEDIATE 自
+		// BEGIN 持写锁，批首快照与逐行读等价，批内先前行对同键的写入
+		// 由 oldLens 回写传递。
+		oldLens, err := fetchOldFileLens(ctx, q, batch.Files)
+		if err != nil {
+			return err
+		}
 		for _, f := range batch.Files {
+			key := [2]string{f.Dir, f.Name}
 			if f.IfAbsent {
 				res, err := q.ExecContext(ctx,
 					`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-					f.Dir, f.Name, f.Stored, f.Usize, time.Now().UnixMilli())
+					f.Dir, f.Name, f.Stored, f.Usize, nowMS)
 				if err != nil {
 					return err
 				}
@@ -190,21 +197,17 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 					return err
 				} else if n > 0 {
 					delta += int64(len(f.Stored))
+					oldLens[key] = int64(len(f.Stored))
 				}
 				continue
 			}
-			var old int64
-			if err := q.QueryRowContext(ctx,
-				`SELECT LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
-				f.Dir, f.Name).Scan(&old); err != nil && err != sql.ErrNoRows {
-				return err
-			}
 			if _, err := q.ExecContext(ctx,
 				`INSERT OR REPLACE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-				f.Dir, f.Name, f.Stored, f.Usize, time.Now().UnixMilli()); err != nil {
+				f.Dir, f.Name, f.Stored, f.Usize, nowMS); err != nil {
 				return err
 			}
-			delta += int64(len(f.Stored)) - old
+			delta += int64(len(f.Stored)) - oldLens[key]
+			oldLens[key] = int64(len(f.Stored))
 		}
 		for i, r := range batch.Chunks {
 			if _, err := q.ExecContext(ctx, appendChunkSQL, r.Dir, r.Name, storedChunks[i], chunkUsizes[i], r.Dir, r.Name); err != nil {
@@ -218,7 +221,7 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 		for _, b := range batch.Blobs {
 			res, err := q.ExecContext(ctx,
 				`INSERT OR IGNORE INTO debug_blobs(hash, content, usize, created_at) VALUES(?,?,?,?)`,
-				b.Hash, b.Stored, b.Usize, time.Now().UnixMilli())
+				b.Hash, b.Stored, b.Usize, nowMS)
 			if err != nil {
 				return err
 			}
@@ -272,6 +275,7 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 			cells := map[cellDim]*cellVals{}
 			errCells := map[errCellDim]int64{}
 			causes := map[laneCauseDim]int64{}
+			days := &dayCache{}
 			var maxID int64
 			for _, row := range batch.LogRows {
 				res, err := q.ExecContext(ctx, logsBatchInsertSQL, logInsertArgs(row)...)
@@ -289,8 +293,8 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 				if err != nil {
 					return err
 				}
-				addCellContrib(cells, errCells, row, id)
-				addCauseContrib(causes, row)
+				addCellContrib(cells, errCells, row, id, days)
+				addCauseContrib(causes, row, days)
 				if id > maxID {
 					maxID = id
 				}
@@ -314,6 +318,54 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 	}
 	s.debugBytes.Add(delta)
 	return nil
+}
+
+// fetchOldFileLens 用一条行值 IN 查询取回批内全部 OR REPLACE 文件行
+// 的旧库存长度（OR REPLACE 的 delta 记账用）——替代逐行 SELECT LENGTH。
+// 缺席行按零长计，与逐行读的 ErrNoRows 口径一致；IfAbsent 行不进查询
+// （它们的记账走 RowsAffected）。行值 IN 需 SQLite ≥3.15。
+func fetchOldFileLens(ctx context.Context, q dbtx, files []DebugFileRow) (map[[2]string]int64, error) {
+	lens := map[[2]string]int64{}
+	// SQLite 变量上限 32766：批行数副闸 16384 全装非 IfAbsent 文件行
+	// 时单条 VALUES 需 32768 个参数超限，按 8000 行分片留足余量。
+	for start := 0; start < len(files); start += 8000 {
+		var b strings.Builder
+		b.WriteString(`SELECT dir, name, LENGTH(content) FROM debug_files WHERE (dir, name) IN (VALUES `)
+		var args []any
+		for _, f := range files[start:min(start+8000, len(files))] {
+			if f.IfAbsent {
+				continue
+			}
+			if len(args) > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString("(?,?)")
+			args = append(args, f.Dir, f.Name)
+		}
+		if len(args) == 0 {
+			continue
+		}
+		b.WriteByte(')')
+		rows, err := q.QueryContext(ctx, b.String(), args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var dir, name string
+			var n int64
+			if err := rows.Scan(&dir, &name, &n); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			lens[[2]string{dir, name}] = n
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return lens, nil
 }
 
 // DebugFile 读一个文件的内容：先查 debug_files（整文件），miss 则按

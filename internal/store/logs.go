@@ -197,12 +197,13 @@ func (s *Store) InsertLog(ctx context.Context, e *LogRow) (int64, error) {
 		}
 		cells := map[cellDim]*cellVals{}
 		errCells := map[errCellDim]int64{}
-		addCellContrib(cells, errCells, e, id)
+		days := &dayCache{}
+		addCellContrib(cells, errCells, e, id, days)
 		if err := upsertCells(ctx, q, cells, errCells); err != nil {
 			return err
 		}
 		causes := map[laneCauseDim]int64{}
-		addCauseContrib(causes, e)
+		addCauseContrib(causes, e, days)
 		if err := upsertCauseCells(ctx, q, causes); err != nil {
 			return err
 		}

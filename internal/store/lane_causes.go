@@ -31,12 +31,12 @@ var laneCauseUpsertSQL = `INSERT INTO lane_attempt_causes(day, lane, cause, n) V
 	ON CONFLICT(day, lane, cause) DO UPDATE SET n = n + excluded.n`
 
 // addCauseContrib 把一条日志行的 SwitchCauses 累加进批内聚合器；day 取
-// 行 started_at 的本地日，与 cells 的 day 维度同一时区源（localtime）。
-func addCauseContrib(causes map[laneCauseDim]int64, e *LogRow) {
+// 行 started_at 的本地日（days 与 cells 的 day 维度共享同一批级缓存）。
+func addCauseContrib(causes map[laneCauseDim]int64, e *LogRow, days *dayCache) {
 	if len(e.SwitchCauses) == 0 {
 		return
 	}
-	day := e.StartedAt.Local().Format("2006-01-02")
+	day := days.dayOf(e.StartedAt)
 	for k, n := range e.SwitchCauses {
 		causes[laneCauseDim{day: day, lane: k.Lane, cause: k.Cause}] += int64(n)
 	}

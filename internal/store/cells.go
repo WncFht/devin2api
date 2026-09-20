@@ -393,10 +393,32 @@ func logCellVals(e *LogRow) cellVals {
 	return v
 }
 
+// dayCache 把「时刻→本地日串」的格式化摊到批级：批内行几乎总落在同一
+// 本地日，缓存以 [lo,hi) unix 秒区间命中；跨界时按 time.Date 重算界点
+// （AddDate 取次日界自动吸收 DST 的 23/25 小时日——不能 +86400）。
+// 与 strftime('%Y-%m-%d', time/1000, 'unixepoch', 'localtime') 同源。
+type dayCache struct {
+	lo, hi int64
+	day    string
+}
+
+// dayOf 返回 t 的本地日串（"2006-01-02"）。零值缓存首查必然装填。
+func (c *dayCache) dayOf(t time.Time) string {
+	if sec := t.Unix(); sec >= c.lo && sec < c.hi {
+		return c.day
+	}
+	lt := t.Local()
+	y, m, d := lt.Date()
+	start := time.Date(y, m, d, 0, 0, 0, 0, lt.Location())
+	c.lo, c.hi = start.Unix(), start.AddDate(0, 0, 1).Unix()
+	c.day = lt.Format("2006-01-02")
+	return c.day
+}
+
 // addCellContrib 把一条已入库日志行累加进批内聚合器；id 是该行实际
 // 分配到的自增主键（INSERT OR IGNORE 跳过的重复行不进这里——首个
 // 落库者已在它自己的事务里记过账）。source=='rejected' 的行被剔除。
-func addCellContrib(cells map[cellDim]*cellVals, errs map[errCellDim]int64, e *LogRow, id int64) {
+func addCellContrib(cells map[cellDim]*cellVals, errs map[errCellDim]int64, e *LogRow, id int64, days *dayCache) {
 	source := e.LogSource
 	if source == "" {
 		source = "proxy"
@@ -410,7 +432,7 @@ func addCellContrib(cells map[cellDim]*cellVals, errs map[errCellDim]int64, e *L
 		emodel = e.RequestedModel
 	}
 	slot := ms / 600000
-	dim := cellDim{slot: slot, day: e.StartedAt.Local().Format("2006-01-02"),
+	dim := cellDim{slot: slot, day: days.dayOf(e.StartedAt),
 		api: e.API, emodel: emodel, keyHash: e.KeyHash}
 	acc := cells[dim]
 	if acc == nil {
@@ -461,8 +483,18 @@ func addCellContrib(cells map[cellDim]*cellVals, errs map[errCellDim]int64, e *L
 	if ms < acc.minTime {
 		acc.minTime = ms
 	}
-	lastKey := fmt.Sprintf("%020d|%s", id, e.StartedAt.Format(time.RFC3339Nano))
-	if lastKey > acc.lastKey {
+	// last_key 的打包串镜像 SQL 的 printf('%020d',id)||'|'||started_at：
+	// 零填充定宽是字典序等价数值序的前提，栈缓冲 Append 替代 Sprintf。
+	var kb, lb [64]byte
+	dig := strconv.AppendInt(kb[:0], id, 10)
+	b := lb[:0]
+	for i := len(dig); i < 20; i++ {
+		b = append(b, '0')
+	}
+	b = append(b, dig...)
+	b = append(b, '|')
+	b = e.StartedAt.AppendFormat(b, time.RFC3339Nano)
+	if lastKey := string(b); lastKey > acc.lastKey {
 		acc.lastKey = lastKey
 	}
 	if e.ErrorStage != "" {
