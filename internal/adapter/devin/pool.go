@@ -1033,10 +1033,12 @@ func (lane *poolLane) noteFailure(err error) {
 	lane.lastFailureAt = time.Now()
 	lane.lastFailureCode = failure.Code
 	lane.lastFailureMessage = truncateRunes(failure.Message, 300)
-	if failure.LocalGate || (failure.Code == "" && !failure.RateLimited && !failure.UpstreamFault) {
-		// 本地侧失败不落债：本地闸门未触达上游；无码且非限流非上游
-		// 责任的失败同属本地故障（传输半截/投影异常），lane 的上游
-		// 可用性未被证伪——两类都只持久化 last_failure 证据、不动冷却账。
+	if failure.LocalGate || failure.Code == "not_found" ||
+		(failure.Code == "" && !failure.RateLimited && !failure.UpstreamFault) {
+		// 本地侧失败不落债：本地闸门未触达上游；not_found 是请求/
+		// 模型级裁决（死模型本地拒、上游资源缺席），lane 可用性未
+		// 被证伪；无码且非限流非上游责任的失败同属本地故障（传输
+		// 半截/投影异常）——都只持久化 last_failure 证据、不动冷却账。
 		lane.persistCooldownLocked()
 		return
 	}

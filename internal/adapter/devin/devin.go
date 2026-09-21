@@ -194,6 +194,14 @@ type Adapter struct {
 	// warnedAbsentModels 给「模型缺席目录」告警按 uid 去重：别名目标
 	// 是配置级事实，每进程警一次足够，不该按请求频率刷屏。
 	warnedAbsentModels sync.Map
+	// deadModels 是「目录缺席 + 上游 permission_denied」双实证登记的
+	// 死模型表：uid→解禁时刻。上游对死模型/未授权只回模糊的
+	// permission_denied，目录缺席是本地能拿到的唯一佐证——目录内
+	// 模型的同 code 多为内容策略拦截（sanitize 漏网指纹），登记会
+	// 连坐健康模型，一律不记。TTL 到期或目录重新收录即自动放行：
+	// 授权与目录快照会漂移，登记不是终身判决。与 modelsMu 同锁域——
+	// 登记与查验都必须对照目录快照一致读。
+	deadModels map[string]time.Time
 	// gate 是上游消息速率闸门：令牌桶主动限速 + 上游限流冷却闩。
 	// 每次 GetChatMessage 发送（含自愈/重开重试）前都要过闸。
 	gate *rateGate
@@ -788,7 +796,12 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		}
 	}
 	// 能力校验与缺席告警作用在解析后的真实 uid 上——router 条目自己的
-	// 目录能力位与最终承担请求的模型无关。
+	// 目录能力位与最终承担请求的模型无关。死模型查验先于缺席告警：
+	// 被判死的 uid 在登记时已警过一次，本地快败不再重复刷 warn。
+	if err := adapter.checkDeadModel(model); err != nil {
+		recorder.WriteError(debuglog.ErrStageModelDisabled, err)
+		return nil, err
+	}
 	adapter.warnIfModelAbsentFromCatalog(model)
 	if err := adapter.validateImagesForModel(request, model); err != nil {
 		// 本地校验拒绝在起源点记 request_build：错误继续冒泡会经
@@ -956,7 +969,10 @@ func (adapter *Adapter) newResponseStream(deps streamDeps) *responseStream {
 		recorder: runner.env.recorder,
 		gate:     adapter.gate,
 		warm:     adapter.warm,
-		warmKey:  runner.warmKey,
+		noteDenied: func(cause error) {
+			adapter.noteModelDenied(deps.model, cause)
+		},
+		warmKey: runner.warmKey,
 		deadlines: streamDeadlines{
 			postProgress: postProgressTimeout,
 			preProgress:  preProgressTimeout,
@@ -1217,6 +1233,18 @@ func (adapter *Adapter) catalogSupportsVideo(model string) (supported bool, know
 	return false, false
 }
 
+// modelInCatalogLocked 报告已加载目录是否包含该 uid；空目录（从未
+// 拉取成功）一律回 false——「缺席」在目录不可用时无从判定。
+// 调用方须持 modelsMu（读锁或写锁皆可）。
+func (adapter *Adapter) modelInCatalogLocked(model string) bool {
+	for _, m := range adapter.models {
+		if m.ID == model {
+			return true
+		}
+	}
+	return false
+}
+
 // warnIfModelAbsentFromCatalog 在目录已加载且目标 uid 缺席时记 Warn。
 // 实测 alias 指向死模型时上游只回模糊的 permission_denied: an internal
 // error occurred——排障只能靠日志里的这条提示定位到 alias 目标。
@@ -1224,13 +1252,8 @@ func (adapter *Adapter) catalogSupportsVideo(model string) (supported bool, know
 func (adapter *Adapter) warnIfModelAbsentFromCatalog(model string) {
 	adapter.modelsMu.RLock()
 	defer adapter.modelsMu.RUnlock()
-	if len(adapter.models) == 0 {
+	if len(adapter.models) == 0 || adapter.modelInCatalogLocked(model) {
 		return
-	}
-	for _, m := range adapter.models {
-		if m.ID == model {
-			return
-		}
 	}
 	// 缺席是配置级事实（别名目标或 client_version 问题），按 uid 每进程
 	// 警一次足够——别名改写后每个请求都路过这里，不去重会按请求频率刷屏。
@@ -1239,6 +1262,52 @@ func (adapter *Adapter) warnIfModelAbsentFromCatalog(model string) {
 	}
 	slog.Warn("model absent from upstream catalog; upstream will likely return a vague permission_denied",
 		"model", model, "hint", "check devin.aliases target or bump devin.client_version")
+}
+
+// deadModelTTL 是死模型登记的保鲜期：上游授权与目录快照都会漂移，
+// 到期后下一发请求重新交给上游裁决——标记只为省掉已被实证过的
+// 重复探针，不封死模型。
+const deadModelTTL = 30 * time.Minute
+
+// noteModelDenied 把一次上游语义拒绝记入死模型表：仅当拒绝是
+// permission_denied 且 uid 缺席已加载目录时登记——两类信号同现
+// 才坐实「本账号上没有这个模型」。建连期与流内两条失败路径都经
+// 这里上报；内容策略拒绝（目录内模型的同 code）进不来。
+func (adapter *Adapter) noteModelDenied(model string, err error) {
+	failure := llm.Classify(err)
+	if failure == nil || model == "" || failure.Code != "permission_denied" {
+		return
+	}
+	adapter.modelsMu.Lock()
+	defer adapter.modelsMu.Unlock()
+	if len(adapter.models) == 0 || adapter.modelInCatalogLocked(model) {
+		return
+	}
+	if adapter.deadModels == nil {
+		adapter.deadModels = make(map[string]time.Time)
+	}
+	until := time.Now().Add(deadModelTTL)
+	if _, marked := adapter.deadModels[model]; !marked {
+		slog.Warn("model marked dead: absent from catalog and denied upstream",
+			"model", model, "dead_until", until.Format(time.RFC3339))
+	}
+	adapter.deadModels[model] = until
+}
+
+// checkDeadModel 对已登记死模型做发送前本地拒绝：标记在保鲜期内且
+// 目录仍缺席时返回 not_found（HTTP 404，与注册表停用同一档），请求
+// 不过闸也不触达上游。not_found 是请求/模型级裁决而非 lane 故障——
+// 号池换号让兄弟 lane 各自仲裁（目录按账号而异），lane 冷却账不动。
+func (adapter *Adapter) checkDeadModel(model string) error {
+	adapter.modelsMu.RLock()
+	defer adapter.modelsMu.RUnlock()
+	until, marked := adapter.deadModels[model]
+	if !marked || time.Now().After(until) || adapter.modelInCatalogLocked(model) {
+		return nil
+	}
+	return &llm.Failure{Code: "not_found", Message: fmt.Sprintf(
+		"model %q is absent from the upstream catalog and was already denied upstream (permission_denied); refusing locally until %s",
+		model, until.Format(time.RFC3339))}
 }
 
 // ensureCatalog 尽力保证模型目录已加载：router 判定、图片能力位校验与
@@ -1783,6 +1852,10 @@ type responseStream struct {
 	// 无进度窗）与累计静默上限的锚点（首发起算、跨换流累计）。
 	// 纯值类型零 I/O 零锁，方法与语义见 streampolicy.go。
 	deadlines streamDeadlines
+	// noteDenied 把终局上游拒绝回报给死模型登记（Adapter.noteModelDenied
+	// 按本流的 wire uid 绑定）：流内 permission_denied 对「目录缺席 +
+	// 被拒」双实证同样是判据。nil 只在测试构造的裸流上出现。
+	noteDenied func(cause error)
 	// detachKey/registry/entry 是完成缓存挂接面：detachKey 是语义
 	// 请求哈希的惰性兑现（OnceValue 包 detachedRequestKey——并发
 	// 安全只求值一次，断开发生且准入位全过才付投影+marshal 账，
@@ -2196,7 +2269,12 @@ func (stream *responseStream) recordUpstreamFailure(cause error) {
 		return
 	}
 	// 限流结论与日志开关无关：上游报了 resource_exhausted 就上闩。
+	// permission_denied 同时喂死模型登记——目录缺席佐证下它就是
+	// 「本账号没有这个模型」的裁决。
 	stream.gate.noteUpstreamError(cause)
+	if stream.noteDenied != nil {
+		stream.noteDenied(cause)
+	}
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		return
 	}

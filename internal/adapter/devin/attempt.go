@@ -214,6 +214,7 @@ func (r *attemptRunner) send(ctx context.Context, protoRequest *devinproto.GetCh
 			break
 		}
 	}
+	r.adapter.noteModelDenied(r.binding.Model, lastErr)
 	r.adapter.gate.noteUpstreamError(lastErr)
 	return nil, lastErr
 }
