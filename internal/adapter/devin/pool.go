@@ -889,9 +889,10 @@ type laneVerdict struct {
 }
 
 // verdict 对 lane 做一次完整健康评估：降级原因按固定序叠加
-// （auth_cooldown → generic_cooldown → gate_latched → gate_window_deadzone
-// → gate_window_full → quota_low——闸门侧三词由 admissionVerdict 整段
-// 带回，池侧只叠自己的冷却与配额低），调用方各取所需（排序取 bucket、
+// （auth_cooldown → generic_cooldown → gate_latched|gate_probing →
+// gate_window_deadzone → gate_window_full → quota_low——闸门侧词由
+// admissionVerdict 整段带回，池侧只叠自己的冷却与配额低），调用方
+// 各取所需（排序取 bucket、
 // 审计取 reasons、healthy() 取 healthy、权重取 expectedWait）。class
 // 决定闸门期望排队按哪条准入轨估计；healthy()/state() 等只关心健康面
 // 的调用方传 fg（默认视图——健康判定本身与类无关，expectedWait 才分轨）。

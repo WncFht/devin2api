@@ -677,7 +677,10 @@ function renderRuntimeMetricTable(headers, rowsHtml) {
 function renderGateExtra(stats) {
   let html = '';
   if (stats.latched) {
-    html += `<div class="custom-rules-error" role="alert">${escapeHtml(t('settings.runtimeMetrics.gateLatchedBanner', { until: formatRuntimeISOTime(stats.limited_until) }))}</div>`;
+    const banner = stats.probing
+      ? t('settings.runtimeMetrics.gateProbingBanner')
+      : t('settings.runtimeMetrics.gateLatchedBanner', { until: formatRuntimeISOTime(stats.limited_until) });
+    html += `<div class="custom-rules-error" role="alert">${escapeHtml(banner)}</div>`;
   }
   const events = Array.isArray(stats.events) ? stats.events.slice(0, 20) : [];
   if (!events.length) return html;

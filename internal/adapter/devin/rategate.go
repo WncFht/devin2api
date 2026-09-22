@@ -28,8 +28,9 @@ const (
 	// gateDefaultBgMaxHold 是 bg 类请求的排队预算：无人值守负载等得
 	// 起，给到两个窗口的长度让批跑宁可排队也不快败空转。
 	gateDefaultBgMaxHold = 120 * time.Second
-	// gateDefaultDripInterval 是冷却闩内放行探针的间隔：上游限流按
-	// 分钟桶计数，闩内到达速率压到秒级一条即可探出解闩又不续债。
+	// gateDefaultDripInterval 是冷却闩探测段放行探针的间隔：冻结段
+	// 零发送，声明截止到达后每个间隔放一枚探针直到成功帧解闩——
+	// 间隔即边际态下唯一的上游到达速率，压住节奏不续债。
 	gateDefaultDripInterval = 8 * time.Second
 	// gateDefaultLatch 是上游 resource_exhausted 未携带 reset hint 时的
 	// 兜底闩时长（对齐同类网关 60s 冷却默认值）。
@@ -64,6 +65,18 @@ const (
 	throttleAlpha = 0.1
 )
 
+// resendLatchHold 是在飞流续试重发（retry=true）等待闸门放行（冷却闩
+// 或配额）的总预算上限：闩/配额拒绝对在飞流是死刑——流内错误事件对
+// 客户端不可重试，而睡到闩末/下一探针槽对上游预算零消耗（睡醒后它
+// 就是合规探针）。取值覆盖实测 hint 爬坡的中段（3→5→11min 档），更
+// 深的饱和冻结（~24min+）超预算仍按拒绝收尾。var 供测试缩短。
+var resendLatchHold = 10 * time.Minute
+
+// resendLatchRecheck 是续试重发等闩睡眠的重查节拍：闩可被本 lane 在
+// 飞流的成功帧提前解除（noteUpstreamSuccess 清 limitedUntil），睡到
+// 闩末会白等一轮。var 供测试缩短。
+var resendLatchRecheck = gateBgRecheck
+
 // 闸门拒绝的 X-Gate-Reason 取值：latch 是冷却闩快败（Retry-After
 // 报闩剩余）；quota 是排队预算类拒绝（桶满/死区睡到下一窗口将超
 // 预算，或 bg 预留/爬坡让路，Retry-After 一律报下一窗口）；yield
@@ -93,14 +106,21 @@ const (
 //     只增加本地延迟。窗口配额耗尽或落在死区内的请求睡到下一窗口
 //     开放；累计等待将超 maxHold 的直接本地 429 + Retry-After 快败。
 //  2. 冷却闩：上游 resource_exhausted 声明「reset in N」时上闩到
-//     该时刻（分钟 hint 向上对齐到 :59 桶界）。上游限流器实测按
-//     分钟桶计数且把被拒尝试也计入，闩内若整队睡到恢复时刻再齐射，
-//     边际态下必然重触并把 1 分钟小限流续成十几分钟自封（实测每次
-//     到期齐射 ~20 条、5/5 次重触）。因此闩内不排队：按滴灌间隔
-//     放探针，其余请求立即 429 + Retry-After=闩剩余快败，客户端
-//     睡到恢复时刻再来；任一上游成功帧即提前解闩（边际态下拒绝
-//     是概率执行，成功帧是窗口已过的证据）。探针同样只在可发区间
-//     内放行并计入本桶配额——探针也是真实上游发送。
+//     该时刻（分钟 hint 向上对齐到 :59 桶界）。闩分两段，由派生
+//     谓词区分（limitedUntil 非零即闩态，now 越过截止即探测段），
+//     不设独立标志位：
+//     - 冻结段（now < limitedUntil）：一律 429 + Retry-After=
+//     闩剩余快败，不排队不放探针——上游把被拒尝试也计入窗口
+//     余额，且实测闩内违规会叠加惩罚时长（hint 近几何爬坡
+//     3→5→11→24min），冻结段每一发都在给上游续债；
+//     - 探测段（now >= limitedUntil）：按滴灌间隔放行单发探针，
+//     其余请求仍快败（Retry-After=下一探针槽，客户端重试自然
+//     串行成滴灌节奏）。探针被拒且声明新截止时按新截止再冻结；
+//     hint=0/缺席维持探测段——边际态下拒绝是概率执行，探不到
+//     新截止不该把闩自我续长。任一上游成功帧即解闩。
+//     探针只在可发区间放行并计入本桶配额——探针也是真实上游发送。
+//     探测段持续零判决（无探针发出也无拒绝回包，lane 已空闲）超
+//     空闲阈值后闩自然失效，陈旧闩不无限挂账。
 //     上游规则推导见 docs/upstream-rate-limit.md。
 type rateGate struct {
 	mu           sync.Mutex
@@ -111,13 +131,17 @@ type rateGate struct {
 	bucketUsed   int           // 本桶已放行数（含滴灌探针，与上游「被拒也计数」口径一致）
 	bucketUsedFg int           // 本桶 fg 放行数（bucketUsed 的类别分列）
 	bucketUsedBg int           // 本桶 bg 放行数（含保温 ping——ping 视同最低优先级背景流量）
-	limitedUntil time.Time     // 冷却闩截止时刻；零值表示未上闩
-	nextDrip     time.Time     // 闩内下一个探针放行时刻
-	maxHold      time.Duration
-	bgMaxHold    time.Duration // bg 请求的排队预算（fg 用 maxHold）
-	bgMargin     int           // bg 预留公式的固定安全边际
-	dripInterval time.Duration
-	defaultLatch time.Duration
+	limitedUntil time.Time     // 冷却闩声明的截止时刻；零值未上闩。now 越过它后闩转入探测段（派生谓词）——探针按 nextDrip 槽位放行直到成功帧解闩或空闲失效
+	nextDrip     time.Time     // 探测段下一个探针放行时刻；上闩/延闩时取新截止——首枚探针在到期瞬间开放
+	// lastLatchTouch 是闩态最近一次闸门侧活动（探针放行或上游拒绝
+	// 回包）的时刻：探测段的空闲失效按它起算——探针与判决仍在流动
+	// 时闩不失效，lane 彻底空闲后陈旧闩自然闭环。
+	lastLatchTouch time.Time
+	maxHold        time.Duration
+	bgMaxHold      time.Duration // bg 请求的排队预算（fg 用 maxHold）
+	bgMargin       int           // bg 预留公式的固定安全边际
+	dripInterval   time.Duration
+	defaultLatch   time.Duration
 	// fgWindow/fgRateEMA 是 fg 需求估计：每窗口 fg 准入数的指数滑动
 	// 平均（条/窗），在桶翻页时折叠。bg 预留量用它外推本桶剩余时间
 	// 内 fg 还会来多少——估高让 bg 少吃，估低退化成 margin 静态预留。
@@ -152,7 +176,7 @@ type rateGate struct {
 	winRejectBgReserve int // bg 让路快败（预留/爬坡）
 	winRejectLatch     int // 闩内快败
 	winRejectYield     int // 让位快败（兄弟有余量提前放给 failover）
-	winDrip            int // 闩内滴灌探针放行数
+	winDrip            int // 闩探测段探针放行数
 	winRetryAdmits     int // 续试重发放行数（used_* 的子集——同请求 reopen/续轮/瞬时重试的再发送）
 	winUsedBgPing      int // 保温 ping 放行数（used_bg 的子集——used_bg 减本列即真实 bg 需求）
 	winReservePeak     int // 本窗 bg 预留量峰值（reserve 每次评估取样）
@@ -338,12 +362,19 @@ func (gate *rateGate) pushEvent(kind string, until time.Time, detail string) {
 	gate.events.push(ev)
 }
 
-// expireIfDue 把到期的闩自然失效化：补 expired 事件并清闩——闩到期
-// 不是解闩（没有成功帧证据），但截止已过，内存态与持久行都该闭环。
-// 调用方须持 mu。wait 路径每个请求检查一次，stats 轮询兜底——无流量
-// 时闩到期也能在事件环与快照里及时反映。
+// expireIfDue 结算探测段的空闲闩：闩不在 now 越过声明截止时失效——
+// 那一刻起转入探测段（探针槽位放行、其余请求仍快败），闩记录保持到
+// 成功帧解闩。只有探测段持续零判决（无探针发出也无拒绝回包，lane
+// 已空闲）超阈值才把闩自然失效，避免陈旧闩在面板与准入裁决上无限
+// 挂账。冻结段永不走本路径。调用方须持 mu。wait 路径每个请求检查
+// 一次，stats 轮询兜底——无流量时闩也能在事件环与快照里闭环。
 func (gate *rateGate) expireIfDue(now time.Time) {
 	if gate.limitedUntil.IsZero() || now.Before(gate.limitedUntil) {
+		return
+	}
+	// 空闲阈值取 3 个探针间隔与 2min 的较大者：正常探测期探针/判决
+	// 按 dripInterval 节奏刷新 lastLatchTouch，不会误触失效。
+	if now.Sub(gate.lastLatchTouch) < max(3*gate.dripInterval, 2*time.Minute) {
 		return
 	}
 	gate.pushEvent(gateEventExpired, gate.limitedUntil, "")
@@ -353,15 +384,18 @@ func (gate *rateGate) expireIfDue(now time.Time) {
 }
 
 // gateState 是冷却闩的持久化形态（runtime_state 的值 JSON）；只存
-// 截止时刻——滴灌时钟与窗口计数刻意不存（重启新窗口重新计数是想要的，
-// 闩内节奏按 dripInterval 重排即可）。
+// 截止时刻——探针槽位与窗口计数刻意不存（重启新窗口重新计数是想要的，
+// 探测节奏按 dripInterval 重排即可）。
 type gateState struct {
 	LimitedUntil time.Time `json:"limited_until"`
 }
 
 // GateStats 是闸门状态快照，面板 /admin/runtime-metrics 的 gate 段透出。
 type GateStats struct {
-	Latched          bool       `json:"latched"`
+	Latched bool `json:"latched"`
+	// Probing 标记闩处于探测段：声明截止已过、探针槽放行中、尚未见
+	// 成功帧——Latched 全程为真，两者差分出冻结段。
+	Probing          bool       `json:"probing"`
 	LimitedUntil     *time.Time `json:"limited_until,omitempty"`
 	LatchCount       int        `json:"latch_count"`
 	DripCount        int        `json:"drip_count"`
@@ -434,7 +468,7 @@ type GateConfig struct {
 	// （条/分钟）；<=0 不做主动限速。上游限流冷却闩不受此项影响，始终生效。
 	MaxRPM int
 	// MaxHold/DripInterval/DefaultLatch 是冷却闩参数：
-	// 闩外排队允许的最长等待、闩内滴灌探针的放行间隔、上游未带
+	// 闩外排队允许的最长等待、探测段探针的放行间隔、上游未带
 	// reset hint 时的兜底闩时长。
 	MaxHold      time.Duration
 	DripInterval time.Duration
@@ -738,7 +772,8 @@ func (gate *rateGate) bgAllowance(now, ws time.Time, reserve int) int {
 	return int(math.Ceil(float64(rampCap) * now.Sub(ws).Seconds() / gate.usable.Seconds()))
 }
 
-// restoreState 在启动时恢复未过期的冷却闩：滴灌时钟按间隔重排。
+// restoreState 在启动时恢复未过期的冷却闩：首枚探针槽取声明截止
+// （冻结段零发送），空闲时钟从恢复时刻起算。
 // 行缺失/损坏/已过期都按无闩处理并顺手清掉残留行。
 func (gate *rateGate) restoreState() {
 	if gate.states == nil || gate.stateKey == "" {
@@ -758,7 +793,8 @@ func (gate *rateGate) restoreState() {
 		return
 	}
 	gate.limitedUntil = state.LimitedUntil
-	gate.nextDrip = gate.now().Add(gate.dripInterval)
+	gate.nextDrip = state.LimitedUntil
+	gate.lastLatchTouch = gate.now()
 	gate.pushEvent(gateEventRestored, state.LimitedUntil, "")
 	slog.Warn("rate gate latch restored from persisted state", "until", state.LimitedUntil.Format(time.RFC3339))
 }
@@ -793,7 +829,8 @@ func (gate *rateGate) stats() GateStats {
 	ws := gate.windowStart(now)
 	gate.rollBucket(ws)
 	stats := GateStats{
-		Latched:          !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil),
+		Latched:          !gate.limitedUntil.IsZero(),
+		Probing:          !gate.limitedUntil.IsZero() && !now.Before(gate.limitedUntil),
 		LatchCount:       gate.latchCount,
 		DripCount:        gate.dripCount,
 		RejectLatched:    gate.rejectLatched,
@@ -966,12 +1003,19 @@ func (gate *rateGate) admissionVerdict(class string) gateAdmissionVerdict {
 		used = 0
 	}
 	sendable := now.Sub(ws) < gate.usable
-	latched := !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil)
+	latched := !gate.limitedUntil.IsZero()
+	probing := latched && !now.Before(gate.limitedUntil)
 	deadzone := gate.quota > 0 && !sendable
 	saturated := gate.quota > 0 && used >= gate.quota
 	var v gateAdmissionVerdict
 	if latched {
-		v.Reasons = append(v.Reasons, "gate_latched")
+		// 探测段与冻结段分词：冻结是睡到声明截止的整段停发，探测
+		// 是截止已过的单发探路——选号审计据词区分闩的两段形态。
+		if probing {
+			v.Reasons = append(v.Reasons, "gate_probing")
+		} else {
+			v.Reasons = append(v.Reasons, "gate_latched")
+		}
 	}
 	if deadzone {
 		v.Reasons = append(v.Reasons, "gate_window_deadzone")
@@ -990,7 +1034,8 @@ func (gate *rateGate) admissionVerdict(class string) gateAdmissionVerdict {
 // 并行放行余量的前队上：配额按整窗重置、开窗有槽即并行放行，实测
 // waiters≤room 时开窗瞬间全队齐进（~0.2s），整队串行折算会高估
 // ~waiters/quota×60s：
-//   - 闩内 → 闩剩余：快败语义下不会真排，但选号视角它等价「这段时间
+//   - 闩内 → 冻结段报闩剩余、探测段报下一探针槽（桶不可发时至少到
+//     下窗开放）：快败语义下不会真排，但选号视角它等价「这段时间
 //     不可用」；
 //   - 死区或桶满 → 到下一窗口开放；fg 前队只把超出整窗配额的部分按
 //     窗速率折算追加，bg 开窗额度从 ~0 重新爬坡、没有并行齐射，前队
@@ -1004,8 +1049,17 @@ func (gate *rateGate) admissionVerdict(class string) gateAdmissionVerdict {
 //
 // 调用方须持 mu。
 func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used int, sendable bool) time.Duration {
-	if now.Before(gate.limitedUntil) {
-		return gate.limitedUntil.Sub(now)
+	if !gate.limitedUntil.IsZero() {
+		if now.Before(gate.limitedUntil) {
+			return gate.limitedUntil.Sub(now)
+		}
+		// 探测段：下一探针槽即最早放行时刻；死区内探针不落地，
+		// 至少等到下一窗口开放。
+		wait := max(gate.nextDrip.Sub(now), 0)
+		if !sendable {
+			wait = max(wait, ws.Add(windowPeriod).Sub(now))
+		}
+		return wait
 	}
 	if gate.quota <= 0 {
 		return 0
@@ -1108,10 +1162,10 @@ func latchRanges(evs []GateEvent, limitedUntil, now time.Time) []GateLatchRange 
 }
 
 // wait 阻塞到本次上游发送拿到许可，或判定不值得等：
-//   - 闩内：滴灌槽空闲且在可发区间内立即放行（该请求即探针，计入
-//     本桶配额）；否则直接返回闸门拒绝（*llm.Failure，LocalGate），
-//     retryAfter 报闩剩余——客户端睡到恢复时刻重试比按槽位节奏轮询
-//     更省重试预算；
+//   - 闩态：冻结段（截止前）一律快败，retryAfter 报闩剩余——客户
+//     端睡到声明截止再来；探测段（截止后）探针槽空闲且在可发区间
+//     内放行单发（该请求即探针，计入本桶配额），其余快败且
+//     retryAfter 报下一探针槽——客户端重试自然串行成滴灌节奏；
 //   - 闩外 fg：可发区间内配额未满立即放行；配额耗尽或在死区内睡到
 //     下一窗口开放，预计等待超出剩余预算（累计上限 maxHold）同样
 //     返回闸门拒绝；
@@ -1178,13 +1232,19 @@ func (gate *rateGate) wait(ctx context.Context, env attemptEnv, retry bool) (err
 		}
 		now := gate.now()
 		if deadline.IsZero() {
+			hold := gate.maxHold
 			if bg {
-				deadline = now.Add(gate.bgMaxHold)
-			} else {
-				deadline = now.Add(gate.maxHold)
+				hold = gate.bgMaxHold
 			}
+			// 续试重发的等待预算单独放宽：闸门拒绝对在飞流是死刑
+			// （流内错误对客户端不可重试），等闩/等配额期间上游零消耗。
+			if retry && hold < resendLatchHold {
+				hold = resendLatchHold
+			}
+			deadline = now.Add(hold)
 		}
-		// 闩到期是自然失效而非解闩（没有成功帧证据）。
+		// 闩不在声明截止时自然失效——越过截止转入探测段；只有探测段
+		// 持续零判决超空闲阈值才过期闭环。
 		gate.expireIfDue(now)
 		ws := gate.windowStart(now)
 		gate.rollBucket(ws)
@@ -1192,24 +1252,73 @@ func (gate *rateGate) wait(ctx context.Context, env attemptEnv, retry bool) (err
 		if est < 0 {
 			est = gate.expectedWaitLocked(class, now, ws, gate.bucketUsed, sendable)
 		}
-		if now.Before(gate.limitedUntil) {
-			if sendable && !now.Before(gate.nextDrip) {
-				// 探针槽空闲且在可发区间：放行并推进下一个槽。死区内
-				// 不放探针——桶界附近的探针可能落进相邻真实桶白送计数。
+		if !gate.limitedUntil.IsZero() {
+			frozen := now.Before(gate.limitedUntil)
+			if !frozen && sendable && !now.Before(gate.nextDrip) {
+				// 探测段探针槽开放且在可发区间：放行单发探针并推进
+				// 下一个槽。死区内不放探针——桶界附近的发送可能落进
+				// 相邻真实桶白送计数。
 				gate.nextDrip = now.Add(gate.dripInterval)
 				gate.dripCount++
 				gate.winDrip++
+				gate.lastLatchTouch = now
 				gate.admitLocked(class, gc, now, ws, entered, retry)
 				gate.mu.Unlock()
 				return nil
 			}
-			retryAfter := gate.limitedUntil.Sub(now)
+			var retryAfter time.Duration
+			if frozen {
+				// 冻结段零发送：上游把被拒尝试也计入窗口余额且违规
+				// 叠加惩罚时长，闩内每一发都在续债——客户端睡到声明
+				// 截止再来。
+				retryAfter = gate.limitedUntil.Sub(now)
+			} else {
+				// 探测段非探针请求快败：报下一探针槽，客户端按此重试
+				// 自然串行成滴灌节奏；死区内至少睡到下一窗口开放。
+				retryAfter = max(gate.nextDrip.Sub(now), 0)
+				if !sendable {
+					retryAfter = max(retryAfter, ws.Add(windowPeriod).Sub(now))
+				}
+			}
+			// 在飞流的续试重发等闩而不是撞闩：拒绝等于当场杀死这条
+			// 流（客户端对流内错误不可重试），等闩期间上游零消耗。
+			// 睡眠按 resendLatchRecheck 封顶成重查节拍——在飞流的成
+			// 功帧会提前解闩，睡到闩末白等一轮；睡醒重评后冻结延续
+			// 就接着睡，进入探测段则排队等下一探针槽。等待总预算由
+			// deadline（resendLatchHold）封顶，超了照常快败。
+			if retry && retryAfter > 0 && !now.Add(retryAfter).After(deadline) {
+				if bg {
+					gate.waitersBg++
+				} else {
+					gate.waitersFg++
+				}
+				gate.winWaitersPeak = max(gate.winWaitersPeak, gate.waitersFg+gate.waitersBg)
+				sleeping = true
+				blocked = true
+				gate.mu.Unlock()
+				timer := time.NewTimer(min(retryAfter, resendLatchRecheck))
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					gate.mu.Lock()
+					if bg {
+						gate.waitersBg--
+					} else {
+						gate.waitersFg--
+					}
+					gate.mu.Unlock()
+					return context.Cause(ctx)
+				case <-timer.C:
+				}
+				continue
+			}
 			gate.rejectLatched++
 			gate.winRejectLatch++
 			gate.mu.Unlock()
 			rej := gateRejection(retryAfter, gateReasonLatch)
-			// 闩内期望排队即闩剩余（expectedWaitLocked 闩分支同值）——
-			// 本侧探针量随拒绝行落账，让位审计能复现当次评估现场。
+			// 闩态期望排队即闩剩余/探针槽（expectedWaitLocked 闩分支
+			// 同值）——本侧探针量随拒绝行落账，让位审计能复现当次
+			// 评估现场。
 			rej.GateProbeMS = retryAfter.Milliseconds()
 			return rej
 		}
@@ -1269,7 +1378,10 @@ func (gate *rateGate) wait(ctx context.Context, env attemptEnv, retry bool) (err
 		// siblingEW 是本次评估让位判定咨询到的兄弟最小期望排队；未咨询
 		//（无谓词或探针未达阈值）保持零值，拒绝行按零值缺席。
 		var siblingEW time.Duration
-		if probeWait > gateEarlyRelease && yield != nil {
+		// 续试重发不参与让位：yield 快败是交给号池 failover 的信号，
+		// 但在飞流的重发没有可接管的换 lane 路径（上游会话按账号），
+		// 被拒就是杀流——只能排队等本 lane 放行。
+		if probeWait > gateEarlyRelease && yield != nil && !retry {
 			gate.mu.Unlock()
 			var free bool
 			siblingEW, free = yield()
@@ -1402,7 +1514,7 @@ func (gate *rateGate) noteVerdict(gc *adapter.GateContext, class string, now, ws
 }
 
 // tryAdmit 给后台流量（前缀保温 ping）一条不排队、不偷槽的准入路径：
-// 闩内一律拒绝（不占滴灌探针槽——冷却期恰是最不该打上游的时刻）；
+// 闩态一律拒绝（不占探针槽——冷却与探路期恰是最不该打上游的时刻）；
 // 闩外可发区间内按 wait 的 bg 准入同一上界放行并计入 bg 桶计数——
 // 桶位不越过 quota-reserve（fg 预留槽 ping 不占），bg 计数不越过
 // 爬坡释放额度（同拍到期的多条目也不能齐射穿坡）。ping 不要求
@@ -1424,7 +1536,7 @@ func (gate *rateGate) tryAdmit() (bool, string) {
 	// 计数桶随窗口边界滚动，与 wait 同一本账。
 	ws := gate.windowStart(now)
 	gate.rollBucket(ws)
-	if now.Before(gate.limitedUntil) {
+	if !gate.limitedUntil.IsZero() {
 		return false, gateReasonLatch
 	}
 	if gate.quota <= 0 {
@@ -1451,9 +1563,11 @@ func (gate *rateGate) tryAdmit() (bool, string) {
 }
 
 // noteUpstreamError 用上游失败刷新冷却闩；只有 resource_exhausted 与
-// 限流有关，其余错误原样忽略。闩只延长不提前；只有闩被延长时才重置
-// 滴灌时钟——截止未变的重复拒绝说明窗口未过，原探测节奏仍然成立，
-// 重排滴灌只会无谓推迟下一枚探针。
+// 限流有关，其余错误原样忽略。闩分两阶段处理延长判定：冻结段
+// （now < limitedUntil）只延长不提前；探测段（now >= limitedUntil）
+// 里只有声明了新截止的拒绝才再冻结——hint=0（until≈now）或更短的
+// 重复拒绝维持探测节奏，不重置探针槽也不刷事件环。延闩把首枚探针
+// 槽改到新截止——冻结段零发送。
 func (gate *rateGate) noteUpstreamError(err error) {
 	failure := llm.Classify(err)
 	// 本地闸门自己的拒绝（LocalGate）不带上游证据：既不上闩也不入
@@ -1485,15 +1599,24 @@ func (gate *rateGate) noteUpstreamError(err error) {
 	if until.IsZero() {
 		until = now.Add(gate.defaultLatch)
 	}
-	extended := until.After(gate.limitedUntil)
+	gate.lastLatchTouch = now // 上游判决到达即刷新探测段空闲时钟
 	remaining := gate.limitedUntil.Sub(now)
+	probing := !gate.limitedUntil.IsZero() && !now.Before(gate.limitedUntil)
+	var extended bool
+	if probing {
+		// 探测段里只有声明了新截止的拒绝才再冻结。
+		extended = until.After(now)
+	} else {
+		extended = until.After(gate.limitedUntil)
+	}
 	if extended {
 		gate.limitedUntil = until
-		gate.nextDrip = now.Add(gate.dripInterval)
+		gate.nextDrip = until
 		gate.latchCount++
-		// 闩中再触记 extended——原闩未到期就被刷新截止，与新闩区分开。
+		// 闩中再触记 extended——原闩未解就被刷新截止（冻结段延闩或
+		// 探测段再冻结），与新闩区分开。
 		detail := ""
-		if remaining > 0 {
+		if remaining > 0 || probing {
 			detail = "extended"
 		}
 		gate.pushEvent(gateEventLatched, until, detail)
@@ -1503,19 +1626,25 @@ func (gate *rateGate) noteUpstreamError(err error) {
 		// 让 FIFO 序承接锁序，乱序在写协程侧天然不可能。
 		gate.persistState(until)
 	}
+	nextProbeIn := max(gate.nextDrip.Sub(now), 0)
 	gate.mu.Unlock()
-	if extended {
-		slog.Warn("upstream message rate limited; drip-latching new requests", "until", until.Format(time.RFC3339), "latch", until.Sub(now))
-	} else {
+	switch {
+	case extended && probing:
+		slog.Warn("upstream message rate limited while probing; re-freezing gate", "until", until.Format(time.RFC3339), "latch", until.Sub(now))
+	case extended:
+		slog.Warn("upstream message rate limited; freezing new requests until hinted reset", "until", until.Format(time.RFC3339), "latch", until.Sub(now))
+	case probing:
+		slog.Info("upstream message rate limited while probing", "next_probe_in", nextProbeIn)
+	default:
 		slog.Info("upstream message rate limited while latched", "remaining", remaining)
 	}
 }
 
 // noteUpstreamSuccess 用任一上游数据帧解除冷却闩：收到数据帧说明该次
-// 发送已越过上游准入（边际态下拒绝是概率执行），继续闩到声明时刻只会
-// 浪费滴灌窗口。若该次发送随后以限流错误收尾，noteUpstreamError 会重新
+// 发送已越过上游准入（边际态下拒绝是概率执行），探测段继续闩着只会
+// 浪费探针节奏。若该次发送随后以限流错误收尾，noteUpstreamError 会重新
 // 上闩——两段判定间存在亚毫秒解闩窗，至多漏放一枚等待中的请求，代价
-// 与一枚滴灌探针同价，可接受。解闩后放行仍受窗口配额约束——剩余配额
+// 与一枚探针同价，可接受。解闩后放行仍受窗口配额约束——剩余配额
 // 是窗口内齐射的天然上限。
 func (gate *rateGate) noteUpstreamSuccess() {
 	gate.mu.Lock()

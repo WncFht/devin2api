@@ -214,7 +214,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		// ---- 速率闸门 ----
 		d("devin_max_rpm", "int", "每个对齐分钟窗口发往上游的消息配额（devin.max_rpm，条/分钟）；<=0 不做窗口限速"),
 		d("gate_max_hold_seconds", "int", "闩外排队最长等待秒数，超时快速失败 429+Retry-After（devin.gate_max_hold_seconds）；<=0 默认 30"),
-		d("gate_drip_interval_seconds", "int", "冷却闩内放行探针的间隔秒数（devin.gate_drip_interval_seconds）；<=0 默认 8"),
+		d("gate_drip_interval_seconds", "int", "冷却闩探测段放行探针的间隔秒数（devin.gate_drip_interval_seconds）；冻结段零发送，截止后按此节奏探路；<=0 默认 8"),
 		d("gate_default_latch_seconds", "int", "上游限流未带 reset hint 时的兜底闩秒数（devin.gate_default_latch_seconds）；<=0 默认 60"),
 		d("gate_window_offset_seconds", "int", "上游分钟桶界在本地分钟内的估计位置（devin.gate_window_offset_seconds，第几秒）；负值按 mod 60 折算（-1=:59），默认 0"),
 		d("gate_window_guard_seconds", "int", "桶界两侧停发死区秒数（devin.gate_window_guard_seconds）；<=0 或 >=30 默认 2"),

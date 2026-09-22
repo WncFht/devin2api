@@ -83,20 +83,27 @@ func TestRateGateLatchFastFails(t *testing.T) {
 	}
 }
 
-// 闩内按滴灌间隔放行探针：槽空闲 → 放行；槽被占 → 快败。
-// 探针是限流期间唯一到达上游的请求，负责探出解闩又不给上游续债。
+// 闩分两段：冻结段（声明截止前）零发送一律快败——上游把被拒尝试也
+// 计入且闩内违规叠加惩罚，截止前每发都在续债；探测段（截止后）按滴灌
+// 间隔放行单发探针，槽被占回到快败。探针是限流期间唯一到达上游的
+// 请求，负责探出解闩又不给上游续债。
 func TestRateGateDripReleasesProbes(t *testing.T) {
 	gate := newRateGate(GateConfig{DripInterval: 50 * time.Millisecond}, nil, "")
 	clock := pinGateClock(gate, 10) // 可发区间内
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
-	// 第一个槽在上闩后 dripInterval 才开放，先到请求快败。
+	// 冻结段：不论距上闩多久，截止前一律快败。
 	var gateErr *llm.Failure
 	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
-		t.Fatalf("first wait error = %v, want local-gate *llm.Failure (slot not open yet)", err)
+		t.Fatalf("frozen wait error = %v, want local-gate *llm.Failure", err)
 	}
 	clock.t = clock.t.Add(60 * time.Millisecond)
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
+		t.Fatalf("frozen wait error = %v, want *llm.Failure (no probe before deadline)", err)
+	}
+	// 探测段：截止已过，首个探针槽立即开放。
+	clock.t = clock.t.Add(30 * time.Second)
 	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
-		t.Fatalf("drip-slot wait error = %v, want probe release", err)
+		t.Fatalf("probe-slot wait error = %v, want probe release", err)
 	}
 	// 槽已被取走，紧随其后的请求回到快败。
 	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
@@ -104,22 +111,22 @@ func TestRateGateDripReleasesProbes(t *testing.T) {
 	}
 	clock.t = clock.t.Add(60 * time.Millisecond)
 	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
-		t.Fatalf("next drip-slot wait error = %v, want probe release", err)
+		t.Fatalf("next probe-slot wait error = %v, want probe release", err)
 	}
 }
 
-// 死区内不放探针：滴灌槽空着但落在桶界死区时照样快败——桶界附近的
+// 死区内不放探针：探测段槽空着但落在桶界死区时照样快败——桶界附近的
 // 发送可能落进相邻真实上游桶白送计数。
 func TestRateGateDripRespectsDeadZone(t *testing.T) {
 	gate := newRateGate(GateConfig{DripInterval: time.Millisecond}, nil, "")
 	clock := pinGateClock(gate, 10)
-	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 60 seconds."))
-	clock.t = clock.t.Add(48 * time.Second) // :58，闩内且进死区，槽已开
+	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
+	clock.t = clock.t.Add(49 * time.Second) // :59，已过截止进探测段，但在死区
 	var gateErr *llm.Failure
 	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
-		t.Fatalf("dead-zone wait error = %v, want *llm.Failure (no drip in dead zone)", err)
+		t.Fatalf("dead-zone wait error = %v, want *llm.Failure (no probe in dead zone)", err)
 	}
-	clock.t = clock.t.Add(5 * time.Second) // :03 下一分钟，回可发区间
+	clock.t = clock.t.Add(5 * time.Second) // :04 下一分钟，回可发区间
 	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("sendable wait error = %v, want probe release", err)
 	}
@@ -158,9 +165,9 @@ func TestRateGateLatchSelective(t *testing.T) {
 }
 
 // "reset in 0 seconds" 是桶界到达的声明（新桶已爆、无追加封禁）：
-// 闩态下不延长截止也不重排滴灌钟；无闩时闩到 now 即刻过期——
-// 两种形态都不再落 60s 兜底闩（旧实现把它当无 hint，实测桶界上
-// 每次 0-hint 都把闩续 60s 并重置滴灌，限流被自我续长）。
+// 冻结段内不延长截止也不重置探针槽；无闩时闩到 now——截止即达即刻
+// 转入探测段，首个请求以探针放行，其余按滴灌节奏串行（边际态下
+// 并发重试不被放行成齐射）。两种形态都不再落 60s 兜底闩。
 func TestRateGateZeroSecondHint(t *testing.T) {
 	gate := newRateGate(GateConfig{}, nil, "")
 	clock := pinGateClock(gate, 10)
@@ -170,17 +177,137 @@ func TestRateGateZeroSecondHint(t *testing.T) {
 	clock.t = clock.t.Add(5 * time.Second)
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 0 seconds."))
 	if !gate.limitedUntil.Equal(latchedUntil) || !gate.nextDrip.Equal(nextDrip) {
-		t.Fatalf("0-hint while latched must not extend latch or re-arm drip: until=%v drip=%v", gate.limitedUntil, gate.nextDrip)
+		t.Fatalf("0-hint while frozen must not extend latch or re-arm probe slot: until=%v drip=%v", gate.limitedUntil, gate.nextDrip)
 	}
-	// 无闩：0-hint 闩到 now 即刻过期，后续请求正常放行。
-	fresh := newRateGate(GateConfig{}, nil, "")
+	// 无闩：0-hint 闩到 now 即刻进探测段——首个请求以探针放行，
+	// 紧随其后按滴灌间隔快败。
+	fresh := newRateGate(GateConfig{DripInterval: time.Minute}, nil, "")
 	pinGateClock(fresh, 10)
 	fresh.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 0 seconds."))
 	if err := fresh.wait(context.Background(), attemptEnv{}, false); err != nil {
-		t.Fatalf("wait after unlatched 0-hint = %v, want pass (latch expired at arrival)", err)
+		t.Fatalf("wait after unlatched 0-hint = %v, want probe release (straight to probing)", err)
 	}
-	if fresh.stats().Latched {
-		t.Fatal("0-hint latch must expire cleanly")
+	if s := fresh.stats(); !s.Latched || !s.Probing {
+		t.Fatalf("0-hint latch should sit in probing, got latched=%v probing=%v", s.Latched, s.Probing)
+	}
+	var gateErr *llm.Failure
+	if err := fresh.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
+		t.Fatalf("post-probe wait error = %v, want *llm.Failure (probe slot consumed)", err)
+	}
+}
+
+// 探测段的延长判定与冻结段不同：探针被拒且声明新截止 → 按新截止
+// 再冻结（闩中再触）；探测段收到 hint=0/更短的重复拒绝 → 维持探测
+// 节奏，不重置探针槽也不回到冻结。
+func TestRateGateProbingReFreezesOnNewHint(t *testing.T) {
+	gate := newRateGate(GateConfig{DripInterval: time.Minute}, nil, "")
+	clock := pinGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 30 seconds."))
+	// 截止已过 → 探测段：探针槽立即开放。
+	clock.t = clock.t.Add(40 * time.Second)
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
+		t.Fatalf("probe wait error = %v, want probe release", err)
+	}
+	// 探针被拒且声明新截止 → 再冻结：请求回到闩剩余快败。
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 2 minutes."))
+	var gateErr *llm.Failure
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) || gateErr.RetryAfterSeconds < 60 {
+		t.Fatalf("re-frozen wait error = %v, want *llm.Failure with hint-scale Retry-After", err)
+	}
+	if s := gate.stats(); !s.Latched || s.Probing {
+		t.Fatalf("re-freeze should leave probing, got latched=%v probing=%v", s.Latched, s.Probing)
+	}
+	// 探测段收到 0-hint 拒绝 → 维持探测段，过期探针槽照常放行。
+	fresh := newRateGate(GateConfig{DripInterval: 50 * time.Millisecond}, nil, "")
+	clock2 := pinGateClock(fresh, 10)
+	fresh.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 30 seconds."))
+	clock2.t = clock2.t.Add(40 * time.Second)
+	fresh.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 0 seconds."))
+	if s := fresh.stats(); !s.Latched || !s.Probing {
+		t.Fatalf("0-hint during probing should stay probing, got latched=%v probing=%v", s.Latched, s.Probing)
+	}
+	if err := fresh.wait(context.Background(), attemptEnv{}, false); err != nil {
+		t.Fatalf("probe slot after 0-hint reject = %v, want release", err)
+	}
+}
+
+// 在飞流的续试重发（retry=true）等闩而不是撞闩：冻结段睡到声明截止、
+// 睡醒进探测段抢探针槽放行——闩拒绝对在飞流是死刑（流内错误对客户端
+// 不可重试），而等闩期间上游零消耗。同期非续试请求仍快败。
+func TestRateGateResendWaitsOutFreeze(t *testing.T) {
+	oldRecheck := resendLatchRecheck
+	resendLatchRecheck = 5 * time.Millisecond
+	defer func() { resendLatchRecheck = oldRecheck }()
+	gate := newRateGate(GateConfig{DripInterval: 50 * time.Millisecond}, nil, "")
+	offsetGateClock(gate, 10) // 时钟随真实时间前进，睡眠才能睡到闩末
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 1 seconds."))
+	// 非续试请求同期仍快败。
+	var gateErr *llm.Failure
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
+		t.Fatalf("non-retry wait error = %v, want instant *llm.Failure", err)
+	}
+	// 续试重发睡过冻结段，进探测段抢到首个探针槽放行。
+	start := time.Now()
+	if err := gate.wait(context.Background(), attemptEnv{}, true); err != nil {
+		t.Fatalf("retry wait error = %v, want probe release after freeze", err)
+	}
+	if elapsed := time.Since(start); elapsed < 800*time.Millisecond || elapsed > 5*time.Second {
+		t.Fatalf("retry wait held %v, want ~1s freeze ride-out", elapsed)
+	}
+	// 槽已被取走：紧随的续传睡到下一滴灌槽再进，不与上一发齐射。
+	start = time.Now()
+	if err := gate.wait(context.Background(), attemptEnv{}, true); err != nil {
+		t.Fatalf("second retry wait error = %v, want next drip slot", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("second retry held %v, want ~drip-interval wait", elapsed)
+	}
+}
+
+// 续试等闩受预算封顶：所需睡眠超出 resendLatchHold 时照样快败，
+// 不把在飞流无限挂起。
+func TestRateGateResendLatchBudgetExceeded(t *testing.T) {
+	oldHold, oldRecheck := resendLatchHold, resendLatchRecheck
+	resendLatchHold, resendLatchRecheck = 100*time.Millisecond, 5*time.Millisecond
+	defer func() { resendLatchHold, resendLatchRecheck = oldHold, oldRecheck }()
+	// 续试预算取 max(maxHold, resendLatchHold)：MaxHold 一并调小，
+	// 让 100ms 的续试预算真正生效。
+	gate := newRateGate(GateConfig{MaxHold: 50 * time.Millisecond}, nil, "")
+	pinGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 30 seconds."))
+	start := time.Now()
+	var gateErr *llm.Failure
+	if err := gate.wait(context.Background(), attemptEnv{}, true); !errors.As(err, &gateErr) {
+		t.Fatalf("retry wait error = %v, want *llm.Failure when freeze exceeds budget", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("budget-exceeded retry held %v, want fast reject", elapsed)
+	}
+}
+
+// 等闩途中闩被新 hint 再冻结到剩余预算之外：睡醒重评看到所需睡眠
+// 超预算即快败，不会睡死在延长的冻结里。
+func TestRateGateResendReFreezeExhaustsHold(t *testing.T) {
+	oldHold, oldRecheck := resendLatchHold, resendLatchRecheck
+	resendLatchHold, resendLatchRecheck = 1500*time.Millisecond, 5*time.Millisecond
+	defer func() { resendLatchHold, resendLatchRecheck = oldHold, oldRecheck }()
+	// MaxHold 一并调小，让 1.5s 的续试预算生效（预算取两者较大者）。
+	gate := newRateGate(GateConfig{DripInterval: 50 * time.Millisecond, MaxHold: 100 * time.Millisecond}, nil, "")
+	offsetGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 1 seconds."))
+	errCh := make(chan error, 1)
+	go func() { errCh <- gate.wait(context.Background(), attemptEnv{}, true) }()
+	// 续传睡进冻结段后闩被再冻结到 30s——剩余预算 ~1.4s 覆盖不了。
+	time.Sleep(150 * time.Millisecond)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 30 seconds."))
+	select {
+	case err := <-errCh:
+		var gateErr *llm.Failure
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("wait error = %v, want *llm.Failure after re-freeze beyond budget", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("resend wait did not reject after re-freeze beyond budget")
 	}
 }
 

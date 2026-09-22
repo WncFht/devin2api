@@ -137,7 +137,8 @@
       out.push({ tone: 'bad', text: t('accounts.st.credential', { left: countdown(lane.auth_cooldown_until) }) });
     }
     if (gate.latched) {
-      out.push({ tone: 'bad', text: gate.limited_until ? t('accounts.st.latchedUntil', { left: countdown(gate.limited_until) }) : t('accounts.st.latched') });
+      if (gate.probing) out.push({ tone: 'warn', text: t('accounts.st.probing') });
+      else out.push({ tone: 'bad', text: gate.limited_until ? t('accounts.st.latchedUntil', { left: countdown(gate.limited_until) }) : t('accounts.st.latched') });
     }
     const q = a.quota || {};
     const exhausted = (q.daily && q.daily.remaining <= 0) || (q.weekly && q.weekly.remaining <= 0);
@@ -413,7 +414,8 @@
     if (cds.length) secs.push(row(t('accounts.ev.cooldowns'), cds.join(' · ')));
     if (gate.latched) {
       const s = gate.limited_until ? Math.max(0, Math.round((Date.parse(gate.limited_until) - now) / 1000)) : 0;
-      secs.push(row(t('accounts.ev.latch'), esc(s ? t('accounts.ev.latchLeft', { s }) : t('accounts.st.latched'))));
+      const latchTxt = gate.probing ? t('accounts.st.probing') : (s ? t('accounts.ev.latchLeft', { s }) : t('accounts.st.latched'));
+      secs.push(row(t('accounts.ev.latch'), esc(latchTxt)));
     }
     const pts = (a.quota && Array.isArray(a.quota.points)) ? a.quota.points : [];
     const last = pts.length ? pts[pts.length - 1] : null;
