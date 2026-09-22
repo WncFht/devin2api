@@ -11,7 +11,7 @@ client (cc / codex / kimi-cli / ...)
       → server.codeium.com   (Devin 上游, Connect-RPC)
 ```
 
-> 链路为作者本机示例：ccload 是作者自用的前置网关（非必需——客户端可直连 devin-2api），`:49173`/`:3033` 端口与渠道 id 是本地部署取值，按自己的拓扑替换（本机 `:3003` 是兼容转发 shim，见 deployment.md）。ccload 相关小节只在走同款链路时适用。
+> 链路为作者本机示例：ccload 是作者自用的前置网关（非必需——客户端可直连 devin-2api），`:49173`/`:3033` 端口与渠道 id 是本地部署取值，按自己的拓扑替换（本机 `:3003` 兼容 shim 已于 2026-09-23 拆除）。ccload 相关小节只在走同款链路时适用。
 
 任何一环出错都会以「重试/失败」的形式表现在客户端。定位的第一步永远是**确定错误在哪一层产生**。
 
@@ -186,7 +186,7 @@ curl -s -X PUT http://localhost:<port>/admin/settings/debug_log_enabled \
 
 ## ccload 侧注意事项
 
-- 本机示例渠道 id=293（`http://127.0.0.1:3003`），模型表在 `channel_models`，`redirect_model` 可做别名（与 devin-2api 的 `devin.aliases` 二选一即可，现在后者统一管）。
+- 本机示例渠道 id=293（`http://127.0.0.1:3033`），模型表在 `channel_models`，`redirect_model` 可做别名（与 devin-2api 的 `devin.aliases` 二选一即可，现在后者统一管）。
 - **`protocol_transform_mode` 用 `local`**（原生直通）：`auto` 会把 `/v1/messages` 转成 `/v1/responses` 再转回来，ccload 的 codex→anthropic 转换会把尾随签名落成独立的空 thinking 块（Claude Code 收到后 result 为空）。它是 `channels` 表列，写库即热生效（走缓存失效）——需要重启的只有 `system_settings`。
 - ccload 会统计 SSE 级失败（HTTP 200 + `response.failed`/`error` 事件也算失败），连续失败会把渠道打冷却。devin-2api 的应对分三层：① 首个上游事件前不下发 `start`，上游零帧报错（`permission_denied` 等）走真实 HTTP 4xx，ccload 按客户端错误透传不冷却渠道；② 例外有两个，都只在 `StreamErrorEvents` 面（OpenAI 流式）先补合成 `start` 再发 error 事件（`internal/app/stream.go`）：上下文超长——为了让 Codex 收到 `response.failed`（它只在 SSE 事件里认 `error.code=="context_length_exceeded"`），事件顶层 `status:413` 让 ccload 仍按客户端级分类、不冷却；**流式面 429 同理**——OpenAI 流式客户端的可重试通道只有流内事件（Codex 把 HTTP 429 硬编码为不重试，只把流内错误进重试循环），429 也走 200 + error 事件下发；③ 流式中途（已有语义输出、连接已提交后）的错误事件同样在 data 里带顶层 `status`，ccload 按真实语义分类且事件原文会继续透传给客户端。
 - `.env` 里的 `CCLOAD_API_TOKENS` 是入站客户端 key；`auth_tokens` 表是持久化的 token（明文）。
@@ -198,7 +198,7 @@ curl -s -X PUT http://localhost:<port>/admin/settings/debug_log_enabled \
 - **meta.json 的 `repairs` 计数有基线、不是故障**：CC 类客户端每请求重发同一套系统提示词，指纹改写与投影修复必然命中——实测基线 ~6–17 hits/req。要盯的是命中规则 id 集合的漂移（出现新 id = 客户端换了提示词文案，可能要吃新指纹），而不是总数的正常涨落。
 - **macOS 特有——launchd + 新编译二进制**：`go build` 覆盖二进制后立刻 kickstart，dyld 可能卡在 Gatekeeper 检查（进程 `S` 态、无监听、无日志）。`sample <pid>` 看栈确认后 `kill -9` 等 KeepAlive 重拉即可；稳妥做法是先 build 再停旧进程。详见 `deployment.md`。
 - **CLI 抓包实验后遗症**：恢复 `credentials.toml` 后，已开的 CLI 会话需发任意消息重连。
-- **VS Code Remote-SSH autoForwardPorts 抢 loopback（accept-then-hang）**：Mac 上开着指向远端 Linux 机的 Remote-SSH 窗口且两端有同端口监听时，VS Code `Code Helper` 会把 Mac `127.0.0.1:3003` 绑成回远端的隧道——IPv4 精确绑定赢过服务的 `*:3003` IPv6 wildcard，隧道那头不应答，**特征是 TCP connect 成功但零字节（curl 000、fetch 永不返回），不是 connection refused**，比端口冲突难诊断一个量级。分诊：`lsof -iTCP:3003 -sTCP:LISTEN -P -n` 看持有者 + 三路径 curl 对比（`127.0.0.1` / `[::1]` / tailscale IP）。处置：VS Code Ports 面板删残留 + `remote.autoForwardPorts=false`（防复活），客户端 base URL 改 `http://[::1]:3003`（IPv6 loopback 免疫 v4 squatter）。注：该事故时生产在 Mac；2026-09-18 起生产在 Linux 机 `:3033`，其上 `:3003` 变为 compat shim → `127.0.0.1:3033`（打它等价打生产，无害但要自知）；VS Code 隧道劫持的坑在 Mac 侧仍然存在（Mac :3003 现由 forwarder 持有，squatter 抢绑同样会黑掉 shim 流量）。
+- **VS Code Remote-SSH autoForwardPorts 抢 loopback（accept-then-hang）**：Mac 上开着指向远端 Linux 机的 Remote-SSH 窗口且两端有同端口监听时，VS Code `Code Helper` 会把 Mac `127.0.0.1:3003` 绑成回远端的隧道——IPv4 精确绑定赢过服务的 `*:3003` IPv6 wildcard，隧道那头不应答，**特征是 TCP connect 成功但零字节（curl 000、fetch 永不返回），不是 connection refused**，比端口冲突难诊断一个量级。分诊：`lsof -iTCP:3003 -sTCP:LISTEN -P -n` 看持有者 + 三路径 curl 对比（`127.0.0.1` / `[::1]` / tailscale IP）。处置：VS Code Ports 面板删残留 + `remote.autoForwardPorts=false`（防复活），客户端 base URL 改 `http://[::1]:3003`（IPv6 loopback 免疫 v4 squatter）。注：该事故时生产在 Mac；后生产迁 Linux 机 `:3033`，两侧 `:3003` 一度由 compat/forwarder shim 兜住，2026-09-23 全部拆除——现 `:3003` 已无监听，squatter 抢绑的坑对当前部署不再适用，但「两端同端口 + autoForwardPorts」的教训对任意端口仍然成立。
 - **上游方向 IPv6 污染嫌疑**：`server.codeium.com` 在 Mac 侧曾解析出 mihomo fake-ip AAAA `2001:2::5`（bogon，逃出 tun 直连 GFW）——间歇性中流 `incomplete envelope` 截断 + 抓到 `2001:2::/48` 对端时先查上游出口 IPv6（GitHub 方向同款注入 `2001:2::4` 已有 ProxyCommand 绕行，本机取值见 notes 拓扑备忘）。
 - **远端登录 shell 差异**：目标机登录 shell 是 fish 时 `ssh host 'VAR=x; cmd'` / 单行 `for` / heredoc 全炸（`Unsupported use of '='`、`Expected a string`），`bash -lc '…'` 嵌套引号是地狱。规范解法 `ssh host bash -s <<'EOF' … EOF`（脚本走 stdin，绕开 login shell）。Mac 侧另注意：递归 grep `~/.claude`/`~/.codex` 会超 120s 被挪后台，改定点文件列表逐个查。
 - **从日志辨认 subagent/teammate 流**：CC 的 `metadata.user_id` 是 JSON `{device_id, account_uuid, session_id, parent_session_id?}`——`session_id`/`parent_session_id` 可聚主流/子流；subagent 标记 `cc_is_subagent=true` 烤在 `system[0]` 头 300 字符的 `x-anthropic-billing-header` 里；**teammate（并行协作代理）流不带 sub 标记**，与主流共享 `(session_id, system hash)`——按「同流新消息即 supersession」判退役会误判，`scripts/probe/index-stream-stats.py` 的流画像已按此口径实现。

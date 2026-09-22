@@ -2,7 +2,7 @@
 
 每个客户端只需要两个值：devin-2api 的地址（`server.listen`，本文示例用 `http://127.0.0.1:3033`）和一个下游令牌——令牌在面板 `/web/tokens.html` 创建，明文创建时一次性出示，仓内只存哈希。模型名直接填 `swe-2-max`（或你在 `devin.aliases`/模型注册表里配的名字）。
 
-作者本机另经一层 ccload（`客户端 → ccload http://127.0.0.1:49173 → devin-2api http://127.0.0.1:3033`）做渠道管理与冷却，不是必需——走同款链路时把各节的地址换成 ccload 入口、令牌换成 ccload 侧 token，ccload 侧注意事项见 `upstream-debug-playbook.md`。本机 `:3003` 是兼容转发 shim（拓扑见 `deployment.md` 末节），旧写法照样通。
+作者本机另经一层 ccload（`客户端 → ccload http://127.0.0.1:49173 → devin-2api http://127.0.0.1:3033`）做渠道管理与冷却，不是必需——走同款链路时把各节的地址换成 ccload 入口、令牌换成 ccload 侧 token，ccload 侧注意事项见 `upstream-debug-playbook.md`。本机 `:3003` 兼容 shim 已于 2026-09-23 拆除，只认 `:3033`。
 
 ## Claude Code
 
@@ -132,7 +132,7 @@ Codex 走 OpenAI Responses 面 (`POST /v1/responses`),直连与经 ccload 转发
 
 Codex 支持 Responses-over-WS：一条连接上反复 `response.create`/`response.append`，`previous_response_id` + 增量 input。ccload→devin-2api 的 WS 多轮已实现并实测通过（2026-09-12，`responses-ws` 全链路 `completed`）。本机链配置（经 ccload 的渠道形态，本机示例）：
 
-- ccload 侧建一条独立的 WS 渠道（本机示例：channel 294 `devin-ws`，独立于 293 `devin` 的 anthropic 渠道）：url `http://127.0.0.1:3003/v1`、protocols `["codex"]`、`websockets=1`，模型 `swe-2-max-ws` → redirect `swe-2-max`。
+- ccload 侧建一条独立的 WS 渠道（本机示例：channel 294 `devin-ws`，独立于 293 `devin` 的 anthropic 渠道）：url `http://127.0.0.1:3033/v1`、protocols `["codex"]`、`websockets=1`，模型 `swe-2-max-ws` → redirect `swe-2-max`。
 - `~/.codex/models.ccload.json` 的 `swe-2-max-ws` 条目带 `prefer_websockets: true`；还原备份在同目录 `models.ccload.json.bak-ws-test`。
 - Codex 侧需 `supports_websockets=true`：写进 `[model_providers.OpenAI]`，或启动时 `-c` override。
 
@@ -151,4 +151,4 @@ codex exec -m swe-2-max-ws \
 - **压缩**:四个客户端都自带上下文压缩，代理无需处理——但自动压缩只在客户端声明的窗口 ≤ 上游真实窗口 (262000) 时才可能先于 prompt-too-long 触发；Codex/CC 的窗口声明见上文各节和 `upstream-debug-playbook.md` 的「客户端上下文窗口配置」。
 - **排查**:经 ccload 链时先看 `ccload.db` 的 `debug_logs`(取注入后的真实请求体);再看 devin-2api debug 的 `03-devin-request.json`。详见 `upstream-debug-playbook.md`。
 - **base URL 写 `http://[::1]:<port>` 最稳**：服务绑 `*`（IPv6 双栈 socket）时 `::1` 直连本机；`127.0.0.1` 会被 IDE 的 IPv4 端口转发静默 shadow（VS Code Remote-SSH autoForwardPorts 会把 loopback 绑成隧道，特征是 connect 成功但零字节——curl 000 而非 refused），`localhost` 则依赖 resolver 顺序可能先撞 v4 squatter。诊断与处置见 `upstream-debug-playbook.md` 运维坑节。
-- **跨机访问走 tailnet IP，不走 loopback 转发**：本机示例形如 `http://<tailnet-ip>:3033`（按自己的 tailnet 替换）；`:3003` 旧地址由转发 shim 继续兜住，存量配置不急着改——完整拓扑见 `deployment.md` 末节。本机出向曾挂本地并发闸 gwcap（swe-2-medium 限流），现已下线、仅留档 `scripts/attic/gwcap/`——压测/批跑直接打满上游 `devin.max_rpm` 即可。
+- **跨机访问走 tailnet IP，不走 loopback 转发**：本机示例形如 `http://<tailnet-ip>:3033`（按自己的 tailnet 替换）；`:3003` 兼容 shim 已于 2026-09-23 拆除（留档 `scripts/attic/compat-forwarder/`），存量配置必须指向 `:3033`——完整拓扑见 `deployment.md` 末节。本机出向曾挂本地并发闸 gwcap（swe-2-medium 限流），现已下线、仅留档 `scripts/attic/gwcap/`——压测/批跑直接打满上游 `devin.max_rpm` 即可。

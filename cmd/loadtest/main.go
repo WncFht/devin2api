@@ -4,7 +4,7 @@
 // 测不出 TTFB；这里逐请求采首字节时刻。上游侧由 upstreamstub 的
 // stream 场景提供确定性负载，不烧真实配额。
 //
-// 用法：loadtest -url http://localhost:3003/v1/chat/completions -c 8 -n 200
+// 用法：loadtest -url http://localhost:3033/v1/chat/completions -c 8 -n 200
 //
 //	loadtest -duration 30s -c 16   # 持续模式：压满时长供 pprof 采样
 package main
@@ -35,7 +35,7 @@ type result struct {
 // main 解析压测参数后按固定并发打目标端点，聚合报告 TTFB/总时长
 // 分位数、吞吐与错误分布。
 func main() {
-	url := flag.String("url", "http://localhost:3003/v1/chat/completions", "目标端点")
+	url := flag.String("url", "http://localhost:3033/v1/chat/completions", "目标端点")
 	key := flag.String("key", "", "下游令牌明文（空 = 不携带凭据）")
 	concurrency := flag.Int("c", 8, "并发 worker 数")
 	total := flag.Int("n", 100, "总请求数；与 -duration 互斥，-duration 非零时忽略")

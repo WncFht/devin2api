@@ -173,4 +173,4 @@ curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/debug-logs/
 
 本节是作者本机部署的拓扑形态（2026-09-18 起生效，地址用占位符），供对照参考，不是部署规范的一部分。
 
-生产实例在 Linux 生产机本机：systemd `--user` 服务 `devin-2api.service` 监听 `:3033`，由 `scripts/deploy/deploy-linux.sh` 维护；原 Mac 生产实例已退役，`scripts/attic/deploy-remote.sh` 仅留档。各机 `:3003` 端点由转发 shim 兜住继续可用（旧 Mac launchd `com.devin2api.forwarder` → `<tailnet-ip>:3033`；生产机 systemd --user `devin-2api-compat-3003.service` → `127.0.0.1:3033`；脚本与 unit 模板见 `scripts/deploy/compat-forwarder/`），下游客户端无需改动。其它机器经 tailnet `http://<tailnet-ip>:3033` 访问该实例。
+生产实例在 Linux 生产机本机：systemd `--user` 服务 `devin-2api.service` 监听 `:3033`，由 `scripts/deploy/deploy-linux.sh` 维护；原 Mac 生产实例已退役，`scripts/attic/deploy-remote.sh` 仅留档。`:3003` 兼容转发 shim（旧 Mac launchd forwarder → `<tailnet-ip>:3033`；生产机 systemd --user `devin-2api-compat-3003.service` → `127.0.0.1:3033`）已于 2026-09-23 随全量客户端直连 `:3033` 后拆除，模板留档 `scripts/attic/compat-forwarder/`。其它机器经 tailnet `http://<tailnet-ip>:3033` 访问该实例。
