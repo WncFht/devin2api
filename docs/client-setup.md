@@ -25,21 +25,22 @@
 
 两个窗口 env 是关键：`swe-2-max` 非 `claude-` 前缀，CC 走 unknown-model 默认窗口（远小于实际上游上限 262000），不声明则自动压缩阈值错位——要么压得太早浪费窗口，要么阈值超出真实上限永远撞 prompt-too-long。`AUTO_COMPACT_WINDOW` 留 ~30k 给压缩请求自身的指令与摘要开销。不配窗口声明也可让 CC 发 `claude-` 前缀名、由 `devin.aliases` 映射回 `swe-2-max`（经 ccload 时等价做法是 `channel_models` 的 redirect）。
 
-可选的容错 env（逆向 CC 二进制得到的行为，视需要添加）：
+容错 env（逆向 CC 2.1.x 二进制验证过的行为，走本代理**建议全加**；env 在进程启动时读取，改后需重启 CC 生效）：
 
 ```json
 {
     "env": {
-        "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1",
-        "CLAUDE_CODE_MAX_RETRIES": "15",
+        "CLAUDE_CODE_RETRY_WATCHDOG": "1",
+        "CLAUDE_CODE_MAX_RETRIES": "100000",
         "CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS": "300000"
     }
 }
 ```
 
-- `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`：让 CC 按第一方 Anthropic API 的参数档处理自定义 base URL——重试上限从 10 提到 300、首字节看门狗从 300s 收到 180s。devin-2api 已在所有 `/v1/*` 响应下发 `request-id: req_*`，CC 据此即按第一方对待，通常不必再设。
-- `CLAUDE_CODE_MAX_RETRIES`：重试次数上限；非第一方模式被钳到 ≤15。上游限流 episode 可长达十几分钟（分钟桶计数 + 被拒续期），429 走 `anthropic-ratelimit-unified-reset` 头睡到恢复时刻，每次重试各占一档预算——预算越高扛过的 episode 越长。
-- `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS` / `CLAUDE_STREAM_IDLE_TIMEOUT_MS`：首字节与流内空闲看门狗毫秒数；上游长 thinking 场景把首字节放宽到 300000（默认即 300s，第一方档是 180s——注意设了 first-party 假设反而更紧，需要的话用此项显式放宽）。
+- `CLAUDE_CODE_RETRY_WATCHDOG`：**跨限流 episode 存活的刚需开关**。CC 重试循环里 `dn=AS()&&Xen(err)`（AS 即此 env，Xen 匹配 429/529-overloaded）。不开时循环对任何算出来 >60s 的等待直接抛 `api_request_retry_after_too_long` 终止整轮——429 上带着诚实 Retry-After 的响应零重试即死，而本地速率闸门的冷却闩常报几分钟到几十分钟（10 天 936 个编排 agent 失败里 93.7% 死于此，致命 reset 中位 876s）。开启后 429/529 走持久分支：优先按 `anthropic-ratelimit-unified-reset` 头睡到重置点（单次封顶 6h、每 30s 分片查 abort、attempt 计数钉住不耗尽）——对限流是真正意义的无限重试；普通瞬时错误的默认预算同时从 10 提到 300。**子代理同样受益**：Agent/Task/workflow `agent()` 与主线共用同一条重试 generator，无独立额度或旁路——编排场景（subagent fleet、ultracode workflow）的死因大头正是这条 >60s 悬崖。
+- `CLAUDE_CODE_MAX_RETRIES`：非 429/529 瞬时错误（传输断裂、5xx 等）的重试预算。无 watchdog 时被钳 ≤15；watchdog 下不钳。watchdog 下 429/529 不消耗此预算（计数钉住），100000 是给其余错误的兜底——按 ~32s 稳态退避约合 37 天，事实无限但留了保险丝。
+- `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS` / `CLAUDE_STREAM_IDLE_TIMEOUT_MS`：首字节与流内空闲看门狗毫秒数（钳位区间 10s–30min）。上游长 thinking 场景把首字节显式放宽到 300000——CC 对第一方 provider 档的默认首字节窗口只有 180s。
+- `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`（不必设）：只影响按真实 `api.anthropic.com` 判定的功能门（Remote Control 资格、gateway discovery 提示等），与重试参数档无关——旧版文档把它记成"重试上限 10→300"是张冠李戴，那其实是 watchdog 的默认值。
 
 ## pi
 

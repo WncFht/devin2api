@@ -28,6 +28,7 @@
 - 主提示词 7 条指纹 + subagent 提示词 emoji 禁令句触发 `permission_denied` → `sanitize.go` 改写（详见 `upstream-policy-fingerprints.md`）；subagent 被拒时 CC 报 "issue with the selected model" 属误诊，实非模型问题
 - 尾随 `DeltaSignature` 落成独立空 thinking 块 → decoder/encoder 修复，`content_block_stop` 延迟等签名
 - ccload `protocol_transform_mode` 必须 `local`,`auto` 的 codex→anthropic 转换会产生同款畸形签名块
+- **编排 agent（subagent/workflow）被本地闸 429 长闩秒杀**（2.1.278 逆向 + 10 天 936 个 failed agent transcript 归因，2026-09-22）：CC 未开 `CLAUDE_CODE_RETRY_WATCHDOG` 时任何 >60s 的 Retry-After 抛 `api_request_retry_after_too_long` 零重试即死——93.7% 死于 `rate limited by local gate`（致命 reset 中位 876s），且编排层无自动复活（`agent()` 返回 null，journal 里仅 15% 靠手动 resume 救回）。解法：env 开 watchdog + `CLAUDE_CODE_MAX_RETRIES=100000`（子代理与主线共用同一重试 generator，一处配置全覆盖），脚本侧对 null 结果 log 出来并可 `resumeFromRunId` 续跑。配置细节见 `client-setup.md` 容错 env 节
 
 ### pi(0.73.1)
 
@@ -57,3 +58,4 @@
 - 免费档模型 (swe-2-\*) 缓存是 best-effort 前缀匹配 (~75-90% 命中),偶发逐出属正常
 - 重启 devin-2api 仍会结束在途请求，但 launchd `ExitTimeOut=660`（覆盖二进制 600s 排空上限）给了优雅退出窗口——SIGTERM 后在途流可跑完；`kill -9` 跳过该窗口，禁用
 - 上游错误按层级分类：`permission_denied`/`prompt too long` 等请求级错误在首个上游事件前以真实 HTTP 4xx 返回（不冷却渠道）；流式中途的错误事件带顶层 `status` 供 ccload 精确分类——只有传输级故障 (EOF/连接重置) 才会进入模型/渠道冷却
+- 开了 `CLAUDE_CODE_RETRY_WATCHDOG` 后，冷却闩期（几分钟到几十分钟）编排 agent 表现为"卡住不动睡到解闩"而非 failed——这是预期行为；确定性错误（400/`permission_denied`/context 超长）仍会快速 null 返回，脚本侧别盲目重试

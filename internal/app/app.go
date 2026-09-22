@@ -1307,9 +1307,10 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	// 上游限流文案里的 reset hint 是唯一可行动信号——翻成标准
 	// Retry-After 头 + Anthropic 统一限流重置时刻，客户端/网关才能
 	// 按语义退避而不是猜。unified-reset 给的是绝对时刻：Claude Code
-	// 对 429 优先按它睡到重置点（上限 6h），分钟级限流也能扛过
-	// 整个重试预算。注意：非 429 状态的 Retry-After 不可超过 60s——
-	// Claude Code 对超长的非限流 Retry-After 直接终止整轮。
+	// 仅在 CLAUDE_CODE_RETRY_WATCHDOG 开启时按它睡到重置点（429/529
+	// 持久重试、上限 6h、重试计数钉住不耗尽）；未开启时任何 >60s 的
+	// Retry-After——含 429——都触发 api_request_retry_after_too_long
+	// 直接终止整轮，因此本面长闩场景依赖客户端开 watchdog。
 	if status == http.StatusTooManyRequests {
 		recorder.SetRateLimited()
 		completion.RateLimited = true
