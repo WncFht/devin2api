@@ -17,7 +17,7 @@
     "markdown-preview-enhanced.breakOnSingleNewLine": true,
     "markdown-preview-enhanced.mathRenderingOption": "KaTeX",
     "markdown-preview-enhanced.previewTheme": "none.css",
-    "markdown-preview-enhanced.previewColorScheme": "selectedPreviewTheme",
+    "markdown-preview-enhanced.previewColorScheme": "systemColorScheme",
     "markdown-preview-enhanced.mermaidTheme": "dark",
     "markdown-preview-enhanced.frontMatterRenderingOption": "code block",
     "[markdown]": {
