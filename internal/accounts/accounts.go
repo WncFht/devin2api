@@ -404,6 +404,8 @@ func BaseConfig(cfg config.Config) devin.Config {
 			WindowGuard:     time.Duration(cfg.Devin.GateWindowGuardSeconds) * time.Second,
 			BgMaxHold:       time.Duration(cfg.Devin.GateBgMaxHoldSeconds) * time.Second,
 			BgReserveMargin: cfg.Devin.GateBgReserveMargin,
+			Cooldown:        time.Duration(cfg.Devin.GateCooldownSeconds) * time.Second,
+			CooldownFloor:   cfg.Devin.GateCooldownFloorRatio,
 		},
 		Warm: devin.WarmConfig{
 			Enabled:          cfg.Devin.WarmPrefixEnabled,

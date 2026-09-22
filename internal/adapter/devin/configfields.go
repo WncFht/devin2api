@@ -169,6 +169,32 @@ var configFields = []ConfigField{
 		Set:     setInt(func(c *Config) *int { return &c.Gate.BgReserveMargin }),
 	},
 	{
+		Key:     "devin.gate_cooldown_seconds",
+		changed: func(p, n Config) bool { return p.Gate.Cooldown != n.Gate.Cooldown },
+		Get:     secondsOf(func(c Config) time.Duration { return NormalizeGateConfig(c.Gate).Cooldown }),
+		Set:     setSeconds(func(c *Config) *time.Duration { return &c.Gate.Cooldown }),
+	},
+	{
+		Key:     "devin.gate_cooldown_floor_ratio",
+		changed: func(p, n Config) bool { return p.Gate.CooldownFloor != n.Gate.CooldownFloor },
+		Get: func(c Config) string {
+			return strconv.FormatFloat(NormalizeGateConfig(c.Gate).CooldownFloor, 'g', -1, 64)
+		},
+		Set: func(c *Config, v string) error {
+			f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+			if err != nil {
+				return fmt.Errorf("value must be a number: %w", err)
+			}
+			// !(f>0 && f<=1) 一并拦 NaN/±Inf：越界值会被 normalize
+			// 回落默认，存进去只是脏数据。
+			if !(f > 0 && f <= 1) {
+				return errors.New("gate_cooldown_floor_ratio must be in (0,1] (out-of-range resets to default 0.2)")
+			}
+			c.Gate.CooldownFloor = f
+			return nil
+		},
+	},
+	{
 		Key:     "devin.warm_prefix_enabled",
 		changed: func(p, n Config) bool { return p.Warm.Enabled != n.Warm.Enabled },
 		Get:     func(c Config) string { return strconv.FormatBool(NormalizeWarmConfig(c.Warm).Enabled) },

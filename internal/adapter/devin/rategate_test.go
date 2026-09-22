@@ -311,6 +311,130 @@ func TestRateGateResendReFreezeExhaustsHold(t *testing.T) {
 	}
 }
 
+// 解闩后配额爬坡：闩解除只证明上游放进一条，不证明余额回血——爬坡期
+// 内窗口有效配额从 floor×quota 线性爬回满值，压住积压重试齐射。
+// MaxHold=1ms 把「睡到下一窗口」变成即时快败，用来探测当窗额度耗尽。
+func TestRateGateCooldownRampsQuota(t *testing.T) {
+	gate := newRateGate(GateConfig{
+		MaxRPM:        10,
+		MaxHold:       time.Millisecond,
+		DripInterval:  time.Millisecond,
+		Cooldown:      60 * time.Second,
+		CooldownFloor: 0.2,
+	}, nil, "")
+	clock := pinGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 1 seconds."))
+	clock.t = clock.t.Add(2 * time.Second) // :12，截止已过进探测段
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
+		t.Fatalf("probe wait error = %v", err) // 探针放行，bucketUsed=1
+	}
+	gate.noteUpstreamSuccess() // 解闩，爬坡锚定 :12+60s
+	if got := gate.stats().EffectiveQuota; got != 2 {
+		t.Fatalf("effective quota at floor = %d, want 2", got)
+	}
+	// 爬坡起点 eff=ceil(10×0.2)=2，本窗已用 1 → 只再放 1。
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
+		t.Fatalf("floor-slot wait error = %v", err)
+	}
+	var gateErr *llm.Failure
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("over-floor wait error = %v, want quota fast-fail", err)
+	}
+	// 推进 30s（:42，同窗）：elapsed=30s → ratio=0.2+0.8×0.5=0.6 →
+	// eff=6，已用 2 → 再放 4。
+	clock.t = clock.t.Add(30 * time.Second)
+	if got := gate.stats().EffectiveQuota; got != 6 {
+		t.Fatalf("effective quota mid-ramp = %d, want 6", got)
+	}
+	for i := 0; i < 4; i++ {
+		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
+			t.Fatalf("ramp wait #%d error = %v", i, err)
+		}
+	}
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("over-ramp wait error = %v, want quota fast-fail", err)
+	}
+	// 爬坡期满且翻窗（下一分钟 :42）：桶账清零、eff 回满 10 全放。
+	clock.t = clock.t.Add(60 * time.Second)
+	for i := 0; i < 10; i++ {
+		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
+			t.Fatalf("post-cooldown wait #%d error = %v", i, err)
+		}
+	}
+	if gate.stats().CooldownUntil != nil {
+		t.Fatal("CooldownUntil should be nil after ramp completes")
+	}
+}
+
+// 爬坡期被新拒绝打断：再冻结后准入归闩分支全权裁决；再解闩重新锚定
+// 爬坡——旧爬坡残余额度不得穿透到新一轮恢复期。
+func TestRateGateCooldownReanchorsOnRefreeze(t *testing.T) {
+	gate := newRateGate(GateConfig{
+		MaxRPM:        10,
+		MaxHold:       time.Millisecond,
+		DripInterval:  time.Millisecond,
+		Cooldown:      60 * time.Second,
+		CooldownFloor: 0.2,
+	}, nil, "")
+	clock := pinGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 1 seconds."))
+	clock.t = clock.t.Add(2 * time.Second) // :12
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
+		t.Fatalf("probe wait error = %v", err)
+	}
+	gate.noteUpstreamSuccess()                               // 爬坡锚定 :12+60s，eff=2，used=1
+	_ = gate.wait(context.Background(), attemptEnv{}, false) // used=2，eff 满
+	// 爬坡中再被限：重闩后冻结段一律快败，配额形状无关。
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 30 seconds."))
+	var gateErr *llm.Failure
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonLatch {
+		t.Fatalf("refreeze wait error = %v, want latch fast-fail", err)
+	}
+	// 截止过后探针再放行、成功帧再解闩 → 爬坡重新锚定（:47+60s）。
+	// 若锚定没重置，旧爬坡已走到 eff≈7，下一发会被放行。
+	clock.t = clock.t.Add(35 * time.Second) // :47
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
+		t.Fatalf("second probe wait error = %v", err)
+	}
+	gate.noteUpstreamSuccess()
+	if got := gate.stats().EffectiveQuota; got != 2 {
+		t.Fatalf("effective quota after re-anchor = %d, want 2", got)
+	}
+	// 同窗 bucketUsed=3（probe+fg+probe）已超 eff=2 → 立即快败。
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("post-refreeze wait error = %v, want quota fast-fail", err)
+	}
+}
+
+// 探测段空闲失效同样锚定爬坡：lane 静默期后闩自然失效，恢复后的首批
+// 流量吃减额配额而不是满配额齐射。
+func TestRateGateCooldownAfterIdleExpiry(t *testing.T) {
+	gate := newRateGate(GateConfig{
+		MaxRPM:        10,
+		MaxHold:       time.Millisecond,
+		DripInterval:  time.Millisecond,
+		Cooldown:      60 * time.Second,
+		CooldownFloor: 0.2,
+	}, nil, "")
+	clock := pinGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 5 seconds."))
+	// lane 静默 3.5min：越过截止进探测段但零判决超空闲阈值（2min），
+	// 闩自然失效并锚定爬坡。
+	clock.t = clock.t.Add(3*time.Minute + 30*time.Second) // 落在某分钟 :40
+	var gateErr *llm.Failure
+	for i := 0; i < 2; i++ {
+		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
+			t.Fatalf("floor wait #%d error = %v", i, err)
+		}
+	}
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("over-floor wait error = %v, want quota fast-fail", err)
+	}
+	if got := gate.stats().EffectiveQuota; got != 2 {
+		t.Fatalf("effective quota after idle expiry = %d, want 2", got)
+	}
+}
+
 // http2 ENHANCE_YOUR_CALM 被 connect-go 映成 resource_exhausted——
 // 那是传输层事件不是上游限流，不能拿来上闩。
 func TestRateGateIgnoresTransportMasquerade(t *testing.T) {

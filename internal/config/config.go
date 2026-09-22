@@ -135,6 +135,13 @@ type DevinConfig struct {
 	// 叠加在 fg 速率 EMA 外推与 fg 排队数之上，吸收估计滞后与小
 	// 并发突发；<=0 默认 4。
 	GateBgReserveMargin int `yaml:"gate_bg_reserve_margin"`
+	// GateCooldownSeconds 是解闩后配额爬坡时长：闩解除后窗口有效配额
+	// 从 gate_cooldown_floor_ratio×max_rpm 线性爬回满值，压住客户端
+	// 积压重试的齐射、给上游滑窗排水留时间；<=0 默认 180。
+	GateCooldownSeconds int `yaml:"gate_cooldown_seconds"`
+	// GateCooldownFloorRatio 是爬坡起点配额比例（0~1，越界默认 0.2）：
+	// 解闩后首个窗口只放 floor×max_rpm。
+	GateCooldownFloorRatio float64 `yaml:"gate_cooldown_floor_ratio"`
 	// WarmPrefixEnabled 是前缀保温总开关：为 true 时对保留的会话谱系
 	// 按节拍重放最近请求体，给上游 prompt cache 续期，压住 subagent
 	// 等待结束后的冷 prefill。默认 false（灰度开关）；热重载生效，

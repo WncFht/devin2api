@@ -43,6 +43,14 @@ const (
 	// gateDefaultBgMargin 是 bg 预留公式中的固定安全边际：吸收 fg
 	// 速率 EMA 的滞后与小并发突发。
 	gateDefaultBgMargin = 4
+	// gateDefaultCooldown 是解闩后配额爬坡时长：闩解除不等于上游余额
+	// 回血——09-22 实测解闩瞬间客户端积压重试按满配额齐射，1~2 个
+	// 窗口内把边际态上游打回封禁。爬坡期内有效配额从地板线性爬回
+	// 满值，给上游滑窗排水留时间。
+	gateDefaultCooldown = 3 * time.Minute
+	// gateDefaultCooldownFloor 是爬坡起点配额比例：解闩后首个窗口只放
+	// floor×quota，其余请求按桶满同路睡到下一窗口。
+	gateDefaultCooldownFloor = 0.2
 	// gateBgRecheck 是 bg 被预留/爬坡挡住时的睡醒重查间隔：预留随可发
 	// 区间剩余时间衰减、爬坡额度随经过时间线性释放，短间隔重查让
 	// bg 吃到中段让出的槽而不必睡到下一窗口。
@@ -121,6 +129,10 @@ const (
 //     探针只在可发区间放行并计入本桶配额——探针也是真实上游发送。
 //     探测段持续零判决（无探针发出也无拒绝回包，lane 已空闲）超
 //     空闲阈值后闩自然失效，陈旧闩不无限挂账。
+//     解闩（成功帧解闩或空闲失效）后进入配额爬坡期：cooldown 时长内
+//     窗口有效配额从 cooldownFloor×quota 线性爬回满配额——解闩只证明
+//     上游刚放进一条，不证明余额回血；积压重试的齐射会把边际态上游
+//     立刻打回封禁（09-22 实测解闩后 1~2 窗内再冻结）。
 //     上游规则推导见 docs/upstream-rate-limit.md。
 type rateGate struct {
 	mu           sync.Mutex
@@ -137,11 +149,17 @@ type rateGate struct {
 	// 回包）的时刻：探测段的空闲失效按它起算——探针与判决仍在流动
 	// 时闩不失效，lane 彻底空闲后陈旧闩自然闭环。
 	lastLatchTouch time.Time
-	maxHold        time.Duration
-	bgMaxHold      time.Duration // bg 请求的排队预算（fg 用 maxHold）
-	bgMargin       int           // bg 预留公式的固定安全边际
-	dripInterval   time.Duration
-	defaultLatch   time.Duration
+	// cooldownUntil 是解闩后配额爬坡期的结束时刻：闩每解除一次（成功帧
+	// 解闩或探测段空闲失效）重新锚定。零值表示不在爬坡期。爬坡与闩
+	// 正交——闩存续期间准入由闩分支全权裁决，爬坡只在闩外生效。
+	cooldownUntil time.Time
+	maxHold       time.Duration
+	bgMaxHold     time.Duration // bg 请求的排队预算（fg 用 maxHold）
+	bgMargin      int           // bg 预留公式的固定安全边际
+	dripInterval  time.Duration
+	defaultLatch  time.Duration
+	cooldown      time.Duration // 爬坡期时长
+	cooldownFloor float64       // 爬坡起点配额比例 ∈(0,1]
 	// fgWindow/fgRateEMA 是 fg 需求估计：每窗口 fg 准入数的指数滑动
 	// 平均（条/窗），在桶翻页时折叠。bg 预留量用它外推本桶剩余时间
 	// 内 fg 还会来多少——估高让 bg 少吃，估低退化成 margin 静态预留。
@@ -380,6 +398,9 @@ func (gate *rateGate) expireIfDue(now time.Time) {
 	gate.pushEvent(gateEventExpired, gate.limitedUntil, "")
 	gate.limitedUntil = time.Time{}
 	gate.nextDrip = time.Time{}
+	// 空闲失效同样是一次解闩： lane 静默期后的首批流量照旧吃爬坡，
+	// 陈旧闩失效不放行满配额齐射。
+	gate.cooldownUntil = now.Add(gate.cooldown)
 	gate.clearState()
 }
 
@@ -395,13 +416,18 @@ type GateStats struct {
 	Latched bool `json:"latched"`
 	// Probing 标记闩处于探测段：声明截止已过、探针槽放行中、尚未见
 	// 成功帧——Latched 全程为真，两者差分出冻结段。
-	Probing          bool       `json:"probing"`
-	LimitedUntil     *time.Time `json:"limited_until,omitempty"`
-	LatchCount       int        `json:"latch_count"`
-	DripCount        int        `json:"drip_count"`
-	RejectLatched    int        `json:"reject_latched_count"`
-	RejectBudget     int        `json:"reject_budget_count"`
-	WindowQuota      int        `json:"window_quota"`          // 每桶配额（= max_rpm）；0 表示不限速
+	Probing       bool       `json:"probing"`
+	LimitedUntil  *time.Time `json:"limited_until,omitempty"`
+	LatchCount    int        `json:"latch_count"`
+	DripCount     int        `json:"drip_count"`
+	RejectLatched int        `json:"reject_latched_count"`
+	RejectBudget  int        `json:"reject_budget_count"`
+	WindowQuota   int        `json:"window_quota"` // 每桶配额（= max_rpm）；0 表示不限速
+	// EffectiveQuota 是此刻生效的窗口配额：解闩后爬坡期内低于
+	// WindowQuota，期满回落相等；不限速时为 0。
+	EffectiveQuota int `json:"effective_quota"`
+	// CooldownUntil 是解闩后配额爬坡期的结束时刻；不在爬坡期为 nil。
+	CooldownUntil    *time.Time `json:"cooldown_until,omitempty"`
 	WindowUsed       int        `json:"window_used"`           // 当前桶已放行数（= used_fg + used_bg + 未分类）
 	WindowUsedFg     int        `json:"window_used_fg"`        // 本桶 fg 放行数
 	WindowUsedBg     int        `json:"window_used_bg"`        // 本桶 bg 放行数（含保温 ping）
@@ -489,6 +515,13 @@ type GateConfig struct {
 	// 桶的严格子集，单桶可见发送计数永不超 MaxRPM。
 	WindowOffset time.Duration
 	WindowGuard  time.Duration
+	// Cooldown 是解闩后配额爬坡时长，CooldownFloor 是爬坡起点配额
+	// 比例（∈(0,1]）：闩解除后窗口有效配额从 floor×MaxRPM 线性爬回
+	// 满值，压住客户端积压重试的齐射——上游按滑窗计尝试数，解闩不
+	// 等于余额回血。Cooldown <=0 回落 gateDefaultCooldown；Floor
+	// 越界回落 gateDefaultCooldownFloor。
+	Cooldown      time.Duration
+	CooldownFloor float64
 }
 
 // newRateGate 创建速率闸门；MaxRPM<=0 时只有冷却闩生效，不做窗口限速。
@@ -521,6 +554,10 @@ func NormalizeGateConfig(params GateConfig) GateConfig {
 	}
 	params.DripInterval = gateDurationOrDefault(params.DripInterval, gateDefaultDripInterval)
 	params.DefaultLatch = gateDurationOrDefault(params.DefaultLatch, gateDefaultLatch)
+	params.Cooldown = gateDurationOrDefault(params.Cooldown, gateDefaultCooldown)
+	if params.CooldownFloor <= 0 || params.CooldownFloor > 1 {
+		params.CooldownFloor = gateDefaultCooldownFloor
+	}
 	params.WindowOffset %= windowPeriod
 	if params.WindowOffset < 0 {
 		params.WindowOffset += windowPeriod
@@ -542,6 +579,8 @@ func (gate *rateGate) setParams(params GateConfig) {
 	gate.bgMargin = params.BgReserveMargin
 	gate.dripInterval = params.DripInterval
 	gate.defaultLatch = params.DefaultLatch
+	gate.cooldown = params.Cooldown
+	gate.cooldownFloor = params.CooldownFloor
 	gate.quota = params.MaxRPM
 	gate.windowOpen = (params.WindowOffset + params.WindowGuard) % windowPeriod
 	gate.usable = windowPeriod - 2*params.WindowGuard
@@ -760,12 +799,29 @@ func (gate *rateGate) reserveAt(usableLeft time.Duration) int {
 	return min(reserve, gate.quota)
 }
 
+// effectiveQuota 是此刻的窗口有效配额：解闩后爬坡期内从
+// cooldownFloor×quota 线性爬回满配额，期满即 quota 本身；
+// quota<=0（不限速）时原样返回。爬坡只压额度不改窗口边界与死区。
+// 调用方须持 mu。
+func (gate *rateGate) effectiveQuota(now time.Time) int {
+	if gate.quota <= 0 || gate.cooldownUntil.IsZero() || !now.Before(gate.cooldownUntil) {
+		return gate.quota
+	}
+	elapsed := max(gate.cooldown-gate.cooldownUntil.Sub(now), 0)
+	// 拆成「地板整数 + 余量线性爬坡」两段：浮点比例直乘 quota 在边界
+	// 上产出尘埃（0.2+0.8×0.5 在 float64 下是 0.6000…1），ceil 会把
+	// 整边界多送一槽。余量部分 ceil 保证任何已过时刻都先放出地板量。
+	floorQ := max(int(float64(gate.quota)*gate.cooldownFloor), 1)
+	return min(floorQ+int(math.Ceil(float64(gate.quota-floorQ)*elapsed.Seconds()/gate.cooldown.Seconds())), gate.quota)
+}
+
 // bgAllowance 是爬坡机制此刻为 bg 释放的放行额度：quota-reserve 按
 // 可发区间经过时间线性放出——ceil 让首槽在窗口开放后立即可用、末尾
 // 恰好收敛到 quota-reserve，既压住窗口开放瞬间的齐射又不损失吞吐。
-// 只在 sendable 时被调用（死区内不评估）。调用方须持 mu。
-func (gate *rateGate) bgAllowance(now, ws time.Time, reserve int) int {
-	rampCap := gate.quota - reserve
+// quota 取调用侧算好的有效配额（解闩爬坡期内低于满额）。只在
+// sendable 时被调用（死区内不评估）。调用方须持 mu。
+func (gate *rateGate) bgAllowance(now, ws time.Time, quota, reserve int) int {
+	rampCap := quota - reserve
 	if rampCap <= 0 {
 		return 0
 	}
@@ -838,6 +894,7 @@ func (gate *rateGate) stats() GateStats {
 		RejectBgReserve:  gate.rejectBgReserve,
 		RejectYield:      gate.rejectYield,
 		WindowQuota:      gate.quota,
+		EffectiveQuota:   gate.effectiveQuota(now),
 		WindowUsed:       gate.bucketUsed,
 		WindowUsedFg:     gate.bucketUsedFg,
 		WindowUsedBg:     gate.bucketUsedBg,
@@ -861,8 +918,12 @@ func (gate *rateGate) stats() GateStats {
 		stats.WindowOpen = &open
 		stats.WindowNext = &next
 		if stats.Sendable {
-			stats.PaceAllowance = gate.bgAllowance(now, ws, stats.Reserve)
+			stats.PaceAllowance = gate.bgAllowance(now, ws, stats.EffectiveQuota, stats.Reserve)
 		}
+	}
+	if !gate.cooldownUntil.IsZero() && now.Before(gate.cooldownUntil) {
+		until := gate.cooldownUntil
+		stats.CooldownUntil = &until
 	}
 	// 锁内只留结算、O(1) 读数与环内容快照：闩时段重放与等待分位
 	// 排序是 O(n log n) 纯计算，移到锁外做——面板轮询高峰不再挡
@@ -1005,8 +1066,9 @@ func (gate *rateGate) admissionVerdict(class string) gateAdmissionVerdict {
 	sendable := now.Sub(ws) < gate.usable
 	latched := !gate.limitedUntil.IsZero()
 	probing := latched && !now.Before(gate.limitedUntil)
+	eff := gate.effectiveQuota(now)
 	deadzone := gate.quota > 0 && !sendable
-	saturated := gate.quota > 0 && used >= gate.quota
+	saturated := eff > 0 && used >= eff
 	var v gateAdmissionVerdict
 	if latched {
 		// 探测段与冻结段分词：冻结是睡到声明截止的整段停发，探测
@@ -1022,6 +1084,11 @@ func (gate *rateGate) admissionVerdict(class string) gateAdmissionVerdict {
 	}
 	if saturated {
 		v.Reasons = append(v.Reasons, "gate_window_full")
+	}
+	if !gate.cooldownUntil.IsZero() && now.Before(gate.cooldownUntil) {
+		// 爬坡期 informational 词：选号审计能看到「解闩未满血」，
+		// 不参与 Healthy 判定——爬坡减额本身就是设计形态。
+		v.Reasons = append(v.Reasons, "gate_cooldown")
 	}
 	v.Healthy = !latched && !deadzone && !saturated
 	v.ExpectedWait = gate.expectedWaitLocked(class, now, ws, used, sendable)
@@ -1061,7 +1128,8 @@ func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used i
 		}
 		return wait
 	}
-	if gate.quota <= 0 {
+	eff := gate.effectiveQuota(now)
+	if eff <= 0 {
 		return 0
 	}
 	waiters := gate.waitersFg
@@ -1069,35 +1137,35 @@ func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used i
 		waiters = gate.waitersBg
 	}
 	toNext := ws.Add(windowPeriod).Sub(now)
-	if !sendable || used >= gate.quota {
+	if !sendable || used >= eff {
 		// fg 翻窗即整窗配额并行放行——前队只有超出整窗配额的部分才
 		// 按窗速率串行折算；bg 开窗爬坡额度从 ~0 重新释放、没有并行
 		// 齐射，前队仍整队折算。
 		excess := waiters
 		if class != adapter.ClassBG {
-			excess = max(waiters-gate.quota, 0)
+			excess = max(waiters-eff, 0)
 		}
-		wait := toNext + time.Duration(float64(excess)/float64(gate.quota)*float64(windowPeriod))
+		wait := toNext + time.Duration(float64(excess)/float64(eff)*float64(windowPeriod))
 		// 下一窗开放即满预留时 bg 整窗无槽：睡醒者与重查都抢不到
 		// 位，只能等到再下一窗竞争——fg 饱和 lane 上 bg 实测等待
 		// ~120s，缺这项的估计（~toNext）低估约 4 倍。
-		if class == adapter.ClassBG && gate.reserveAt(gate.usable) >= gate.quota {
+		if class == adapter.ClassBG && gate.reserveAt(gate.usable) >= eff {
 			wait += windowPeriod
 		}
 		return wait
 	}
 	if class != adapter.ClassBG {
-		if excess := waiters - (gate.quota - used); excess > 0 {
+		if excess := waiters - (eff - used); excess > 0 {
 			return min(
-				toNext+time.Duration(float64(excess)/float64(gate.quota)*float64(windowPeriod)),
+				toNext+time.Duration(float64(excess)/float64(eff)*float64(windowPeriod)),
 				toNext+windowPeriod,
 			)
 		}
 		return 0
 	}
 	reserve := gate.reserve(now, ws)
-	room := min(gate.quota-reserve-used, gate.bgAllowance(now, ws, reserve)-gate.bucketUsedBg)
-	rate := float64(max(gate.quota-reserve, 1)) / gate.usable.Seconds()
+	room := min(eff-reserve-used, gate.bgAllowance(now, ws, eff, reserve)-gate.bucketUsedBg)
+	rate := float64(max(eff-reserve, 1)) / gate.usable.Seconds()
 	// 余量内的前队即刻放行；room<0 时 waiters-room 自动并入缺口，
 	// 与旧「waiters/rate + 缺口/rate」同式。
 	return min(
@@ -1322,25 +1390,26 @@ func (gate *rateGate) wait(ctx context.Context, env attemptEnv, retry bool) (err
 			rej.GateProbeMS = retryAfter.Milliseconds()
 			return rej
 		}
-		if gate.quota <= 0 {
+		eff := gate.effectiveQuota(now)
+		if eff <= 0 {
 			// 不限速放行仍是一次真实上游发送：照常记桶，窗口行的
 			// used_*/retry_admits 在零配额口径下保持诚实。
 			gate.admitLocked(class, gc, now, ws, entered, retry)
 			gate.mu.Unlock()
 			return nil
 		}
-		admit := sendable && gate.bucketUsed < gate.quota
+		admit := sendable && gate.bucketUsed < eff
 		if bg && admit {
 			// 预留检查只在桶未满时才有意义：桶满时 bg 与 fg 同走
 			// 睡下一窗口的分支，不需要 reserve 读数。
 			reserve := gate.reserve(now, ws)
-			admit = gate.bucketUsed+1 <= gate.quota-reserve
+			admit = gate.bucketUsed+1 <= eff-reserve
 			if admit {
 				// 爬坡约束：bg 放行额度按可发区间经过时间线性释放，
 				// 压住窗口开放瞬间的齐射——fg 在窗口前段到达看到的
 				// 是半空的桶。被爬坡挡住与预留阻塞走同一条短间隔
 				// 重查路径，桶尾吞吐不变。
-				admit = gate.bucketUsedBg+1 <= gate.bgAllowance(now, ws, reserve)
+				admit = gate.bucketUsedBg+1 <= gate.bgAllowance(now, ws, eff, reserve)
 			}
 		}
 		if admit {
@@ -1353,7 +1422,7 @@ func (gate *rateGate) wait(ctx context.Context, env attemptEnv, retry bool) (err
 		// 它）只睡 gateBgRecheck——预留随可发区间衰减、爬坡随经过时间
 		// 释放，中段让出的槽即时可吃。快败统一报 quota + Retry-After
 		// 到下一窗口：客户端按窗口节奏重试，不该按本地重查节奏轮询。
-		reserveBlocked := bg && sendable && gate.bucketUsed < gate.quota
+		reserveBlocked := bg && sendable && gate.bucketUsed < eff
 		wait := ws.Add(windowPeriod).Sub(now)
 		if reserveBlocked {
 			wait = min(gateBgRecheck, ws.Add(gate.usable).Sub(now))
@@ -1507,7 +1576,7 @@ func (gate *rateGate) noteVerdict(gc *adapter.GateContext, class string, now, ws
 		Lane:           gate.lane,
 		Class:          class,
 		WindowUsed:     gate.bucketUsed,
-		WindowQuota:    max(gate.quota, 0),
+		WindowQuota:    max(gate.effectiveQuota(now), 0),
 		WindowResetSec: int(math.Ceil(ws.Add(windowPeriod).Sub(now).Seconds())),
 		WaitMS:         time.Since(entered).Milliseconds(),
 	})
@@ -1549,11 +1618,12 @@ func (gate *rateGate) tryAdmit() (bool, string) {
 	if now.Sub(ws) >= gate.usable {
 		return false, tryAdmitSkipDeadzone
 	}
+	eff := gate.effectiveQuota(now)
 	reserve := gate.reserve(now, ws)
-	if gate.bucketUsed+1 > gate.quota-reserve {
+	if gate.bucketUsed+1 > eff-reserve {
 		return false, gateReasonQuota
 	}
-	if gate.bucketUsedBg+1 > gate.bgAllowance(now, ws, reserve) {
+	if gate.bucketUsedBg+1 > gate.bgAllowance(now, ws, eff, reserve) {
 		return false, tryAdmitSkipPace
 	}
 	gate.bucketUsed++
@@ -1644,8 +1714,9 @@ func (gate *rateGate) noteUpstreamError(err error) {
 // 发送已越过上游准入（边际态下拒绝是概率执行），探测段继续闩着只会
 // 浪费探针节奏。若该次发送随后以限流错误收尾，noteUpstreamError 会重新
 // 上闩——两段判定间存在亚毫秒解闩窗，至多漏放一枚等待中的请求，代价
-// 与一枚探针同价，可接受。解闩后放行仍受窗口配额约束——剩余配额
-// 是窗口内齐射的天然上限。
+// 与一枚探针同价，可接受。解闩同时锚定配额爬坡期：放行先受减额的
+// effectiveQuota 约束，期满才回满配额——剩余配额单独挡不住解闩齐射
+// （09-22 实测满窗 35 发 1~2 窗内再冻结）。
 func (gate *rateGate) noteUpstreamSuccess() {
 	gate.mu.Lock()
 	// 首个上游帧即该次发送越过上游准入的证据：限流占比 EMA 记 0
@@ -1657,6 +1728,9 @@ func (gate *rateGate) noteUpstreamSuccess() {
 		gate.pushEvent(gateEventReleased, gate.limitedUntil, "")
 		gate.limitedUntil = time.Time{}
 		gate.nextDrip = time.Time{}
+		// 解闩即锚定爬坡期：积压重试按减额配额逐窗放回，不给上游
+		// 滑窗瞬间补满负载的机会。
+		gate.cooldownUntil = gate.now().Add(gate.cooldown)
 		// clear 与上闩方的 persist 同锁序入队：锁外入队会让「persist
 		// 后于 clear 入队」交错把已解闩的时刻写回状态行。
 		gate.clearState()
