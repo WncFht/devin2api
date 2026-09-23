@@ -6,11 +6,9 @@
     // 目录，由 setup-toolchain 部署）。enablePreviewScripts 是 pseudocode-runtime.js
     // 注入的前提（另要求工作区受信任）；mathRenderingOption KaTeX 是 pseudocode
     // 数学 CSS 的依赖；previewTheme none.css 把主题交给 .crossnote/style.less；
-    // wikiLinkResolution 是"编辑器设置 ?? config.js"取值键，只能写在这里。
     "markdown-preview-enhanced.enablePreviewScripts": true,
     "markdown-preview-enhanced.enableScriptExecution": true,
-    "markdown-preview-enhanced.enableWikiLinkSyntax": true,
-    "markdown-preview-enhanced.wikiLinkResolution": "shortest",
+    "markdown-preview-enhanced.enableWikiLinkSyntax": false,
     "markdown-preview-enhanced.enableCriticMarkupSyntax": true,
     "markdown-preview-enhanced.enableExtendedTableSyntax": true,
     "markdown-preview-enhanced.enableHTML5Embed": true,
