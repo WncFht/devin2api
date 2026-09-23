@@ -220,6 +220,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		d("gate_window_guard_seconds", "int", "桶界两侧停发死区秒数（devin.gate_window_guard_seconds）；<=0 或 >=30 默认 2"),
 		d("gate_bg_max_hold_seconds", "int", "bg 类请求闸内排队预算秒数（devin.gate_bg_max_hold_seconds，fg 走 gate_max_hold_seconds）；<=0 默认 120"),
 		d("gate_bg_reserve_margin", "int", "bg 准入预留公式的固定安全边际条数（devin.gate_bg_reserve_margin）；<=0 默认 4"),
+		d("gate_cooldown_seconds", "int", "解闩后配额爬坡时长秒数（devin.gate_cooldown_seconds）：闩解除后窗口有效配额从地板比例线性爬回满值；<=0 默认 180"),
+		d("gate_cooldown_floor_ratio", "float", "爬坡起点配额比例（devin.gate_cooldown_floor_ratio，取值 (0,1]）：解闩后首个窗口只放 floor×max_rpm；越界默认 0.2"),
+		d("gate_fragile_seconds", "int", "脆弱期时长秒数（devin.gate_fragile_seconds）：限流判决或解闩后窗内放行按经过时间线性释放（fg/bg 同束），压住开窗齐射；<=0 默认 600"),
 		// ---- 前缀保温 ----
 		d("warm_prefix_enabled", "bool", "前缀保温总开关（devin.warm_prefix_enabled）：静默会话按节拍重放请求体给上游 prompt cache 续期"),
 		d("warm_prefix_interval_seconds", "int", "每条保温谱系的 ping 节拍秒数（devin.warm_prefix_interval_seconds，须明显低于上游 ~780s TTL）；<=0 默认 180"),

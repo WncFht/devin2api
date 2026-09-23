@@ -51,6 +51,11 @@ const (
 	// gateDefaultCooldownFloor 是爬坡起点配额比例：解闩后首个窗口只放
 	// floor×quota，其余请求按桶满同路睡到下一窗口。
 	gateDefaultCooldownFloor = 0.2
+	// gateDefaultFragile 是脆弱期时长：每条上游限流判决（含闩内不延期
+	// 的重复拒绝）与每次解闩都重新锚定。09-23 实测发作期判决间隔以
+	// 分钟计（03:34~05:20 段内最疏 ~10min 一档），取 10min 让发作
+	// 全程留在脆弱期内、平静期自然退出。
+	gateDefaultFragile = 10 * time.Minute
 	// gateBgRecheck 是 bg 被预留/爬坡挡住时的睡醒重查间隔：预留随可发
 	// 区间剩余时间衰减、爬坡额度随经过时间线性释放，短间隔重查让
 	// bg 吃到中段让出的槽而不必睡到下一窗口。
@@ -133,6 +138,12 @@ const (
 //     窗口有效配额从 cooldownFloor×quota 线性爬回满配额——解闩只证明
 //     上游刚放进一条，不证明余额回血；积压重试的齐射会把边际态上游
 //     立刻打回封禁（09-22 实测解闩后 1~2 窗内再冻结）。
+//     配额爬坡只限「量」不限「速」：开窗瞬间配额内排队仍会毫秒级齐射，
+//     深债期被上游整排拒绝且每发续债（09-23 03:52 实测 29 条同窗 :02
+//     齐发、同窗被拒）。故另设脆弱期：任一上游限流判决或解闩把
+//     fragileUntil 推进 fragile 时长，期内 fg/bg 放行除窗口配额外还须
+//     过窗内线性额度（与 bg 爬坡同式、不扣预留）——开窗齐射摊成逐秒
+//     放行，首条被拒即可重新上闩截停后续。
 //     上游规则推导见 docs/upstream-rate-limit.md。
 type rateGate struct {
 	mu           sync.Mutex
@@ -153,6 +164,13 @@ type rateGate struct {
 	// 解闩或探测段空闲失效）重新锚定。零值表示不在爬坡期。爬坡与闩
 	// 正交——闩存续期间准入由闩分支全权裁决，爬坡只在闩外生效。
 	cooldownUntil time.Time
+	// fragileUntil 是脆弱期截止：上游每条限流判决（noteUpstreamError
+	// 的 RateLimited 分支，含闩内不延期的重复拒绝）与每次解闩都按
+	// fragile 时长重新锚定。期内 fg/bg 准入除窗口配额外还要过
+	// fragilePace 的窗内线性额度——开窗齐射摊成逐秒放行，首条被拒
+	// 即可重新上闩截停后续，不再一次送掉整排尝试计数。零值表示不
+	// 在脆弱期。
+	fragileUntil  time.Time
 	maxHold       time.Duration
 	bgMaxHold     time.Duration // bg 请求的排队预算（fg 用 maxHold）
 	bgMargin      int           // bg 预留公式的固定安全边际
@@ -160,6 +178,7 @@ type rateGate struct {
 	defaultLatch  time.Duration
 	cooldown      time.Duration // 爬坡期时长
 	cooldownFloor float64       // 爬坡起点配额比例 ∈(0,1]
+	fragile       time.Duration // 脆弱期时长
 	// fgWindow/fgRateEMA 是 fg 需求估计：每窗口 fg 准入数的指数滑动
 	// 平均（条/窗），在桶翻页时折叠。bg 预留量用它外推本桶剩余时间
 	// 内 fg 还会来多少——估高让 bg 少吃，估低退化成 margin 静态预留。
@@ -398,9 +417,10 @@ func (gate *rateGate) expireIfDue(now time.Time) {
 	gate.pushEvent(gateEventExpired, gate.limitedUntil, "")
 	gate.limitedUntil = time.Time{}
 	gate.nextDrip = time.Time{}
-	// 空闲失效同样是一次解闩： lane 静默期后的首批流量照旧吃爬坡，
-	// 陈旧闩失效不放行满配额齐射。
+	// 空闲失效同样是一次解闩： lane 静默期后的首批流量照旧吃爬坡
+	// 与脆弱期滴灌，陈旧闩失效不放行满配额齐射。
 	gate.cooldownUntil = now.Add(gate.cooldown)
+	gate.fragileUntil = now.Add(gate.fragile)
 	gate.clearState()
 }
 
@@ -427,7 +447,10 @@ type GateStats struct {
 	// WindowQuota，期满回落相等；不限速时为 0。
 	EffectiveQuota int `json:"effective_quota"`
 	// CooldownUntil 是解闩后配额爬坡期的结束时刻；不在爬坡期为 nil。
-	CooldownUntil    *time.Time `json:"cooldown_until,omitempty"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+	// FragileUntil 是脆弱期截止：期内全部放行按窗内线性额度滴灌，
+	// 防开窗齐射整排送债；不在脆弱期为 nil。
+	FragileUntil     *time.Time `json:"fragile_until,omitempty"`
 	WindowUsed       int        `json:"window_used"`           // 当前桶已放行数（= used_fg + used_bg + 未分类）
 	WindowUsedFg     int        `json:"window_used_fg"`        // 本桶 fg 放行数
 	WindowUsedBg     int        `json:"window_used_bg"`        // 本桶 bg 放行数（含保温 ping）
@@ -522,6 +545,11 @@ type GateConfig struct {
 	// 越界回落 gateDefaultCooldownFloor。
 	Cooldown      time.Duration
 	CooldownFloor float64
+	// Fragile 是脆弱期时长：上游限流判决或解闩后的一段时间内，窗口内
+	// 放行按经过时间线性释放（fg/bg 同束，不扣 bg 预留）——爬坡只限
+	// 量不限速，开窗瞬间配额内排队仍会齐射，深债期整排被拒且每发续债。
+	// <=0 回落 gateDefaultFragile。
+	Fragile time.Duration
 }
 
 // newRateGate 创建速率闸门；MaxRPM<=0 时只有冷却闩生效，不做窗口限速。
@@ -558,6 +586,7 @@ func NormalizeGateConfig(params GateConfig) GateConfig {
 	if params.CooldownFloor <= 0 || params.CooldownFloor > 1 {
 		params.CooldownFloor = gateDefaultCooldownFloor
 	}
+	params.Fragile = gateDurationOrDefault(params.Fragile, gateDefaultFragile)
 	params.WindowOffset %= windowPeriod
 	if params.WindowOffset < 0 {
 		params.WindowOffset += windowPeriod
@@ -581,6 +610,7 @@ func (gate *rateGate) setParams(params GateConfig) {
 	gate.defaultLatch = params.DefaultLatch
 	gate.cooldown = params.Cooldown
 	gate.cooldownFloor = params.CooldownFloor
+	gate.fragile = params.Fragile
 	gate.quota = params.MaxRPM
 	gate.windowOpen = (params.WindowOffset + params.WindowGuard) % windowPeriod
 	gate.usable = windowPeriod - 2*params.WindowGuard
@@ -828,6 +858,20 @@ func (gate *rateGate) bgAllowance(now, ws time.Time, quota, reserve int) int {
 	return int(math.Ceil(float64(rampCap) * now.Sub(ws).Seconds() / gate.usable.Seconds()))
 }
 
+// fragileActive 报告脆弱期是否生效中。调用方须持 mu。
+func (gate *rateGate) fragileActive(now time.Time) bool {
+	return !gate.fragileUntil.IsZero() && now.Before(gate.fragileUntil)
+}
+
+// fragilePace 是脆弱期内的窗内放行额度：与 bgAllowance 同一条线性爬坡
+// 公式（配额按可发区间经过时间释放），但不扣预留、对 fg/bg 同束——
+// 开窗瞬间额度≈0 随后逐秒放回，配额口径的开窗齐射被摊成滴灌，深债期
+// 首条被拒即可重新上闩截停后续（09-23 03:52 齐射 29 条同窗 :02 整排
+// 被拒的教训）。调用方须持 mu。
+func (gate *rateGate) fragilePace(now, ws time.Time, eff int) int {
+	return gate.bgAllowance(now, ws, eff, 0)
+}
+
 // restoreState 在启动时恢复未过期的冷却闩：首枚探针槽取声明截止
 // （冻结段零发送），空闲时钟从恢复时刻起算。
 // 行缺失/损坏/已过期都按无闩处理并顺手清掉残留行。
@@ -924,6 +968,10 @@ func (gate *rateGate) stats() GateStats {
 	if !gate.cooldownUntil.IsZero() && now.Before(gate.cooldownUntil) {
 		until := gate.cooldownUntil
 		stats.CooldownUntil = &until
+	}
+	if gate.fragileActive(now) {
+		until := gate.fragileUntil
+		stats.FragileUntil = &until
 	}
 	// 锁内只留结算、O(1) 读数与环内容快照：闩时段重放与等待分位
 	// 排序是 O(n log n) 纯计算，移到锁外做——面板轮询高峰不再挡
@@ -1090,6 +1138,11 @@ func (gate *rateGate) admissionVerdict(class string) gateAdmissionVerdict {
 		// 不参与 Healthy 判定——爬坡减额本身就是设计形态。
 		v.Reasons = append(v.Reasons, "gate_cooldown")
 	}
+	if gate.fragileActive(now) {
+		// 脆弱期 informational 词：窗内滴灌压着放行节奏，选号审计
+		// 可见「上游刚翻过脸」——与 gate_cooldown 同层只读不判病。
+		v.Reasons = append(v.Reasons, "gate_fragile")
+	}
 	v.Healthy = !latched && !deadzone && !saturated
 	v.ExpectedWait = gate.expectedWaitLocked(class, now, ws, used, sendable)
 	return v
@@ -1155,6 +1208,18 @@ func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used i
 		return wait
 	}
 	if class != adapter.ClassBG {
+		// 脆弱期 fg 放行按窗内线性额度而非翻窗配额：超出当前额度的
+		// 前队按释放速率（eff/usable）折算，不等下一窗口——与 bg 爬
+		// 坡同式，只是不扣预留。
+		if gate.fragileActive(now) {
+			if deficit := waiters - (gate.fragilePace(now, ws, eff) - used); deficit > 0 {
+				return min(
+					time.Duration(float64(deficit)*gate.usable.Seconds()/float64(eff)*float64(time.Second)),
+					toNext+windowPeriod,
+				)
+			}
+			return 0
+		}
 		if excess := waiters - (eff - used); excess > 0 {
 			return min(
 				toNext+time.Duration(float64(excess)/float64(eff)*float64(windowPeriod)),
@@ -1165,6 +1230,11 @@ func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used i
 	}
 	reserve := gate.reserve(now, ws)
 	room := min(eff-reserve-used, gate.bgAllowance(now, ws, eff, reserve)-gate.bucketUsedBg)
+	if gate.fragileActive(now) {
+		// bg 在脆弱期同时受窗内滴灌约束：共用桶额度（fg 计入在内）
+		// 按线性释放，room 取两口径的较小者。
+		room = min(room, gate.fragilePace(now, ws, eff)-used)
+	}
 	rate := float64(max(eff-reserve, 1)) / gate.usable.Seconds()
 	// 余量内的前队即刻放行；room<0 时 waiters-room 自动并入缺口，
 	// 与旧「waiters/rate + 缺口/rate」同式。
@@ -1399,6 +1469,14 @@ func (gate *rateGate) wait(ctx context.Context, env attemptEnv, retry bool) (err
 			return nil
 		}
 		admit := sendable && gate.bucketUsed < eff
+		// 脆弱期窗内滴灌：配额内的开窗齐射在深债期会被上游整排拒绝
+		// 且每发续债；放行按可发区间经过时间线性释放（与 bg 爬坡同式、
+		// fg/bg 同束不扣预留），首条被拒就能重新上闩截停后续。
+		paceBlocked := false
+		if admit && gate.fragileActive(now) {
+			admit = gate.bucketUsed+1 <= gate.fragilePace(now, ws, eff)
+			paceBlocked = !admit
+		}
 		if bg && admit {
 			// 预留检查只在桶未满时才有意义：桶满时 bg 与 fg 同走
 			// 睡下一窗口的分支，不需要 reserve 读数。
@@ -1418,13 +1496,15 @@ func (gate *rateGate) wait(ctx context.Context, env attemptEnv, retry bool) (err
 			return nil
 		}
 		// 不可放行：按阻塞成因选睡眠时长。桶满/死区睡到下一窗口开放；
-		// bg 让路阻塞（sendable 且桶未满：预留不足或爬坡额度还没释放到
-		// 它）只睡 gateBgRecheck——预留随可发区间衰减、爬坡随经过时间
-		// 释放，中段让出的槽即时可吃。快败统一报 quota + Retry-After
-		// 到下一窗口：客户端按窗口节奏重试，不该按本地重查节奏轮询。
+		// 爬坡类阻塞（sendable 且桶未满：bg 预留/爬坡让路，或脆弱期窗内
+		// 滴灌额度还没放到它）只睡 gateBgRecheck——额度随经过时间持续
+		// 释放，睡到下窗会把可吃槽位白白放弃。快败统一报 quota +
+		// Retry-After 到下一窗口：客户端按窗口节奏重试，不该按本地
+		// 重查节奏轮询。
 		reserveBlocked := bg && sendable && gate.bucketUsed < eff
+		rampBlocked := reserveBlocked || paceBlocked
 		wait := ws.Add(windowPeriod).Sub(now)
-		if reserveBlocked {
+		if rampBlocked {
 			wait = min(gateBgRecheck, ws.Add(gate.usable).Sub(now))
 		}
 		// 让位快败：预计排队超 gateEarlyRelease 且号池里有兄弟 lane
@@ -1435,13 +1515,13 @@ func (gate *rateGate) wait(ctx context.Context, env attemptEnv, retry bool) (err
 		// 去取会与对侧同形让位构成 ABBA。答否后按先前算好的 wait 落回
 		// 正常流程——解锁窗口内的状态变化与普通睡眠竞态同价，下一拍
 		// 睡醒自会重估。
-		// reserveBlocked 的 wait 只是 gateBgRecheck 重查节奏（≤4s）而
+		// rampBlocked 的 wait 只是 gateBgRecheck 重查节奏（≤4s）而
 		// 非期望排队时长——拿它当触发会让探针永不被评估，桶未满的
-		// 预留/爬坡饥饿能每 4s 重查烧满 bgMaxHold，兄弟 lane 空着也
+		// 预留/爬坡/滴灌饥饿能每 4s 重查烧满排队预算，兄弟 lane 空着也
 		// 看不见。该分支触发改用 expectedWaitLocked 口径：room<0 的
 		// 缺口按释放速率折算，与选号侧 expectedWait 同一本账。
 		probeWait := wait
-		if reserveBlocked {
+		if rampBlocked {
 			probeWait = gate.expectedWaitLocked(class, now, ws, gate.bucketUsed, sendable)
 		}
 		// siblingEW 是本次评估让位判定咨询到的兄弟最小期望排队；未咨询
@@ -1623,6 +1703,10 @@ func (gate *rateGate) tryAdmit() (bool, string) {
 	if gate.bucketUsed+1 > eff-reserve {
 		return false, gateReasonQuota
 	}
+	if gate.fragileActive(now) && gate.bucketUsed+1 > gate.fragilePace(now, ws, eff) {
+		// 脆弱期滴灌对 ping 同束：共用桶额度未放到它，本拍跳过。
+		return false, tryAdmitSkipPace
+	}
 	if gate.bucketUsedBg+1 > gate.bgAllowance(now, ws, eff, reserve) {
 		return false, tryAdmitSkipPace
 	}
@@ -1666,6 +1750,9 @@ func (gate *rateGate) noteUpstreamError(err error) {
 		gate.mu.Unlock()
 		return
 	}
+	// 每条限流判决都重新锚定脆弱期：闩内不延期的重复拒绝同样是上游
+	// 在拒的证据——判决稀疏的尾声也要让开窗滴灌继续压着节奏。
+	gate.fragileUntil = now.Add(gate.fragile)
 	if until.IsZero() {
 		until = now.Add(gate.defaultLatch)
 	}
@@ -1729,8 +1816,10 @@ func (gate *rateGate) noteUpstreamSuccess() {
 		gate.limitedUntil = time.Time{}
 		gate.nextDrip = time.Time{}
 		// 解闩即锚定爬坡期：积压重试按减额配额逐窗放回，不给上游
-		// 滑窗瞬间补满负载的机会。
+		// 滑窗瞬间补满负载的机会。同刻锚定脆弱期：恢复期的开窗
+		// 齐射正是再冻结的火种（09-23 03:52 :02 整排 29 发同窗被拒）。
 		gate.cooldownUntil = gate.now().Add(gate.cooldown)
+		gate.fragileUntil = gate.now().Add(gate.fragile)
 		// clear 与上闩方的 persist 同锁序入队：锁外入队会让「persist
 		// 后于 clear 入队」交错把已解闩的时刻写回状态行。
 		gate.clearState()

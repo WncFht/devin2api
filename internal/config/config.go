@@ -142,6 +142,11 @@ type DevinConfig struct {
 	// GateCooldownFloorRatio 是爬坡起点配额比例（0~1，越界默认 0.2）：
 	// 解闩后首个窗口只放 floor×max_rpm。
 	GateCooldownFloorRatio float64 `yaml:"gate_cooldown_floor_ratio"`
+	// GateFragileSeconds 是脆弱期时长秒数：上游限流判决或解闩后的
+	// 一段时间内，窗口内放行按经过时间线性释放（fg/bg 同束），压住
+	// 开窗瞬间配额内排队的齐射——深债期整排被拒且每发续债；
+	// <=0 默认 600。
+	GateFragileSeconds int `yaml:"gate_fragile_seconds"`
 	// WarmPrefixEnabled 是前缀保温总开关：为 true 时对保留的会话谱系
 	// 按节拍重放最近请求体，给上游 prompt cache 续期，压住 subagent
 	// 等待结束后的冷 prefill。默认 false（灰度开关）；热重载生效，

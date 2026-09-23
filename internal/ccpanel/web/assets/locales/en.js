@@ -1303,6 +1303,8 @@ window.I18N_LOCALES['en'] = {
   'accounts.reason.gateProbing': 'gate probing',
   'accounts.reason.gateWindowDeadzone': 'window dead zone',
   'accounts.reason.gateWindowFull': 'window full',
+  'accounts.reason.gateCooldown': 'gate cooldown',
+  'accounts.reason.gateFragile': 'gate fragile',
   'accounts.reason.quotaLow': 'quota low',
   'accounts.sort.label': 'Sort accounts',
   'accounts.sort.server': 'Server order',

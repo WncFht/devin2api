@@ -132,6 +132,10 @@ devin:
   #   齐射。默认 180。
   # gate_cooldown_floor_ratio: 爬坡起点配额比例（0~1），解闩后首个
   #   窗口只放 floor×max_rpm。默认 0.2。
+  # gate_fragile_seconds: 脆弱期时长——上游限流判决或解闩后的一段
+  #   时间内，fg/bg 放行除窗口配额外还须过窗内线性额度（与 bg 爬坡
+  #   同式、不扣预留）：爬坡只限量不限速，开窗瞬间配额内排队仍会
+  #   齐射，深债期会被上游整排拒绝且每发续债。默认 600。
   # 下游令牌可标 class=bg（无人值守批跑）走分级准入：bg 排队预算更长、
   # 且被一道动态预留约束挡在 fg 保底余量之外——语义见 docs/gate-classes.md。
   # gate_bg_max_hold_seconds: bg 请求的最长闸内排队秒数（fg 仍走
@@ -147,6 +151,7 @@ devin:
   # gate_bg_reserve_margin: 4
   # gate_cooldown_seconds: 180
   # gate_cooldown_floor_ratio: 0.2
+  # gate_fragile_seconds: 600
   # 前缀保温（prefix-replay warming）：对保留的会话谱系按节拍重放最近
   # 请求体，给上游 prompt cache 续期，压住 subagent 长时间等待结束后
   # 恢复轮次的冷 prefill。默认关闭（灰度开关），其余参数通常无需调整：

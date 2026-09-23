@@ -655,6 +655,8 @@
     gate_probing: 'gateProbing',
     gate_window_deadzone: 'gateWindowDeadzone',
     gate_window_full: 'gateWindowFull',
+    gate_cooldown: 'gateCooldown',
+    gate_fragile: 'gateFragile',
     quota_low: 'quotaLow'
   };
 

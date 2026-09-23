@@ -195,6 +195,12 @@ var configFields = []ConfigField{
 		},
 	},
 	{
+		Key:     "devin.gate_fragile_seconds",
+		changed: func(p, n Config) bool { return p.Gate.Fragile != n.Gate.Fragile },
+		Get:     secondsOf(func(c Config) time.Duration { return NormalizeGateConfig(c.Gate).Fragile }),
+		Set:     setSeconds(func(c *Config) *time.Duration { return &c.Gate.Fragile }),
+	},
+	{
 		Key:     "devin.warm_prefix_enabled",
 		changed: func(p, n Config) bool { return p.Warm.Enabled != n.Warm.Enabled },
 		Get:     func(c Config) string { return strconv.FormatBool(NormalizeWarmConfig(c.Warm).Enabled) },

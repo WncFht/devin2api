@@ -16,6 +16,8 @@
 
 fg：`sendable && bucketUsed < quota`——与未分级时完全一致。
 
+脆弱期（2026-09-23）：上游限流判决或解闩后的 `gate_fragile_seconds`（默认 600）内，fg/bg 在各自规则上再叠加一层共用约束——`bucketUsed + 1 <= ceil(eff × 已过秒数 / 可发区间秒数)`（与 bg 爬坡同式但不扣预留、fg 也受束）。爬坡配额只限「量」不限「速」，开窗瞬间配额内排队仍会毫秒级齐射，深债期被上游整排拒绝且每发续债（09-23 03:52 实测 29 条同窗 :02 齐发同窗被拒）；脆弱期把开窗齐射摊成逐秒滴灌，首条被拒即可重新上闩截停后续。被滴灌挡住走 4s 短重查（与 bg 预留阻塞同路），快败归 quota 词。
+
 bg：在 fg 规则上叠加两层约束——
 
 - 动态预留：`bucketUsed + 1 <= quota − reserve`，最后 reserve 个槽对 bg 数学上不可达。
@@ -54,13 +56,14 @@ bg 客户端拿到 `quota` 型 429 直接睡满 `Retry-After`；成功响应的 
 
 ## 观测
 
-`GateStats`（`/admin/accounts` 的 `gate` 段、`/admin/runtime-metrics` 的 `gate`/`accounts` 段）新增：`window_used_fg`/`window_used_bg`（桶用量按类分列，验证 bg 未吃 fg 预留）、`waiters_fg`/`waiters_bg`（`waiters` 仍为两者之和）、`reject_bg_reserve_count`（因预留/爬坡让路被拒掉的 bg 数，礼让强度直接指标）、`reserve`/`fg_rate`（当前预留量与 fg 速率估计，预留行为的可解释性来源）、`pace_allowance`（爬坡此刻为 bg 释放的额度上限，死区/零配额为 0）。
+`GateStats`（`/admin/accounts` 的 `gate` 段、`/admin/runtime-metrics` 的 `gate`/`accounts` 段）新增：`window_used_fg`/`window_used_bg`（桶用量按类分列，验证 bg 未吃 fg 预留）、`waiters_fg`/`waiters_bg`（`waiters` 仍为两者之和）、`reject_bg_reserve_count`（因预留/爬坡让路被拒掉的 bg 数，礼让强度直接指标）、`reserve`/`fg_rate`（当前预留量与 fg 速率估计，预留行为的可解释性来源）、`pace_allowance`（爬坡此刻为 bg 释放的额度上限，死区/零配额为 0）、`fragile_until`（脆弱期截止，期内全部放行过窗内线性滴灌额度；不在脆弱期为 nil；选号审计另见 informational 词 `gate_fragile`）。
 
 ## 配置
 
 ```yaml
 gate_bg_max_hold_seconds: 120 # bg waiter 最长闸内排队（fg 仍走 gate_max_hold_seconds，默认 30）
 gate_bg_reserve_margin: 4 # reserve 公式中的固定安全边际
+gate_fragile_seconds: 600 # 脆弱期时长：限流判决/解闩后窗内放行按经过时间线性释放（fg/bg 同束）
 ```
 
 ## 失败语义与边界

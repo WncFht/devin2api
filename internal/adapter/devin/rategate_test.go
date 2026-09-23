@@ -329,6 +329,9 @@ func TestRateGateCooldownRampsQuota(t *testing.T) {
 		t.Fatalf("probe wait error = %v", err) // 探针放行，bucketUsed=1
 	}
 	gate.noteUpstreamSuccess() // 解闩，爬坡锚定 :12+60s
+	// 脆弱期滴灌会与爬坡叠加生效；本用例单测爬坡配额形状，抹掉脆弱期
+	// 锚点隔离掉（fragile 的窗内滴灌由 FragilePacesWindowOpen 单独覆盖）。
+	gate.fragileUntil = time.Time{}
 	if got := gate.stats().EffectiveQuota; got != 2 {
 		t.Fatalf("effective quota at floor = %d, want 2", got)
 	}
@@ -383,6 +386,7 @@ func TestRateGateCooldownReanchorsOnRefreeze(t *testing.T) {
 		t.Fatalf("probe wait error = %v", err)
 	}
 	gate.noteUpstreamSuccess()                               // 爬坡锚定 :12+60s，eff=2，used=1
+	gate.fragileUntil = time.Time{}                          // 隔离脆弱期滴灌，单测爬坡重锚
 	_ = gate.wait(context.Background(), attemptEnv{}, false) // used=2，eff 满
 	// 爬坡中再被限：重闩后冻结段一律快败，配额形状无关。
 	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 30 seconds."))
@@ -397,6 +401,7 @@ func TestRateGateCooldownReanchorsOnRefreeze(t *testing.T) {
 		t.Fatalf("second probe wait error = %v", err)
 	}
 	gate.noteUpstreamSuccess()
+	gate.fragileUntil = time.Time{} // 同上：隔离脆弱期，断言只归爬坡账
 	if got := gate.stats().EffectiveQuota; got != 2 {
 		t.Fatalf("effective quota after re-anchor = %d, want 2", got)
 	}
@@ -419,12 +424,16 @@ func TestRateGateCooldownAfterIdleExpiry(t *testing.T) {
 	clock := pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 5 seconds."))
 	// lane 静默 3.5min：越过截止进探测段但零判决超空闲阈值（2min），
-	// 闩自然失效并锚定爬坡。
+	// 闩自然失效并锚定爬坡。首个 wait 触发失效结算后再抹掉脆弱期锚点
+	// ——本用例单测爬坡，脆弱期滴灌单独覆盖。
 	clock.t = clock.t.Add(3*time.Minute + 30*time.Second) // 落在某分钟 :40
 	var gateErr *llm.Failure
 	for i := 0; i < 2; i++ {
 		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 			t.Fatalf("floor wait #%d error = %v", i, err)
+		}
+		if i == 0 {
+			gate.fragileUntil = time.Time{}
 		}
 	}
 	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
@@ -432,6 +441,80 @@ func TestRateGateCooldownAfterIdleExpiry(t *testing.T) {
 	}
 	if got := gate.stats().EffectiveQuota; got != 2 {
 		t.Fatalf("effective quota after idle expiry = %d, want 2", got)
+	}
+}
+
+// 脆弱期窗内滴灌：配额爬坡只限量不限速，开窗瞬间配额内排队仍会齐射
+// ——09-23 03:52 实测 29 条同窗 :02 齐发被上游整排拒绝且每发续债。
+// 脆弱期内放行按可发区间经过时间线性释放（与 bg 爬坡同式、fg/bg 同束
+// 不扣预留），把开窗齐射摊成逐秒滴灌；期满回满配额开窗即整窗放行。
+func TestRateGateFragilePacesWindowOpen(t *testing.T) {
+	gate := newRateGate(GateConfig{
+		MaxRPM:        30,
+		MaxHold:       time.Millisecond, // 快败化：被滴灌挡住的请求立即 quota 拒绝
+		DripInterval:  time.Millisecond,
+		Cooldown:      time.Second, // 爬坡 1s 收尾——本用例隔离脆弱期滴灌单测
+		CooldownFloor: 0.2,
+		Fragile:       10 * time.Minute,
+	}, nil, "")
+	clock := pinGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 1 seconds."))
+	clock.t = clock.t.Add(2 * time.Second) // :12，截止已过进探测段
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
+		t.Fatalf("probe wait error = %v", err)
+	}
+	gate.noteUpstreamSuccess() // 解闩：cooldown 锚定 :12+1s，fragile 锚定 :12+10min
+	if !gate.fragileActive(clock.t) {
+		t.Fatal("fragile should be active right after release")
+	}
+	if gate.stats().FragileUntil == nil {
+		t.Fatal("stats().FragileUntil should be set during fragile")
+	}
+	var gateErr *llm.Failure
+	admit := func() error { return gate.wait(context.Background(), attemptEnv{}, false) }
+	countAdmits := func(want int, at string) {
+		t.Helper()
+		count := 0
+		for i := 0; i < 30; i++ {
+			err := admit()
+			if err == nil {
+				count++
+				continue
+			}
+			if !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+				t.Fatalf("%s wait #%d error = %v, want quota fast-fail", at, i, err)
+			}
+		}
+		if count != want {
+			t.Fatalf("%s admitted = %d, want %d", at, count, want)
+		}
+	}
+	// 推进到下一窗口开放后 3s（:05）：cooldown 已满 eff=30，但脆弱期
+	// 窗内额度 = ceil(30×3/56) = 2——配额口径的开窗齐射被摊成滴灌。
+	clock.t = clock.t.Truncate(time.Minute).Add(time.Minute).Add(5 * time.Second)
+	countAdmits(2, "window open+3s")
+	// 保温 ping 同束脆弱期滴灌：共用桶额度（2）已耗尽，本拍报 pace。
+	if ok, reason := gate.tryAdmit(); ok || reason != tryAdmitSkipPace {
+		t.Fatalf("tryAdmit during fragile = %v,%q, want pace skip", ok, reason)
+	}
+	// 推进到 :33（可发区间经过 31s）：fragilePace=ceil(30×31/56)=17，
+	// 已放 2 → 再放 15，第 16 条起仍被滴灌挡住。
+	clock.t = clock.t.Add(28 * time.Second)
+	countAdmits(15, "mid-window")
+	// 脆弱期结束（fragileUntil 是 :12+10min，已过去）：翻窗后桶清零、
+	// eff=30 满额——开窗即整窗并行放行，不再受窗内滴灌约束。
+	clock.t = clock.t.Add(11 * time.Minute)
+	countAdmits(30, "post-fragile")
+	if gate.fragileActive(clock.t) {
+		t.Fatal("fragile should be inactive after fragileUntil")
+	}
+	// 新判决重新锚定脆弱期并上闩：闩存续期间准入归闩分支全权裁决。
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 1 seconds."))
+	if !gate.fragileActive(clock.t) {
+		t.Fatal("new refusal should re-anchor fragile")
+	}
+	if err := admit(); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonLatch {
+		t.Fatalf("re-latched wait error = %v, want latch fast-fail", err)
 	}
 }
 

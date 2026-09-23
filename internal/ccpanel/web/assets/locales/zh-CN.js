@@ -1302,6 +1302,8 @@ window.I18N_LOCALES['zh-CN'] = {
   'accounts.reason.gateProbing': '闸门探路中',
   'accounts.reason.gateWindowDeadzone': '窗口死区',
   'accounts.reason.gateWindowFull': '窗口满',
+  'accounts.reason.gateCooldown': '闸门爬坡中',
+  'accounts.reason.gateFragile': '闸门脆弱期',
   'accounts.reason.quotaLow': '配额低',
   'accounts.sort.label': '排序账号',
   'accounts.sort.server': '默认序',
