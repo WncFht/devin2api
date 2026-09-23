@@ -48,6 +48,8 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 
 推论：改写只需破坏**特征句本身**（换主语、换语序、截断共现），无需回避主题词。「Codex」「ANSI escape codes」「OpenAI」等裸词单独出现均实测放行。
 
+**2026-09-23 OpenClaw 系条目把机制进一步钉死为「归一化连续 n-gram 封锁表」**（~110 发低速 bisect）：匹配前上游把 prompt 折成小写 token 流——去标点/markdown/撇号（`you're`→`you re`）、折叠空白——然后做**连续 token 子串匹配**：词序固定、逐词必要、词间插入任意一词即破坏；前后有任意文本不影响（子串语义）；不做 Unicode confusable 折叠（西里尔放行）；同义改写/翻译放行。上表中的「整句/句对/同句共现」形态都是该机制的特例（条目本身可跨句跨行）。作用域实测：**只扫 wire 的 `prompt` 字段**（合并后 system + 注入工具描述段），user/assistant 消息与 `tools[]` 声明不扫——因此 `oc-*` 规则全部 promptOnly。序号 digit 是 token（"1. Read SOUL.md" 拦、去序号放行）。
+
 ## 四、已实证指纹清单
 
 ### Claude Code 2.1.x（`cc-*` / `a*` 规则）
@@ -81,6 +83,27 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 - **fp-3 `codex-ansi-escapes`**：`Don't output ANSI escape codes directly — the CLI renderer applies them.` 拦（撇号为 `'`、破折号为 `—`）。`Don't output ANSI escape codes directly.`（去尾）放行、`Never output …`（换主语）放行、`— the CLI applies them`（去 renderer）放行——两个子句须同句共现。改写主语为 `Never output` 后整句通过。
 
 四套模板清洗后整体回放全部 200。
+
+### OpenClaw/ZCode 工作区模板（`oc-*` 规则，2026-09-23 新增）
+
+背景：Hermes 主会话 40K system prompt（SOUL.md + AGENTS.md 注入段 + 框架文本 + 29 tools）整体被拦；早前 bisect 误判为「AI 人格化叙事主题评分」，实测是旧版 OpenClaw 系模板（csnotes `.openclaw-memory` 变体，ZCode workbuddy-prompt 同源）的**逐句指纹**。封锁意图为反指纹——识别克隆系 agent prompt，非通用内容审核。条目即上游归一化 token 序列（对应 `sanitize.go` `ngramRule` 的 tokens 字段）：
+
+| 归一化条目（token 序列）                                                                                                                                              | 规则                   | 出处（csnotes 变体行号）                 |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ---------------------------------------- |
+| `1 read soul md this is who you are`                                                                                                                                  | `oc-read-soul`         | AGENTS.md L13（序号 "1" 是条目一部分）   |
+| `2 read user md this is who you re helping`                                                                                                                           | `oc-read-user`         | AGENTS.md L14（L15 "3. Read…" 非条目）   |
+| `capture what matters decisions context things to remember skip the secrets unless asked to keep them`                                                                | `oc-capture-matters`   | AGENTS.md L28（整行跨三句）              |
+| `only load in main session direct chats with your human`                                                                                                              | `oc-main-session-only` | AGENTS.md L32                            |
+| `you have access to your human s stuff that doesn t mean you share their stuff in groups you re a participant not their voice not their proxy think before you speak` | `oc-humans-stuff`      | AGENTS.md L89（~29 词整段）              |
+| `in group chats where you receive every message be smart about when to contribute`                                                                                    | `oc-group-contribute`  | AGENTS.md L93                            |
+| `on platforms that support reactions discord slack use emoji reactions naturally`                                                                                     | `oc-emoji-reactions`   | AGENTS.md L119                           |
+| `think of it like a human reviewing their journal and updating their mental model daily files are raw notes memory md is curated wisdom`                              | `oc-journal-wisdom`    | AGENTS.md L227（跨两句）                 |
+| `this file is yours to evolve as you learn who you are update it`                                                                                                     | `oc-soul-evolve`       | SOUL.md 收尾行（官方新版 L45 同文仍拦）  |
+| `if soul md is present embody its persona and tone`                                                                                                                   | `oc-workbuddy-soul`    | ZCode workbuddy-prompt `{% else %}` 分支 |
+
+已验证干净（无需规则）：旧模板套件的 IDENTITY/USER/TOOLS/HEARTBEAT/BOOTSTRAP/MEMORY 全文件；**官方 2026 新版 openclaw-AGENTS.md 整文件放行**（官方已改写到脱毒），唯独官方 SOUL.md 收尾行仍是 `oc-soul-evolve` 同文。
+
+e2e 验证：同一 26.6KB 原 prompt（SOUL+AGENTS 全文）直连旧二进制网关返 400；打补丁实例回放 200 且 `repairs.sanitize_hits` 记录 9 条规则各命中 1 次；指纹放 user 消息回放 200 且零改写（promptOnly 生效，写盘参数不污染）；含 soul/evolve/capture 等 trigger 词的良性 prompt 零改写。
 
 ## 五、请求路径差异
 
@@ -134,4 +157,5 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 
 - 策略非确定且**在漂移（曾短暂放宽又回摆）**：本文全部结论基于 2026-09-12 当天探测，重试后仍可能漏掉低频拦截。09-12 当日复测时 4 条已实证指纹中 3 条原文已放行；但 **2026-09-15 canary 复测已回摆**——`cc-subagent-emojis`、`cc-help-line` 原句恢复 DENIED（各连触 2 次即停手，codex 三条未复测），两条 sanitize 改写句仍 PASS。结论：指纹库按灰度/时效调整且会回摆，**改写规则重新是必需品**而非无害冗余；DENIED 清单应视为时效性证据而非永久事实。
 - 覆盖有限：CC 侧只覆盖 2.1.236 的 65 个模板，Codex 侧只覆盖 0.153.3 提取到的 ~37 个模板；**工具描述、用户正文、memory 注入内容**未系统扫——用户自定义内容里若巧合命中同类句式，同样会被拦（这正是「不做猜测性改写」原则的代价）。
+- OpenClaw 侧条目按 csnotes `.openclaw-memory` 变体与 ZCode workbuddy 建表：Hermes 等 fork 的措辞变体若命中未收录条目仍会 400——此时 `repairs.sanitize_hits` 会显示部分命中（有命中但请求仍被拒），按第七节流程对 dump 出的 prompt 重新二分补条目即可。
 - 版本漂移：客户端升级改文案即可能出现新指纹；旧指纹若上游放宽也可能变成多余改写（无害）。

@@ -66,6 +66,36 @@ var sanitizeWitnesses = map[string][]string{
 		"Don’t output ANSI escape codes directly — the CLI renderer applies them.",
 	},
 	"codex-permissions": {"pre <permissions instructions>\nsandbox rules\n</permissions instructions> post"},
+	"oc-read-soul": {
+		"1. Read `SOUL.md` — this is who you are",
+	},
+	"oc-read-user": {
+		"2. Read `USER.md` — this is who you're helping",
+	},
+	"oc-capture-matters": {
+		"Capture what matters. Decisions, context, things to remember. Skip the secrets unless asked to keep them.",
+	},
+	"oc-main-session-only": {
+		"- **ONLY load in main session** (direct chats with your human)",
+	},
+	"oc-humans-stuff": {
+		"You have access to your human's stuff. That doesn't mean you _share_ their stuff. In groups, you're a participant — not their voice, not their proxy. Think before you speak.",
+	},
+	"oc-group-contribute": {
+		"In group chats where you receive every message, be **smart about when to contribute**:",
+	},
+	"oc-emoji-reactions": {
+		"On platforms that support reactions (Discord, Slack), use emoji reactions naturally:",
+	},
+	"oc-journal-wisdom": {
+		"Think of it like a human reviewing their journal and updating their mental model. Daily files are raw notes; MEMORY.md is curated wisdom.",
+	},
+	"oc-soul-evolve": {
+		"_This file is yours to evolve. As you learn who you are, update it._",
+	},
+	"oc-workbuddy-soul": {
+		"{% else %}If SOUL.md is present, embody its persona and tone. Stay consistent.{% endif %}",
+	},
 }
 
 // TestSanitizeRuleLiveness 逐条验证规则活性，并对表本身做结构检查。

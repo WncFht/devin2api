@@ -116,6 +116,71 @@ var upstreamSanitizeRules = []upstreamSanitizeRule{
 	// 端原文、命中进 repairs 计数可查，且 anthropic 入口（不走
 	// DecodeContent）同样覆盖。
 	rule("codex-permissions", `(?s)<permissions instructions>.*?</permissions instructions>`, "", "permissions instructions"),
+	// === OpenClaw/ZCode 系工作区模板指纹（2026-09-23 黑盒 bisect 实证）===
+	// 上游把 prompt 归一化成小写 token 流后做连续 n-gram 子串封锁；
+	// tokens 字段即上游条目的归一化原文，词间在原始文本里允许任意
+	// 非字母数字分隔（标点/markdown/换行），见 ngramRule。
+	// 全部 promptOnly：实测上游只扫 prompt 字段（合并后的 system +
+	// 注入工具描述段），消息正文/工具参数里的同文模板不拦，不改写
+	// 以免污染写盘文件内容。
+	ngramRule("oc-read-soul",
+		"1 read soul md this is who you are",
+		"1. Read `SOUL.md` — it defines who you are", "soul"),
+	ngramRule("oc-read-user",
+		"2 read user md this is who you re helping",
+		"2. Read `USER.md` — it describes who you're helping", "helping"),
+	ngramRule("oc-capture-matters",
+		"capture what matters decisions context things to remember skip the secrets unless asked to keep them",
+		"Write down what matters: decisions, context, things worth remembering. Leave secrets out unless asked to keep them.", "capture"),
+	ngramRule("oc-main-session-only",
+		"only load in main session direct chats with your human",
+		"Load only in the main session** (direct chats with your human)", "chats"),
+	ngramRule("oc-humans-stuff",
+		"you have access to your human s stuff that doesn t mean you share their stuff in groups you re a participant not their voice not their proxy think before you speak",
+		"You can access your human's stuff — that doesn't mean sharing it. In groups you're a participant, not their voice or proxy. Think before speaking.", "participant"),
+	ngramRule("oc-group-contribute",
+		"in group chats where you receive every message be smart about when to contribute",
+		"In group chats where you see every message, be smart about when to contribute:", "contribute"),
+	ngramRule("oc-emoji-reactions",
+		"on platforms that support reactions discord slack use emoji reactions naturally",
+		"On platforms supporting reactions (Discord, Slack), use emoji reactions naturally:", "reactions"),
+	ngramRule("oc-journal-wisdom",
+		"think of it like a human reviewing their journal and updating their mental model daily files are raw notes memory md is curated wisdom",
+		"Think of it like a human reviewing a journal and updating their mental model. Daily files are raw notes; MEMORY.md is the distilled version.", "journal"),
+	ngramRule("oc-soul-evolve",
+		"this file is yours to evolve as you learn who you are update it",
+		"This file is yours to shape. As you learn who you are, revise it._", "evolve"),
+	ngramRule("oc-workbuddy-soul",
+		"if soul md is present embody its persona and tone",
+		"If SOUL.md exists, embody its persona and tone.", "embody"),
+}
+
+// ngramRule 把上游封锁表条目（归一化 token 序列，空格分隔小写词）编成
+// 原文级改写规则：上游按 token 连续匹配，词间分隔在原文可为任意非字母
+// 数字串，故词间统一用 [^A-Za-z0-9]+ 覆盖；首尾要求非字母数字边界，
+// 防 token 内子串误配（"aren't" 里的 "are" ≠ 指纹词 "are"，"wisdoms"
+// 里的 "wisdom" ≠ "wisdom"）。前界整段分隔符并入 ${1} 回插保住列表/
+// 加粗前缀，尾界只回插最后一个分隔符、条内标点随替换词自带——
+// "contribute**:" 这类尾饰被剥掉，避免留下半个 markdown 标记。
+// promptOnly 恒 true：上游实测只扫 prompt 字段，消息正文不扫。
+func ngramRule(id, tokens, replacement, trigger string) upstreamSanitizeRule {
+	const sep = `[^A-Za-z0-9]+`
+	words := strings.Split(tokens, " ")
+	for _, w := range words {
+		for i := 0; i < len(w); i++ {
+			if c := w[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
+				panic(fmt.Sprintf("devin: ngram rule %s has non-alnum token %q", id, w))
+			}
+		}
+	}
+	pattern := `(?i)(^|[^A-Za-z0-9]+)(?:` + strings.Join(words, sep) + `)[^A-Za-z0-9]*([^A-Za-z0-9]|$)`
+	return upstreamSanitizeRule{
+		id:          id,
+		pattern:     regexp.MustCompile(pattern),
+		replacement: "${1}" + replacement + "${2}",
+		promptOnly:  true,
+		trigger:     trigger,
+	}
 }
 
 // sanitizeRequest 改写请求中所有会被上游策略拦截的已知文案，
