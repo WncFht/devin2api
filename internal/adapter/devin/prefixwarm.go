@@ -183,20 +183,24 @@ const (
 type warmEntry struct {
 	key           warmLineageKey
 	retained      llm.RequestMessages
-	retainedBytes int64     // 请求体体量估计（容量帽与前缀粗估共用）
-	digest        [32]byte  // retained 全内容指纹：分「逐字重发/真追加/改写」
-	model         string    // 最近一发的解析后 wire uid——ping 定向用同一 uid
-	router        string    // router uid；非空时 ping 需带 (router,cascade) 的 jwt
-	isSub         bool      // system 头 4K 含 cc_is_subagent=true
-	sends         int       // 客户端可归因且形态为追加的成功开流数（晋升计数）
-	lastTouch     time.Time // 最近一次客户端可归因上行（ping 不刷它）
-	lastPingAt    time.Time // 最近一次成功 ping
-	nextDue       time.Time // 下一次 ping 到期时刻
-	tier          warmTier
-	prefixTokens  int       // 最近已完成响应的 input+cache_read 实测；0=未观测
-	suspectAt     time.Time // 非零=疑似孤儿：停 ping，首标定格作退役宽限计时（不续期），真流量撤销
-	missStreak    int       // 连续 ping miss（cache_read=0）数：hit 或 retain 清零
-	demoted       bool      // K 连 miss 降级态：sweep 停发 ping，条目留表，retain 重武装
+	retainedBytes int64    // 请求体体量估计（容量帽与前缀粗估共用）
+	digest        [32]byte // retained 全内容指纹：分「逐字重发/真追加/改写」
+	// seed 是 retain 时冻结的会话种子（附件降级前形态）：ping 重建
+	// wire 请求须与它派生同一条 trajectory/cascade，否则暖的是
+	// 另一条轨迹。空表示旧条目或未冻结，退回按 retained 现算。
+	seed         []byte
+	model        string    // 最近一发的解析后 wire uid——ping 定向用同一 uid
+	router       string    // router uid；非空时 ping 需带 (router,cascade) 的 jwt
+	isSub        bool      // system 头 4K 含 cc_is_subagent=true
+	sends        int       // 客户端可归因且形态为追加的成功开流数（晋升计数）
+	lastTouch    time.Time // 最近一次客户端可归因上行（ping 不刷它）
+	lastPingAt   time.Time // 最近一次成功 ping
+	nextDue      time.Time // 下一次 ping 到期时刻
+	tier         warmTier
+	prefixTokens int       // 最近已完成响应的 input+cache_read 实测；0=未观测
+	suspectAt    time.Time // 非零=疑似孤儿：停 ping，首标定格作退役宽限计时（不续期），真流量撤销
+	missStreak   int       // 连续 ping miss（cache_read=0）数：hit 或 retain 清零
+	demoted      bool      // K 连 miss 降级态：sweep 停发 ping，条目留表，retain 重武装
 }
 
 // WarmStats 是保温簿记快照，/admin/runtime-metrics 的 warm 组透出。
@@ -449,7 +453,7 @@ func (w *cacheWarmer) suspectSession(sessionKey string) {
 // （microcompact 类前缀失配）sends 归 1 重新计。真流量到达顺带清
 // 降级标记与 miss 连击——再武装免费。随后做超任扫描与容量淘汰。
 // 续试变体不入表——调用方只在客户端原形态上调用。
-func (w *cacheWarmer) retain(key warmLineageKey, request llm.RequestMessages, wireUID, routerUID string) {
+func (w *cacheWarmer) retain(key warmLineageKey, request llm.RequestMessages, wireUID, routerUID string, seed []byte) {
 	if key == (warmLineageKey{}) {
 		return
 	}
@@ -484,6 +488,7 @@ func (w *cacheWarmer) retain(key warmLineageKey, request llm.RequestMessages, wi
 	entry.retained = request
 	entry.retainedBytes = size
 	entry.digest = digest
+	entry.seed = seed
 	entry.model = wireUID
 	entry.router = routerUID
 	entry.lastTouch = now
@@ -732,14 +737,14 @@ func (w *cacheWarmer) sendOnce(ctx context.Context, entry *warmEntry) (int64, er
 	if entry.router != "" {
 		// router 解析来的 uid 需绑本次 cascade 的 assignment jwt；
 		// assignModel 内部带 (router,cascade) 缓存，命中即免往返。
-		_, cascadeID := deriveSessionIDs(entry.retained)
+		_, cascadeID := sessionIDsForSeed(entry.seed, entry.retained)
 		assignment, err := w.adapter.assignModel(ctx, entry.router, cascadeID)
 		if err != nil {
 			return 0, err
 		}
 		binding.ModelAssignmentJWT = assignment.jwt
 	}
-	req, _, err := buildRequest(entry.retained, w.adapter.CurrentConfig(), binding)
+	req, _, err := buildRequestSeeded(entry.retained, w.adapter.CurrentConfig(), binding, entry.seed)
 	if err != nil {
 		return 0, err
 	}
@@ -777,7 +782,7 @@ func (w *cacheWarmer) healCredentials(entry *warmEntry) {
 	if entry.router == "" {
 		return
 	}
-	_, cascadeID := deriveSessionIDs(entry.retained)
+	_, cascadeID := sessionIDsForSeed(entry.seed, entry.retained)
 	w.adapter.invalidateAssignment(entry.router, cascadeID)
 }
 

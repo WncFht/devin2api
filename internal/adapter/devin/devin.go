@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -202,6 +203,11 @@ type Adapter struct {
 	// 授权与目录快照会漂移，登记不是终身判决。与 modelsMu 同锁域——
 	// 登记与查验都必须对照目录快照一致读。
 	deadModels map[string]time.Time
+	// attachmentDenied 是「该 uid 被上游实测拒收某类附件」的学习表：
+	// key 是 model|kind（document/video），value 是解禁时刻。与
+	// deadModels 同锁域但独立键空间——附件拒收只触发该维度降级，
+	// 不判死模型。TTL 同 deadModelTTL。
+	attachmentDenied map[string]time.Time
 	// gate 是上游消息速率闸门：令牌桶主动限速 + 上游限流冷却闩。
 	// 每次 GetChatMessage 发送（含自愈/重开重试）前都要过闸。
 	gate *rateGate
@@ -746,6 +752,25 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 别名与路由判定到此完结：记下发上线 uid，进行中列表即刻
 	// 呈现「请求名 → 实际 uid」，不必等响应身份回填。
 	recorder.SetResolvedModel(model)
+	// 会话种子冻结在降级前的请求形态上：router 的 assignment jwt 已在
+	// resolveModelRouting 里绑了按当前形态派生的 cascade_id，附件降级
+	// 改写首消息文本后重算种子会让 wire cascade_id 与 jwt 绑定值分叉；
+	// 无附件路径冻结值与现算值恒等，统一走冻结不特判。
+	sessionSum := sha256.Sum256(sessionSeed(request))
+	// 缺文档/视频能力的模型在 wire 上是永久 invalid_argument（EndStream
+	// 尾帧送达，会话内每发请求复现同一拒绝）——降级为文本是这类请求
+	// 唯一的可恢复形态。降级后的请求喂给下游全部环节（脱钩键/保温键/
+	// runner/buildRequest/retain），各处的请求视图一致。
+	request, demotedCount := adapter.demoteUnsupportedAttachments(ctx, request, model, sanitizeHits)
+	if demotedCount > 0 {
+		slog.Warn("demoted attachments to text: model lacks capability",
+			"model", model, "demoted", demotedCount)
+		recorder.AppendJSONL(debuglog.StageDevinResponse, "attachment_demoted", map[string]any{
+			"model":   model,
+			"demoted": demotedCount,
+			"phase":   "proactive",
+		})
+	}
 	// 完成缓存查找在一切上游动作之前：同键脱钩条目在场时整段建流
 	// 路径（目录校验/构建/闸门/发送）都不发生——重放不消耗上游。
 	// 键是 02 投影全量 marshal 的哈希（长会话上 MB 级），只在可能有
@@ -809,14 +834,6 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
 		return nil, err
 	}
-	if err := adapter.validateDocumentsForModel(request, model); err != nil {
-		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
-		return nil, err
-	}
-	if err := adapter.validateVideosForModel(request, model); err != nil {
-		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
-		return nil, err
-	}
 	// binding 携带每次调用可变的字段：model 是别名/路由改写后的最终
 	// uid，token 现取（自愈后重试会换），jwt 是本次路由的绑定产物。
 	binding := callBinding{Token: adapter.currentToken(), Model: model, ModelAssignmentJWT: assignmentJWT}
@@ -836,13 +853,14 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 续试重发（自愈/重开/续轮/续传）都走它，不再各抄骨架。
 	runner := &attemptRunner{
 		adapter: adapter, env: env, request: request, cfg: cfg,
-		binding: binding, warmKey: warmKey,
+		binding: binding, warmKey: warmKey, seedSum: sessionSum[:],
 	}
-	protoRequest, repairs, err := buildRequest(request, cfg, binding)
+	protoRequest, repairs, err := buildRequestSeeded(request, cfg, binding, sessionSum[:])
 	if err != nil {
 		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
 		return nil, err
 	}
+	repairs.DemotedAttachments = demotedCount
 	repairs.SanitizeHits = sanitizeHits
 	recorder.SetRepairs(repairs)
 	runner.noteSend(protoRequest)
@@ -908,7 +926,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 客户端请求成功开流才更新 retained——续试变体（continueEmpty 追加
 	// 的合成 "continue"、extend 的内部编码续轮/续传）客户端下一发不会
 	// 逐字节复现，存了就是保温死分支。
-	adapter.warm.retain(warmKey, request, model, warmRouter)
+	adapter.warm.retain(warmKey, request, model, warmRouter, sessionSum[:])
 	return adapter.newResponseStream(streamDeps{
 		clientCtx:  ctx,
 		streamBase: streamBase,
@@ -971,6 +989,7 @@ func (adapter *Adapter) newResponseStream(deps streamDeps) *responseStream {
 		warm:     adapter.warm,
 		noteDenied: func(cause error) {
 			adapter.noteModelDenied(deps.model, cause)
+			adapter.noteAttachmentDenied(deps.model, cause)
 		},
 		warmKey: runner.warmKey,
 		deadlines: streamDeadlines{
@@ -989,6 +1008,7 @@ func (adapter *Adapter) newResponseStream(deps streamDeps) *responseStream {
 		reopen: func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			var causeText string
 			var mutate func(*llm.RequestMessages)
+			deniedKind, denied := attachmentDenialKind(cause)
 			switch {
 			case continueEmpty:
 				// 空 end_turn（有 stopReason 零内容，上游实测存在的退化形态）：
@@ -1005,6 +1025,20 @@ func (adapter *Adapter) newResponseStream(deps streamDeps) *responseStream {
 			case isUnauthenticated(cause) && adapter.reloadToken():
 				causeText = "unauthenticated: token reloaded"
 				slog.Info("reopening stream: token reloaded after unauthenticated")
+			case denied && runner.demoteAttachments(deps.streamBase, deniedKind) > 0:
+				// 附件能力拒收（目录未覆盖该 uid 时首发必踩）：降级该
+				// 类附件为文本后整体重发，写回 runner.request 让后续
+				// extend/resume 续发继承降级形态；拒收事实同步进学习表，
+				// 同 uid 的后续请求在入口处直接降级。
+				adapter.noteAttachmentDenied(deps.model, cause)
+				causeText = "attachment denied: demoted " + deniedKind + " to text"
+				slog.Warn("reopening stream: upstream rejected attachment inputs; demoted to text",
+					"model", deps.model, "kind", deniedKind)
+				runner.env.recorder.AppendJSONL(debuglog.StageDevinResponse, "attachment_demoted", map[string]any{
+					"model": deps.model,
+					"kind":  deniedKind,
+					"phase": "reactive",
+				})
 			default:
 				return nil, nil, cause
 			}
@@ -1179,20 +1213,6 @@ func (adapter *Adapter) catalogSupportsImages(model string) (supported bool, kno
 	return false, false
 }
 
-// validateDocumentsForModel 在本地尽早拒绝「无文档能力模型 + 文档」组合：
-// 上游对不支持模型的 documents 报 invalid_argument "does not support file
-// inputs"（实测 swe-2-max）。目录未覆盖时放行交给上游裁决——文档能力与
-// 图片不同是例外而非默认，不发明启发式名单。
-func (adapter *Adapter) validateDocumentsForModel(request llm.RequestMessages, model string) error {
-	if !requestHasDocuments(request) {
-		return nil
-	}
-	if supported, known := adapter.catalogSupportsDocuments(model); known && !supported {
-		return &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("model %q does not support file inputs (supports_documents=false); use a document-capable model or remove documents", model)}
-	}
-	return nil
-}
-
 // catalogSupportsDocuments 查询模型目录缓存中该 uid 的文档能力。
 // 第二个返回值表示目录是否包含该模型。
 func (adapter *Adapter) catalogSupportsDocuments(model string) (supported bool, known bool) {
@@ -1204,20 +1224,6 @@ func (adapter *Adapter) catalogSupportsDocuments(model string) (supported bool, 
 		}
 	}
 	return false, false
-}
-
-// validateVideosForModel 在本地尽早拒绝「无视频能力模型 + 视频」组合：
-// 上游对不支持模型的 videos 报 invalid_argument "does not support video
-// inputs"（实测 swe-2-max）。目录未覆盖时放行交给上游裁决——视频能力是
-// 例外而非默认（仅 kimi-k3/glm-5-3-flash 系），不发明启发式名单。
-func (adapter *Adapter) validateVideosForModel(request llm.RequestMessages, model string) error {
-	if !requestHasVideos(request) {
-		return nil
-	}
-	if supported, known := adapter.catalogSupportsVideo(model); known && !supported {
-		return &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("model %q does not support video inputs (supports_video=false); use a video-capable model or remove videos", model)}
-	}
-	return nil
 }
 
 // catalogSupportsVideo 查询模型目录缓存中该 uid 的视频能力。

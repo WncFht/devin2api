@@ -37,6 +37,15 @@ type callBinding struct {
 // （Client* 与 ClientIdentity 默认值），每次调用可变的凭据/路由取
 // binding。返回 repairs 记录转换中的静默修复计数，随请求日志落盘。
 func buildRequest(request llm.RequestMessages, config Config, binding callBinding) (*devinproto.GetChatMessageRequest, llm.RequestRepairs, error) {
+	return buildRequestSeeded(request, config, binding, nil)
+}
+
+// buildRequestSeeded 是 buildRequest 的种子冻结版：seedSum 是调用方在
+// 请求降级/变形前算好的会话种子（sha256，32B）——附件降级改写首消息
+// 文本，而 router assignment jwt 绑的是降级前派生的 cascade_id，
+// wire 侧必须沿用冻结值才不失配。nil 或长度不对时退回按请求现算，
+// 与 buildRequest 同口径。
+func buildRequestSeeded(request llm.RequestMessages, config Config, binding callBinding, seedSum []byte) (*devinproto.GetChatMessageRequest, llm.RequestRepairs, error) {
 	var repairs llm.RequestRepairs
 	// tools[] 同名声明上游直接 invalid_argument：客户端重复注册同名
 	// 工具（如内置+自定义同名）时去重保首个，整个投影面（描述注入/
@@ -49,8 +58,11 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	// 三个派生量共用一份种子哈希：trajectory/cascade/亲和键同种子是
 	// 契约（SessionAffinityKey 注释），seed 构造要走 tools 哈希，只算一遍。
 	toolsHash := hashTools(request.Tools)
-	sessionSum := sha256.Sum256(sessionSeedWithToolsHash(request, toolsHash))
-	trajectoryID, cascadeID := uuidFromBytes(sessionSum[:16]), uuidFromBytes(sessionSum[16:32])
+	if len(seedSum) != sha256.Size {
+		computed := sha256.Sum256(sessionSeedWithToolsHash(request, toolsHash))
+		seedSum = computed[:]
+	}
+	trajectoryID, cascadeID := uuidFromBytes(seedSum[:16]), uuidFromBytes(seedSum[16:32])
 	executionID := randid.UUID()
 	name, version, os := config.ClientIdentity()
 	metadata := upstream.BuildMetadata(binding.Token, name, version, os, 366)
@@ -115,7 +127,7 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 		// schema 新增 #27）：填会话亲和键——与 trajectory/cascade 同种子
 		// 派生，缓存命名空间与会话轨迹命名空间对齐，且 opaque 不暴露
 		// 客户端原始 SessionKey。
-		PromptCacheKey: proto.String(hex.EncodeToString(sessionSum[:16])),
+		PromptCacheKey: proto.String(hex.EncodeToString(seedSum[:16])),
 	}
 	// 上游实测：option_name 合法值为 none/auto/required；Anthropic 的 "any"
 	// 在本层已归一为 required。auto 不发送，与上游缺省行为一致。
@@ -215,6 +227,17 @@ func ephemeralCacheOptions() *devinproto.ExaChatPb_PromptCacheOptions {
 func deriveSessionIDs(request llm.RequestMessages) (trajectoryID string, cascadeID string) {
 	sum := sha256.Sum256(sessionSeed(request))
 	return uuidFromBytes(sum[:16]), uuidFromBytes(sum[16:32])
+}
+
+// sessionIDsForSeed 按冻结种子取会话 ID：保温条目带着 Stream 入口冻结
+// 的种子（附件降级前的请求形态），ping 重放必须落在同一条上游轨迹上
+// 才刷到同一份缓存。种子缺席（长度不对）时退回按请求现算，与
+// deriveSessionIDs 同口径。
+func sessionIDsForSeed(seed []byte, request llm.RequestMessages) (trajectoryID string, cascadeID string) {
+	if len(seed) == sha256.Size {
+		return uuidFromBytes(seed[:16]), uuidFromBytes(seed[16:32])
+	}
+	return deriveSessionIDs(request)
 }
 
 // SessionAffinityKey 返回会话的账号钉选键：与 deriveSessionIDs 同种子，

@@ -137,13 +137,18 @@ type RequestRepairs struct {
 	// （解不开/循环引用与深度保险丝截断——上游对 $ref 确定性拒绝，
 	// 剥键保兄弟约束是语义漂移，必须可对账）。
 	SchemaRefDropped int `json:"schema_ref_dropped,omitempty"`
+	// DemotedAttachments 是被改写为文本块的文档/视频附件数——目标
+	// 模型缺对应能力时上游只回永久 invalid_argument（EndStream 尾帧，
+	// 会话内逐发复现），降级是请求唯一可继续的形态，必须可对账。
+	DemotedAttachments int `json:"demoted_attachments,omitempty"`
 }
 
 // Total 返回全部修复动作的合计次数，供日志索引汇总成单字段。
 func (repairs RequestRepairs) Total() int {
 	total := repairs.ReorderedPrompts +
 		repairs.DroppedEmptyAssistant + repairs.OmittedHistoryImages +
-		repairs.DroppedDuplicateTools + repairs.SchemaRefDropped
+		repairs.DroppedDuplicateTools + repairs.SchemaRefDropped +
+		repairs.DemotedAttachments
 	for _, hits := range repairs.SanitizeHits {
 		total += hits
 	}

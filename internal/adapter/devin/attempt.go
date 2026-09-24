@@ -101,6 +101,10 @@ type attemptRunner struct {
 	cfg     Config
 	binding callBinding
 	warmKey warmLineageKey
+	// seedSum 是 Stream 入口冻结的会话种子哈希（降级前形态）：
+	// 附件降级改写首消息文本，而 router 的 assignment jwt 绑的是
+	// 降级前派生的 cascade_id——重发/续试必须沿用冻结值。
+	seedSum []byte
 	// attempt 是最近分配的上游发送序号（recorder 发的第 N 次发送号），
 	// 供 retry_failed 标记行回填「当时走到第几次发送」。
 	attempt int
@@ -151,8 +155,22 @@ func (r *attemptRunner) rebuild(mutate func(*llm.RequestMessages)) (*devinproto.
 		mutate(&request)
 	}
 	r.binding.Token = r.adapter.currentToken()
-	built, _, err := buildRequest(request, r.cfg, r.binding)
+	built, _, err := buildRequestSeeded(request, r.cfg, r.binding, r.seedSum)
 	return built, err
+}
+
+// demoteAttachments 把 r.request 里指定种类的附件降级为文本并写回
+// request——rebuild 是浅拷贝不写回，续试（extend/tryResume）要继承
+// 降级形态必须改源。写回安全：所有续试重发都串行（开流 goroutine
+// 在返回前、reopen/extend 在 stream.mu 下）。返回降级块数；0 表示
+// 请求里已没有该种附件可降。
+func (r *attemptRunner) demoteAttachments(ctx context.Context, kind string) int {
+	demoted, n := demoteRequestAttachments(ctx, r.request,
+		kind == attachmentKindDocument, kind == attachmentKindVideo, nil)
+	if n > 0 {
+		r.request = demoted
+	}
+	return n
 }
 
 // send 过闸并发起一次 GetChatMessage 建流调用：瞬时传输错误最多重试
@@ -215,6 +233,7 @@ func (r *attemptRunner) send(ctx context.Context, protoRequest *devinproto.GetCh
 		}
 	}
 	r.adapter.noteModelDenied(r.binding.Model, lastErr)
+	r.adapter.noteAttachmentDenied(r.binding.Model, lastErr)
 	r.adapter.gate.noteUpstreamError(lastErr)
 	return nil, lastErr
 }

@@ -314,10 +314,10 @@ func TestPoolFailoverSuspectsAbandonedLaneWarm(t *testing.T) {
 	deadWarm := poolLaneByName(pool, "dead").adapter.warm
 	stale := warmTestRequest(request.SessionKey, "sys", "stale")
 	staleKey := deadWarm.keyOf(stale, "stub-model")
-	deadWarm.retain(staleKey, stale, "stub-model", "")
+	deadWarm.retain(staleKey, stale, "stub-model", "", nil)
 	bystander := warmTestRequest("bystander", "sys", "stale")
 	bystanderKey := deadWarm.keyOf(bystander, "stub-model")
-	deadWarm.retain(bystanderKey, bystander, "stub-model", "")
+	deadWarm.retain(bystanderKey, bystander, "stub-model", "", nil)
 
 	stream, err := pool.Stream(ctx, request)
 	if err != nil {
@@ -1196,7 +1196,7 @@ func TestPoolBindSkipsHardDownLane(t *testing.T) {
 	warm := laneGood.adapter.warm
 	request := warmTestRequest(sessionKey, "sys", "stale")
 	key := warm.keyOf(request, "m")
-	warm.retain(key, request, "m", "")
+	warm.retain(key, request, "m", "", nil)
 
 	// 兄弟接管后的稳态：会话已绑到 good。
 	affinity := "session-flap"

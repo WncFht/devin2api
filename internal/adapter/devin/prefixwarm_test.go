@@ -66,8 +66,8 @@ func appendTurn(request llm.RequestMessages, text string) llm.RequestMessages {
 // MinPrefixTokens 需调到估计体量可达（测试请求 ~百字节 → /4 几十）。
 func seedPromoted(w *cacheWarmer, request llm.RequestMessages, uid string) warmLineageKey {
 	key := w.keyOf(request, uid)
-	w.retain(key, request, uid, "")
-	w.retain(key, appendTurn(request, "next"), uid, "")
+	w.retain(key, request, uid, "", nil)
+	w.retain(key, appendTurn(request, "next"), uid, "", nil)
 	return key
 }
 
@@ -117,13 +117,13 @@ func TestWarmPromotion(t *testing.T) {
 	w, _ := newTestWarmer(t, WarmConfig{MinPrefixTokens: 1})
 	request := warmTestRequest("sess", "sys", "m1")
 	key := w.keyOf(request, "uid")
-	w.retain(key, request, "uid", "")
-	w.retain(key, request, "uid", "") // 逐字重发
+	w.retain(key, request, "uid", "", nil)
+	w.retain(key, request, "uid", "", nil) // 逐字重发
 	if got := w.entries[key].sends; got != 1 {
 		t.Fatalf("identical resend sends = %d, want 1", got)
 	}
 	grown := appendTurn(request, "m2")
-	w.retain(key, grown, "uid", "")
+	w.retain(key, grown, "uid", "", nil)
 	if got := w.entries[key].sends; got != 2 {
 		t.Fatalf("append sends = %d, want 2", got)
 	}
@@ -134,7 +134,7 @@ func TestWarmPromotion(t *testing.T) {
 	mutated := grown
 	mutated.Messages = append([]llm.Message{}, grown.Messages...)
 	mutated.Messages[1] = llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "REPLY"}}}
-	w.retain(key, mutated, "uid", "")
+	w.retain(key, mutated, "uid", "", nil)
 	if got := w.entries[key].sends; got != 1 {
 		t.Fatalf("non-append rewrite sends = %d, want reset to 1", got)
 	}
@@ -171,10 +171,10 @@ func TestWarmSupersession(t *testing.T) {
 	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute})
 	reqA := warmTestRequest("sess", "sys", "msg-a")
 	keyA := w.keyOf(reqA, "uid")
-	w.retain(keyA, reqA, "uid", "")
+	w.retain(keyA, reqA, "uid", "", nil)
 	// 恰好一维相异（msgHash）：A 被标 suspect。
 	reqB := warmTestRequest("sess", "sys", "msg-b")
-	w.retain(w.keyOf(reqB, "uid"), reqB, "uid", "")
+	w.retain(w.keyOf(reqB, "uid"), reqB, "uid", "", nil)
 	if w.entries[keyA].suspectAt.IsZero() {
 		t.Fatal("one-dim-different sibling must mark A suspect")
 	}
@@ -188,7 +188,7 @@ func TestWarmSupersession(t *testing.T) {
 	}
 	// 再标 + 宽限期满无上行 → 退役。
 	reqC := warmTestRequest("sess", "sys", "msg-c")
-	w.retain(w.keyOf(reqC, "uid"), reqC, "uid", "")
+	w.retain(w.keyOf(reqC, "uid"), reqC, "uid", "", nil)
 	if w.entries[keyA].suspectAt.IsZero() {
 		t.Fatal("re-mark failed")
 	}
@@ -206,9 +206,9 @@ func TestWarmSupersession(t *testing.T) {
 	w2, _ := newTestWarmer(t, WarmConfig{Interval: time.Minute})
 	reqE := warmTestRequest("sess", "sys", "msg-e")
 	keyE := w2.keyOf(reqE, "uid")
-	w2.retain(keyE, reqE, "uid", "")
+	w2.retain(keyE, reqE, "uid", "", nil)
 	reqF := warmTestRequest("sess", "other-sys", "msg-f")
-	w2.retain(w2.keyOf(reqF, "uid"), reqF, "uid", "")
+	w2.retain(w2.keyOf(reqF, "uid"), reqF, "uid", "", nil)
 	if !w2.entries[keyE].suspectAt.IsZero() {
 		t.Fatal("two-dim-different sibling must not mark suspect")
 	}
@@ -221,10 +221,10 @@ func TestWarmSuspectSession(t *testing.T) {
 	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute})
 	reqA := warmTestRequest("sess", "sys", "msg-a")
 	keyA := w.keyOf(reqA, "uid")
-	w.retain(keyA, reqA, "uid", "")
+	w.retain(keyA, reqA, "uid", "", nil)
 	reqB := warmTestRequest("sess", "sys", "msg-b")
 	keyB := w.keyOf(reqB, "uid")
-	w.retain(keyB, reqB, "uid", "")
+	w.retain(keyB, reqB, "uid", "", nil)
 	// retain B 时 A 已被超任标记——记下它的原 suspectAt 验证不刷新。
 	markedAt := w.entries[keyA].suspectAt
 	if markedAt.IsZero() {
@@ -232,7 +232,7 @@ func TestWarmSuspectSession(t *testing.T) {
 	}
 	other := warmTestRequest("other", "sys", "msg-a")
 	keyOther := w.keyOf(other, "uid")
-	w.retain(keyOther, other, "uid", "")
+	w.retain(keyOther, other, "uid", "", nil)
 	clock.t = clock.t.Add(time.Minute)
 	w.suspectSession("sess")
 	if w.entries[keyA].suspectAt != markedAt {
@@ -284,7 +284,7 @@ func TestWarmSuspectStopsPing(t *testing.T) {
 	// 一维相异兄弟到达 → A 标 suspect；到期不再打（B sends=1 未晋升）。
 	reqB := warmTestRequest("sess", "sys", "msg-b")
 	keyB := w.keyOf(reqB, "uid")
-	w.retain(keyB, reqB, "uid", "")
+	w.retain(keyB, reqB, "uid", "", nil)
 	markedAt := w.entries[keyA].suspectAt
 	if markedAt.IsZero() {
 		t.Fatal("sibling arrival must mark A suspect")
@@ -296,7 +296,7 @@ func TestWarmSuspectStopsPing(t *testing.T) {
 	}
 	// 第二个一维相异兄弟到达不续宽限：suspectAt 保持首标时刻。
 	reqC := warmTestRequest("sess", "sys", "msg-c")
-	w.retain(w.keyOf(reqC, "uid"), reqC, "uid", "")
+	w.retain(w.keyOf(reqC, "uid"), reqC, "uid", "", nil)
 	if got := w.entries[keyA].suspectAt; got != markedAt {
 		t.Fatalf("re-mark must not renew grace: suspectAt = %v, want %v", got, markedAt)
 	}
@@ -327,7 +327,7 @@ func TestWarmSuspectRearm(t *testing.T) {
 	reqA := warmTestRequest("sess", "sys", "msg-a")
 	keyA := seedPromoted(w, reqA, "uid")
 	reqB := warmTestRequest("sess", "sys", "msg-b")
-	w.retain(w.keyOf(reqB, "uid"), reqB, "uid", "")
+	w.retain(w.keyOf(reqB, "uid"), reqB, "uid", "", nil)
 	if w.entries[keyA].suspectAt.IsZero() {
 		t.Fatal("sibling arrival must mark A suspect")
 	}
@@ -337,7 +337,7 @@ func TestWarmSuspectRearm(t *testing.T) {
 		t.Fatal("suspect must not be pinged")
 	}
 	// 真流量 flap 回本 lineage：retain 撤标记、重排到期，下一拍恢复 ping。
-	w.retain(keyA, appendTurn(w.entries[keyA].retained, "back"), "uid", "")
+	w.retain(keyA, appendTurn(w.entries[keyA].retained, "back"), "uid", "", nil)
 	if !w.entries[keyA].suspectAt.IsZero() {
 		t.Fatal("retain must clear suspect")
 	}
@@ -379,7 +379,7 @@ func TestWarmTierClassify(t *testing.T) {
 		}
 		request := warmTestRequest(session, tc.system, "m")
 		key := w.keyOf(request, "uid")
-		w.retain(key, request, "uid", "")
+		w.retain(key, request, "uid", "", nil)
 		w.noteCompleted(key, tc.msg)
 		if got := w.entries[key].tier; got != tc.want {
 			t.Fatalf("%s: tier = %d, want %d", tc.name, got, tc.want)
@@ -399,7 +399,7 @@ func TestWarmMaxIdleRetire(t *testing.T) {
 	mk := func(session, system string, msg *llm.AssistantMessage) warmLineageKey {
 		request := warmTestRequest(session, system, "m-"+session)
 		key := w.keyOf(request, "uid")
-		w.retain(key, request, "uid", "")
+		w.retain(key, request, "uid", "", nil)
 		w.noteCompleted(key, msg)
 		return key
 	}
@@ -408,7 +408,7 @@ func TestWarmMaxIdleRetire(t *testing.T) {
 	userpaced := mk("userpaced", "sys", &llm.AssistantMessage{})
 	subdone := mk("subdone", "sys cc_is_subagent=true", &llm.AssistantMessage{})
 	unknown := w.keyOf(warmTestRequest("", "sys", "m-x"), "uid")
-	w.retain(unknown, warmTestRequest("", "sys", "m-x"), "uid", "")
+	w.retain(unknown, warmTestRequest("", "sys", "m-x"), "uid", "", nil)
 
 	clock.t = clock.t.Add(6 * time.Minute)
 	w.sweep()
@@ -452,7 +452,7 @@ func TestWarmCapacityEviction(t *testing.T) {
 	mk := func(msg string) warmLineageKey {
 		request := warmTestRequest("s-"+msg, "sys", msg)
 		key := w.keyOf(request, "uid")
-		w.retain(key, request, "uid", "")
+		w.retain(key, request, "uid", "", nil)
 		clock.t = clock.t.Add(time.Second)
 		return key
 	}
@@ -481,12 +481,12 @@ func TestWarmCapacityEviction(t *testing.T) {
 	wb, _ := newTestWarmer(t, WarmConfig{MaxRetainedMB: 1})
 	giant := warmTestRequest("gs", "sys", strings.Repeat("x", 1500<<10))
 	keyGiant := w.keyOf(giant, "uid")
-	wb.retain(keyGiant, giant, "uid", "")
+	wb.retain(keyGiant, giant, "uid", "", nil)
 	if _, ok := wb.entries[keyGiant]; !ok {
 		t.Fatal("the entry being inserted must never be evicted")
 	}
 	small := warmTestRequest("ss", "sys", "small")
-	wb.retain(w.keyOf(small, "uid"), small, "uid", "")
+	wb.retain(w.keyOf(small, "uid"), small, "uid", "", nil)
 	if _, ok := wb.entries[keyGiant]; ok {
 		t.Fatal("over-cap bytes should evict the older entry")
 	}
@@ -816,7 +816,7 @@ func TestWarmDisabledAndNilSafe(t *testing.T) {
 	defer off.Close()
 	request := warmTestRequest("sess", "sys", "m1")
 	key := warmLineageKey{SessionKey: "sess", SysHash: "s", MsgHash: "m", Model: "u"}
-	off.retain(key, request, "uid", "")
+	off.retain(key, request, "uid", "", nil)
 	off.noteSend(key)
 	off.noteCompleted(key, &llm.AssistantMessage{})
 	off.sweep()
@@ -825,7 +825,7 @@ func TestWarmDisabledAndNilSafe(t *testing.T) {
 	}
 	// 开启态零键同样 no-op。
 	w, _ := newTestWarmer(t, WarmConfig{})
-	w.retain(warmLineageKey{}, request, "uid", "")
+	w.retain(warmLineageKey{}, request, "uid", "", nil)
 	w.noteSend(warmLineageKey{})
 	w.noteCompleted(warmLineageKey{}, &llm.AssistantMessage{})
 	if w.stats().Entries != 0 {
@@ -839,7 +839,7 @@ func TestWarmNoteCompletedSideBooks(t *testing.T) {
 	w, _ := newTestWarmer(t, WarmConfig{})
 	request := warmTestRequest("sess", "sys", "m1")
 	key := w.keyOf(request, "uid")
-	w.retain(key, request, "uid", "")
+	w.retain(key, request, "uid", "", nil)
 	w.noteCompleted(key, &llm.AssistantMessage{
 		ResponseModel: "swe-2-max",
 		Usage:         llm.Usage{Input: 3000, CacheRead: 6000},
@@ -891,7 +891,7 @@ func TestWarmRetireCauseBuckets(t *testing.T) {
 	// idle：无 SessionKey 条目静默超 unknown 档限。
 	wIdle, clockIdle := newTestWarmer(t, WarmConfig{UnknownMaxIdle: time.Minute})
 	req := warmTestRequest("", "sys", "m1")
-	wIdle.retain(wIdle.keyOf(req, "uid"), req, "uid", "")
+	wIdle.retain(wIdle.keyOf(req, "uid"), req, "uid", "", nil)
 	clockIdle.t = clockIdle.t.Add(time.Minute + time.Second)
 	wIdle.sweep()
 	if got := wIdle.stats().RetiredByCause.Idle; got != 1 {
@@ -901,9 +901,9 @@ func TestWarmRetireCauseBuckets(t *testing.T) {
 	// suspect：同 session 一维相异兄弟到达标 suspect，宽限期满退役。
 	wSus, clockSus := newTestWarmer(t, WarmConfig{Interval: time.Minute})
 	reqA := warmTestRequest("sess", "sys", "msg-a")
-	wSus.retain(wSus.keyOf(reqA, "uid"), reqA, "uid", "")
+	wSus.retain(wSus.keyOf(reqA, "uid"), reqA, "uid", "", nil)
 	reqB := warmTestRequest("sess", "sys", "msg-b")
-	wSus.retain(wSus.keyOf(reqB, "uid"), reqB, "uid", "")
+	wSus.retain(wSus.keyOf(reqB, "uid"), reqB, "uid", "", nil)
 	clockSus.t = clockSus.t.Add(2*time.Minute + time.Second)
 	wSus.sweep()
 	if got := wSus.stats().RetiredByCause.Suspect; got != 1 {
@@ -925,9 +925,9 @@ func TestWarmRetireCauseBuckets(t *testing.T) {
 	// capacity：MaxStreams=1 下第二条登记挤掉第一条。
 	wCap, _ := newTestWarmer(t, WarmConfig{MaxStreams: 1})
 	reqC := warmTestRequest("s-c", "sys", "m-c")
-	wCap.retain(wCap.keyOf(reqC, "uid"), reqC, "uid", "")
+	wCap.retain(wCap.keyOf(reqC, "uid"), reqC, "uid", "", nil)
 	reqD := warmTestRequest("s-d", "sys", "m-d")
-	wCap.retain(wCap.keyOf(reqD, "uid"), reqD, "uid", "")
+	wCap.retain(wCap.keyOf(reqD, "uid"), reqD, "uid", "", nil)
 	if got := wCap.stats().RetiredByCause.Capacity; got != 1 {
 		t.Fatalf("Capacity = %d, want 1", got)
 	}
@@ -1072,7 +1072,7 @@ func TestWarmMissStreakDemote(t *testing.T) {
 	// retain 真流量重武装：清标记、下一拍恢复 ping。追加须落在当前
 	// retained 上才是真追加（同消息数的小改写会按指纹规则归 sends=1
 	// 失去晋升）。
-	w.retain(key, appendTurn(entry.retained, "again"), "uid", "")
+	w.retain(key, appendTurn(entry.retained, "again"), "uid", "", nil)
 	if entry.demoted || entry.missStreak != 0 {
 		t.Fatal("retain must clear demoted and missStreak")
 	}
