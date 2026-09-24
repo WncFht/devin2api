@@ -64,6 +64,15 @@ func TestUpstreamFault(t *testing.T) {
 	if got := ClassifyText("invalid_argument: an internal error occurred (trace ID: x)"); !got.UpstreamFault || got.ClientFixable {
 		t.Fatalf("masqueraded internal error must be UpstreamFault, not ClientFixable: %+v", got)
 	}
+	// 2026-09 起上游把形状类拒绝与 provider 故障归一到 mask 模板——
+	// 文案自述 provider 故障，invalid_argument/unknown 外壳下都须判
+	// UpstreamFault，不能落 ClientFixable 让客户端按请求错误处理。
+	if got := ClassifyText("invalid_argument: The third-party model provider is experiencing issues and is currently not available. Please try this model again later (trace ID: x)"); !got.UpstreamFault || got.ClientFixable {
+		t.Fatalf("provider-issue mask under invalid_argument must be UpstreamFault, not ClientFixable: %+v", got)
+	}
+	if got := ClassifyText("unknown: The third-party model provider is experiencing issues and is currently not available. Please try this model again later (trace ID: x)"); !got.UpstreamFault {
+		t.Fatalf("provider-issue mask under unknown must be UpstreamFault: %+v", got)
+	}
 	if got := ClassifyText("invalid_argument: protocol error: incomplete envelope: read: connection reset by peer"); !got.UpstreamFault {
 		t.Fatalf("frame truncation must be UpstreamFault: %+v", got)
 	}

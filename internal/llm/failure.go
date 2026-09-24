@@ -39,8 +39,8 @@ type Failure struct {
 	LocalGate bool
 	// UpstreamFault 为真表示责任在上游侧，与 Code 声称的语义无关：
 	// 传输断裂会被 connect-go 包成 invalid_argument/internal 文案，
-	// 上游也把真实内部故障塞进可修正 code（"an internal error
-	// occurred" 模板）——两者都不该让客户端按请求错误处理。
+	// 上游也把真实内部故障塞进可修正 code（upstreamFaultMarkers 的
+	// 固定模板）——两者都不该让客户端按请求错误处理。
 	UpstreamFault bool
 	// RetryAfterSeconds 是生产侧结构已知的限流等待秒数（本地闸门）；
 	// 上游只在文案里给 hint，由 Classify 解析补齐。
@@ -180,9 +180,13 @@ func derive(failure *Failure) *Failure {
 		failure.Code == "deadline_exceeded" ||
 		errors.Is(failure.Cause, context.DeadlineExceeded) ||
 		strings.Contains(message, "context deadline exceeded")
-	failure.UpstreamFault = failure.UpstreamFault ||
-		strings.Contains(message, internalErrorMarker) ||
-		transportBreak(failure)
+	for _, marker := range upstreamFaultMarkers {
+		if strings.Contains(message, marker) {
+			failure.UpstreamFault = true
+			break
+		}
+	}
+	failure.UpstreamFault = failure.UpstreamFault || transportBreak(failure)
 	// UpstreamFault 置位时 code 声称的语义不可信：resource_exhausted
 	// 也可能是传输断裂的伪装（http2 ENHANCE_YOUR_CALM），不能拿去
 	// 上冷却闩或对客户端标 rate_limit_exceeded。
@@ -201,10 +205,18 @@ func derive(failure *Failure) *Failure {
 	return failure
 }
 
-// internalErrorMarker 是上游内部故障的固定模板文案——Devin 把真实内部
-// 错误塞进 invalid_argument/permission_denied 等可修正 code 下发，
-// 文案是它唯一可靠的自报。
-const internalErrorMarker = "an internal error occurred"
+// upstreamFaultMarkers 是上游把真实故障塞进可修正 code 下发时的固定
+// 模板文案——code 声称的语义不可信，文案是它唯一可靠的自报。
+// "an internal error occurred" 是沿用已久的内部错误模板；2026-09 起
+// 上游对历史形状类拒绝与 provider 故障改投归一化 mask 文案
+// "The third-party model provider is experiencing issues and is
+// currently not available. Please try this model again later"
+// （invalid_argument/unknown 均实测到）——模板自述 provider 故障，
+// 同样不该归调用方可修正。
+var upstreamFaultMarkers = []string{
+	"an internal error occurred",
+	"third-party model provider is experiencing issues",
+}
 
 // transportBreak 判定传输层断裂：connect-go 把 RoundTrip/读写断包成
 // CodeUnavailable、envelope 帧截断包成 CodeInvalidArgument "protocol
