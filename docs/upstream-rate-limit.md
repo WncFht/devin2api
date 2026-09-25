@@ -17,11 +17,12 @@
 
 ## 一、错误指纹：两种 429 必须分开
 
-| 文案                                                                | 来源     | 含义                                                                                                                                                                                               |
-| ------------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Reached overall message rate limit ... reset in N seconds/minutes` | 上游     | 账号级消息限流，本文对象                                                                                                                                                                           |
-| `rate limited by local gate ... reset in N seconds`                 | 本地闸门 | 睡到下一可发窗口的预测等待超 `gate_max_hold_seconds` 才快败（观测期默认 15s，现默认 30s）——实测 Retry-After 分布：16s 尖峰（1969 条，预测等待取整）、17~60s 长尾（187 条）、120s 闩剩余簇（29 条） |
-| `failed_precondition: Your daily usage quota has been exhausted`    | 上游     | 配额耗尽，与限流是不同错误，不要混入限流分析                                                                                                                                                       |
+| 文案                                                                | 来源     | 含义                                                                                                                                                                                                           |
+| ------------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Reached overall message rate limit ... reset in N seconds/minutes` | 上游     | 账号级消息限流，本文对象                                                                                                                                                                                       |
+| `rate limited by local gate ... reset in N seconds`                 | 本地闸门 | 睡到下一可发窗口的预测等待超 `gate_max_hold_seconds` 才快败（观测期默认 15s，现默认 30s）——实测 Retry-After 分布：16s 尖峰（1969 条，预测等待取整）、17~60s 长尾（187 条）、120s 闩剩余簇（29 条）             |
+| `failed_precondition: Your daily usage quota has been exhausted`    | 上游     | 配额耗尽，与限流是不同错误，不要混入限流分析                                                                                                                                                                   |
+| `unimplemented: ... capacity issues with this serving model ...`    | 上游     | **模型级准入拒绝，不是限流**：serving 层容量硬币翻转，无 reset hint、无连败升级、无惩罚机制（2026-09-25 swe-2-medium ~8min episode 实测）。本地由 `congest.go` 拥塞窗 + reopen 滴灌吸收，不经本文任何闩/桶逻辑 |
 
 上游 hint 显示格式：剩余 <60s 报精确秒数，≥60s 报 `floor(分钟)`（"reset in N minutes"）。**整分钟文案是显示取整，真实 deadline 比显示值最多晚 ~59s**——本地闩若按 `now + N×60` 设置会系统性提前放探针。
 

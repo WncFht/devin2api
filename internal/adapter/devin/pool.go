@@ -572,6 +572,12 @@ func failoverableEvent(ctx context.Context, failure *llm.Failure) bool {
 	if ctx.Err() != nil || failure.Canceled {
 		return false
 	}
+	// 容量拒绝同理不换号：能走到这说明 adapter 内 reopen 吸收链已
+	// 放行（post-content 终局或守卫上限），换号打同一堵上游墙无
+	// 意义，还会给 lane 错记债务。
+	if failure.ModelCapacity {
+		return false
+	}
 	return !failure.ClientFixable
 }
 
@@ -1398,6 +1404,12 @@ func failoverable(ctx context.Context, err error) bool {
 	}
 	failure := llm.Classify(err)
 	if failure == nil || failure.Canceled {
+		return false
+	}
+	// 模型容量墙是上游按 serving model 的准入拒绝：换号打同一堵墙
+	// （实测双 seat 同墙），只会放大发送量并给各 lane 错落冷却债。
+	// adapter 内 reopen 的容量吸收负责磨平它，号池不参与。
+	if failure.ModelCapacity {
 		return false
 	}
 	if failure.LocalGate || failure.RateLimited || failure.UpstreamFault {

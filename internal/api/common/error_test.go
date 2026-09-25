@@ -21,6 +21,8 @@ func TestOpenAIErrorType(t *testing.T) {
 		{"some unknown error", "server_error"},
 		// 上游把内部故障塞进可修正 code——责任在上游，不报请求错误。
 		{"invalid_argument: an internal error occurred (trace ID: abc)", "server_error"},
+		// 模型容量拒绝顶 unimplemented code——上游责任，不是请求可修正。
+		{"unimplemented: We are currently experiencing capacity issues with this serving model. Please switch to a different model or try again later.", "server_error"},
 	}
 	for _, c := range cases {
 		if got := OpenAIErrorType(llm.ClassifyText(c.message)); got != c.want {
@@ -41,6 +43,7 @@ func TestAnthropicErrorType(t *testing.T) {
 		{"unavailable: upstream offline", "api_error"},
 		{"some unknown error", "api_error"},
 		{"permission_denied: an internal error occurred (trace ID: abc)", "api_error"},
+		{"unimplemented: We are currently experiencing capacity issues with this serving model. Please switch to a different model or try again later.", "api_error"},
 	}
 	for _, c := range cases {
 		if got := AnthropicErrorType(llm.ClassifyText(c.message)); got != c.want {
@@ -69,6 +72,9 @@ func TestHTTPStatus(t *testing.T) {
 		// 都是上游责任——按 code 归 400 会让客户端替上游背锅。
 		{"invalid_argument: an internal error occurred (trace ID: abc)", 502},
 		{"invalid_argument: protocol error: incomplete envelope: read: connection reset by peer", 502},
+		// 容量拒绝顶 unimplemented code——按 code 归 501/400 会让客户端
+		// 替上游容量事件背锅，归上游故障 502。
+		{"unimplemented: We are currently experiencing capacity issues with this serving model. Please switch to a different model or try again later.", 502},
 	}
 	for _, c := range cases {
 		if got := HTTPStatus(llm.ClassifyText(c.message)); got != c.want {

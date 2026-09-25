@@ -79,6 +79,10 @@ type Failure struct {
 	// 超长）——错误类型与状态码据此压回 invalid_request/4xx。
 	// UpstreamFault 置位时恒假。
 	ClientFixable bool
+	// ModelCapacity 表示上游按模型维度拒绝准入（serving model 容量不
+	// 足的硬币翻转式拒绝，非账号限流）——adapter 侧据它对同一模型
+	// 做带并发上限的本地重试，而不是换号或给 lane 落冷却债。
+	ModelCapacity bool
 	// TraceID 是上游错误尾缀 "(trace ID: …)" 提取出的排障锚点。
 	TraceID string
 	// ResetHint 表示上游文案携带了 reset 声明（含显式 0）——
@@ -186,6 +190,15 @@ func derive(failure *Failure) *Failure {
 			break
 		}
 	}
+	for _, marker := range modelCapacityMarkers {
+		if strings.Contains(message, marker) {
+			// 容量拒绝必是上游侧裁决，UpstreamFault 一并置位——
+			// code 可能是 unimplemented（实测）也可能是别的伪装。
+			failure.ModelCapacity = true
+			failure.UpstreamFault = true
+			break
+		}
+	}
 	failure.UpstreamFault = failure.UpstreamFault || transportBreak(failure)
 	// UpstreamFault 置位时 code 声称的语义不可信：resource_exhausted
 	// 也可能是传输断裂的伪装（http2 ENHANCE_YOUR_CALM），不能拿去
@@ -216,6 +229,17 @@ func derive(failure *Failure) *Failure {
 var upstreamFaultMarkers = []string{
 	"an internal error occurred",
 	"third-party model provider is experiencing issues",
+}
+
+// modelCapacityMarkers 是上游按 serving model 容量拒绝准入的固定文案：
+// 实测 "We are currently experiencing capacity issues with this serving
+// model. Please switch to a different model or try again later."
+// （code=unimplemented，2026-09-25 swe-2-medium 持续 ~8min 的硬币翻转
+// 式拒绝）。这是模型级准入排队而非账号限流：无 reset hint、无连败升
+// 级、无冷却惩罚，提示语建议换模型。子串故意不带 "serving model"——
+// 同类拒绝换措辞描述容量范围时仍应命中。
+var modelCapacityMarkers = []string{
+	"capacity issues",
 }
 
 // transportBreak 判定传输层断裂：connect-go 把 RoundTrip/读写断包成

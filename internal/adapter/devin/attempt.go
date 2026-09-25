@@ -174,10 +174,13 @@ func (r *attemptRunner) demoteAttachments(ctx context.Context, kind string) int 
 }
 
 // send 过闸并发起一次 GetChatMessage 建流调用：瞬时传输错误最多重试
-// maxConnectAttempts 次（只对建立阶段重试——流一旦建立，错误通过
-// 事件流上报，不再重发请求）。resend 标记本次发送是同一请求在同 lane
-// 上的续试重发：闸门把放行计入窗口 retry_admits，与首发区分（号池
-// failover 后新 lane 的首发不挂——对那条 lane 它不是续试）。
+// maxConnectAttempts 次（只对建立阶段重试——CallServerStream 只回客户端
+// 侧 send/close 错误，上游语义拒绝一律经 EndStream 尾帧从泵侧暴露，
+// 由 reopen 吸收，不在这个函数的重试域内）。发送前过模型拥塞准入：
+// 拥塞窗开着时在飞探针被 cap 闸住，reopen 的重发与首发一起排队打穿。
+// resend 标记本次发送是同一请求在同 lane 上的续试重发：闸门把放行
+// 计入窗口 retry_admits，与首发区分（号池 failover 后新 lane 的
+// 首发不挂——对那条 lane 它不是续试）。
 func (r *attemptRunner) send(ctx context.Context, protoRequest *devinproto.GetChatMessageRequest, resend bool) (*connect.ServerStreamForClient[devinproto.GetChatMessageResponse], error) {
 	var lastErr error
 	link := r.adapter.link()
@@ -210,6 +213,13 @@ func (r *attemptRunner) send(ctx context.Context, protoRequest *devinproto.GetCh
 			case <-time.After(backoff):
 			}
 		}
+		// 模型拥塞准入放在闸门与退避之后、真实发送之前：槽只在发送
+		// 瞬间持有，排队/等待时不占用——拥塞期该模型的在飞探针被
+		// cap 闸住，等待者按到达序补位。
+		release, err := r.adapter.congest.acquire(ctx, r.binding.Model)
+		if err != nil {
+			return nil, err
+		}
 		recorder.NoteUpstreamSend()
 		// 保温簿记的 lastTouch 只看客户端可归因上行：每次真实发送
 		//（含瞬时重试）都刷新——ping 不走本函数，记独立的 lastPingAt。
@@ -222,6 +232,7 @@ func (r *attemptRunner) send(ctx context.Context, protoRequest *devinproto.GetCh
 			GotConn: func(info httptrace.GotConnInfo) { conn = info },
 		})
 		stream, err := link.stream.GetChatMessage(traceCtx, connect.NewRequest(protoRequest))
+		release()
 		if err == nil {
 			recorder.NoteUpstreamOpen()
 			recorder.NoteUpstreamConn(conn.Reused, conn.IdleTime)

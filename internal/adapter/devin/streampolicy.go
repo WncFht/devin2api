@@ -1,6 +1,10 @@
 package devin
 
-import "time"
+import (
+	"time"
+
+	"github.com/WncFht/devin2api/internal/llm"
+)
 
 // upstreamStallTimeout 是上游首帧确认前允许的最长静默（pre-frame0 档）：
 // 上游收下请求到发出首个确认帧之间没有心跳帧覆盖，排队深度无实测上界，
@@ -130,6 +134,18 @@ func (d streamDeadlines) silenceCapExhausted(now time.Time) bool {
 	return !d.firstSentAt.IsZero() && !now.Before(d.firstSentAt.Add(upstreamPreEventSilenceCap))
 }
 
+// capacityResendLimit 是单条流对模型容量拒绝的重开守卫上限：容量
+// 吸收的语义终止界是调用方 ctx（pre-content 流不可脱钩，客户端断连
+// 即杀泵），这个值只兜「上游无限拒绝 + ctx 不死」的失控循环——
+// 512 发在 ~1s 拒绝回程下覆盖远超实测 episode 时长（~8min）的连打。
+const capacityResendLimit = 512
+
+// capacityAbsorbBudget 是同一流上容量吸收的墙钟预算：与次数守卫同
+// 职责的另一轴——低 RT 环境下 512 发几分钟就烧完，慢链路上 8min
+// episode 也可能吃不满次数，两轴取先到者收口。档值对齐
+// resendLatchHold 量级，兜住实测 ~8min 事件窗后仍有余量。
+const capacityAbsorbBudget = 15 * time.Minute
+
 // retryPolicy 是两类流级重试（pre-content 整体重开 / 截断续传）的预算
 // 计数与准入判定：计数随流存活，准入规则集中在这一个类型上——「什么
 // 形态允许哪种重试」不再散进 tryReopen/tryResume 各自的布尔长句里。
@@ -138,13 +154,32 @@ type retryPolicy struct {
 	reopened bool
 	// resumes 是已执行的截断续传次数，封顶见 maxStreamResumes。
 	resumes int
+	// capacityReopens/capacitySince 是流内容量重开的失控守卫簿记：
+	// 容量重开不吃一次性 reopened 额度也不吃静默上限，语义终止界
+	// 是调用方 ctx；这对字段是「ctx 不死」场景的失控守卫，上限见
+	// capacityResendLimit/capacityAbsorbBudget。
+	capacityReopens int
+	capacitySince   time.Time
 }
 
 // reopenable 判定 pre-content 整体重发的准入：额度未用、尚未产出内容
 // （已产出只能续传）、有真实失败因或空轮续传诉求、累计静默上限未耗尽
 // （耗尽时新流只剩 ~0s 预算，白烧一发上游发送——直接按原失败收尾）。
-func (r retryPolicy) reopenable(produced bool, cause error, continueEmpty, silenceExhausted bool) bool {
-	return !r.reopened && !produced && (cause != nil || continueEmpty) && !silenceExhausted
+// 模型容量拒绝是独立准入档：它是一次性额度与静默上限都不适用的
+// 故障类——拒绝本身是 ~1s 快回程的活跃应答而非死寂，episode（实测
+// ~8min）也必然超 180s 上限；唯一保留的界是次数/墙钟守卫，兜住
+// ctx 不死的失控场景。
+func (r retryPolicy) reopenable(produced bool, cause error, continueEmpty, silenceExhausted bool, now time.Time) bool {
+	if produced {
+		return false
+	}
+	if cause != nil && llm.Classify(cause).ModelCapacity {
+		if r.capacityReopens >= capacityResendLimit {
+			return false
+		}
+		return r.capacitySince.IsZero() || now.Sub(r.capacitySince) < capacityAbsorbBudget
+	}
+	return !r.reopened && (cause != nil || continueEmpty) && !silenceExhausted
 }
 
 // resumable 判定截断续传的准入：已产出过内容（pre-content 走整体重发）、

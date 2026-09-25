@@ -229,3 +229,36 @@ func TestUpstreamTraceID(t *testing.T) {
 		t.Fatalf("TraceID = %q, want empty", got)
 	}
 }
+
+// TestModelCapacityClassify 验证模型容量拒绝的分类：2026-09-25 实测
+// swe-2-medium "capacity issues with this serving model"（code=
+// unimplemented）——上游按 serving model 的准入拒绝，不是调用方可修正
+// 的请求错误，也不是账号限流。ModelCapacity 置位供 adapter 侧做模型
+// 维度的拥塞吸收，UpstreamFault 同步置位压过 code 的可修正语义。
+func TestModelCapacityClassify(t *testing.T) {
+	failure := ClassifyText("unimplemented: We are currently experiencing capacity issues with this serving model. Please switch to a different model or try again later.")
+	if !failure.ModelCapacity {
+		t.Fatalf("ModelCapacity = false: %+v", failure)
+	}
+	if !failure.UpstreamFault {
+		t.Fatalf("UpstreamFault = false: %+v", failure)
+	}
+	if failure.ClientFixable {
+		t.Fatalf("ClientFixable = true: %+v", failure)
+	}
+	if failure.RateLimited {
+		// 容量拒绝不是账号限流——不能拿去上 lane 闩或标 rate_limit。
+		t.Fatalf("RateLimited = true: %+v", failure)
+	}
+	if failure.Code != "unimplemented" {
+		t.Fatalf("Code = %q", failure.Code)
+	}
+	// 换 code 的同款文案仍应命中（marker 不绑 code）。
+	if other := ClassifyText("resource_exhausted: service has capacity issues right now"); !other.ModelCapacity {
+		t.Fatalf("capacity marker should not depend on code: %+v", other)
+	}
+	// 常规错误不误伤。
+	if plain := ClassifyText("unimplemented: operation not supported"); plain.ModelCapacity {
+		t.Fatalf("unrelated unimplemented must not classify as capacity: %+v", plain)
+	}
+}

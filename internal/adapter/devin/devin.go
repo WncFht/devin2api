@@ -211,6 +211,11 @@ type Adapter struct {
 	// gate 是上游消息速率闸门：令牌桶主动限速 + 上游限流冷却闩。
 	// 每次 GetChatMessage 发送（含自愈/重开重试）前都要过闸。
 	gate *rateGate
+	// congest 是模型级上游容量拥塞吸收器：容量拒绝（UpstreamFault
+	// + ModelCapacity 类）按模型 uid 开拥塞窗，窗内发送抢有界并发
+	// 槽排队打穿。与 gate 不相交——它整的是「模型准入紧张」的节奏，
+	// 不是账号限流的惩罚（见 congest.go）。
+	congest *modelCongestion
 	// warm 是前缀保温簿记与调度器：跟踪 lineage 的上游缓存存活，
 	// 静默期按节奏发 mt=1 重放续命。New 中随 adapter 创建。
 	warm *cacheWarmer
@@ -270,6 +275,7 @@ func New(config Config) (*Adapter, error) {
 		token:          config.Identity.Token,
 		modelsCacheTTL: 5 * time.Minute,
 		gate:           newRateGate(config.Gate, config.GateStateStore, store.GateStateKey(config.Identity.Name)),
+		congest:        newModelCongestion(),
 		assignments:    make(map[string]resolvedAssignment),
 		detached:       newDetachedRegistry(config.GateStateStore, config.Identity.Name),
 	}
@@ -991,6 +997,9 @@ func (adapter *Adapter) newResponseStream(deps streamDeps) *responseStream {
 			adapter.noteModelDenied(deps.model, cause)
 			adapter.noteAttachmentDenied(deps.model, cause)
 		},
+		noteCongested: func() {
+			adapter.congest.noteFailure(deps.model)
+		},
 		warmKey: runner.warmKey,
 		deadlines: streamDeadlines{
 			postProgress: postProgressTimeout,
@@ -1025,6 +1034,14 @@ func (adapter *Adapter) newResponseStream(deps streamDeps) *responseStream {
 			case isUnauthenticated(cause) && adapter.reloadToken():
 				causeText = "unauthenticated: token reloaded"
 				slog.Info("reopening stream: token reloaded after unauthenticated")
+			case cause != nil && llm.Classify(cause).ModelCapacity:
+				// 容量拒绝原样重发：先武装本模型拥塞窗（让这次 resend
+				// 与全 lane 同模型发送都进槽排队），重发仍被拒时由泵侧
+				// 再次走到这里续开——逐次 reopen 就是吸收循环本身。
+				adapter.congest.noteFailure(deps.model)
+				causeText = "model capacity: resubmit"
+				slog.Warn("reopening stream: upstream serving model at capacity",
+					"model", deps.model)
 			case denied && runner.demoteAttachments(deps.streamBase, deniedKind) > 0:
 				// 附件能力拒收（目录未覆盖该 uid 时首发必踩）：降级该
 				// 类附件为文本后整体重发，写回 runner.request 让后续
@@ -1862,6 +1879,9 @@ type responseStream struct {
 	// 按本流的 wire uid 绑定）：流内 permission_denied 对「目录缺席 +
 	// 被拒」双实证同样是判据。nil 只在测试构造的裸流上出现。
 	noteDenied func(cause error)
+	// noteCongested 把一次容量拒绝回报给模型拥塞簿记（重武装拥塞窗，
+	// 后续发送进槽排队）。nil 只在测试构造的裸流上出现。
+	noteCongested func()
 	// detachKey/registry/entry 是完成缓存挂接面：detachKey 是语义
 	// 请求哈希的惰性兑现（OnceValue 包 detachedRequestKey——并发
 	// 安全只求值一次，断开发生且准入位全过才付投影+marshal 账，
@@ -2002,6 +2022,14 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 					// 干净 EOF 无 stopReason = 静默截断，与传输断裂同级续传。
 					resumeCause = errors.New("devin stream ended without stop reason")
 				}
+				// 模型容量拒绝以流内 error 帧到达：pre-content 时上方
+				// tryReopen 已带它走整体重开（reopen 内顺带武装拥塞窗，
+				// resend 经 send 的拥塞准入排队打穿）。走到这里只剩
+				// post-content 形态——内容已见客户端不能重发，仍把这次
+				// 拒绝记进拥塞簿记再透传终局。
+				if llm.Classify(resumeCause).ModelCapacity && stream.noteCongested != nil {
+					stream.noteCongested()
+				}
 				if stream.tryResume(resumeCause) {
 					continue
 				}
@@ -2139,8 +2167,11 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 // continueEmpty 为空 end_turn 续传：流正常结束但零内容时重发并
 // 追加 "continue" 用户消息（空轮是上游实测退化形态，CPA#4886 同构）。
 func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
-	if stream.reopen == nil ||
-		!stream.retry.reopenable(stream.producedEvents.Load(), cause, continueEmpty, stream.deadlines.silenceCapExhausted(time.Now())) {
+	if stream.reopen == nil {
+		return false
+	}
+	now := time.Now()
+	if !stream.retry.reopenable(stream.producedEvents.Load(), cause, continueEmpty, stream.deadlines.silenceCapExhausted(now), now) {
 		return false
 	}
 
@@ -2148,7 +2179,22 @@ func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
 	if err != nil {
 		return false
 	}
-	stream.retry.reopened = true
+	// 容量重开不消耗一次性预算：episode 内对流内拒绝要能保持
+	// 重开能力直到打穿；普通故障仍只重开一次。容量侧改记独立的
+	// 次数/墙钟簿记——episode 超 15min 或重开过 512 次时收口
+	// （pre-content 流随客户端死，守卫兜的是仍在线的长寿命调用方）。
+	if cause != nil && llm.Classify(cause).ModelCapacity {
+		stream.retry.capacityReopens++
+		if stream.retry.capacitySince.IsZero() {
+			stream.retry.capacitySince = now
+		}
+		// 拒绝本身就是上游的活跃应答（~1s 快回程），pre-event 累计
+		// 静默从这次应答重新计起——不重锚的话，超 180s 的 episode
+		// 里下一发重开会以「静默耗尽」被拒，整段吸收在 180s 处断。
+		stream.deadlines.firstSentAt = now
+	} else {
+		stream.retry.reopened = true
+	}
 	stream.swap(frames, cancel, stream.newDecoder())
 	return true
 }
@@ -2289,6 +2335,7 @@ func (stream *responseStream) recordUpstreamFailure(cause error) {
 	// 「为什么没续」（典型：在飞工具调用）不必靠反推 retries=0。
 	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_declined", map[string]any{
 		"retried":            stream.retry.reopened,
+		"capacity_reopens":   stream.retry.capacityReopens,
 		"produced_events":    stream.producedEvents.Load(),
 		"tools_in_flight":    len(stream.decoder.tools),
 		"has_stop_reason":    stream.decoder.hasStopReason,

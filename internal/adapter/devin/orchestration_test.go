@@ -701,3 +701,199 @@ func TestListModelsPreGateTimeout(t *testing.T) {
 		t.Fatalf("GetCliModelConfigs calls = %d, want 1 (cooldown)", got)
 	}
 }
+
+// capacityError 构造 2026-09-25 生产事故的同款上游拒绝：serving 按模型
+// 维度拒单，顶 unimplemented code，message 带 "capacity issues" 指纹。
+func capacityError() error {
+	return connect.NewError(connect.CodeUnimplemented,
+		errors.New("We are currently experiencing capacity issues with this serving model. Please switch to a different model or try again later."))
+}
+
+// TestOrchestrationModelCapacityReopens 验证流内容量拒绝的整体重开吸收：
+// stub 前 3 次建流以容量错误收尾（Connect server-stream 的 handler 错误
+// 经 EndStream 尾帧送达，从泵侧而非 send 返回暴露），adapter 走
+// pre-content reopen 排队重打直到打穿——客户端只见一条成功流，
+// 拒绝事实落进模型拥塞簿记。
+func TestOrchestrationModelCapacityReopens(t *testing.T) {
+	stub := &stubUpstream{
+		catalog: []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)},
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			if call <= 3 {
+				return capacityError()
+			}
+			return stubSend(stream, stubMeta(), stubDelta("recovered"), stubStop())
+		},
+	}
+	srv := stubServer(t, stub, nil)
+	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Identity: LaneIdentity{Token: "tok"}})
+
+	stream, err := adapter.Stream(context.Background(), stubRequest())
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := stubDeltas(t, stubDrain(t, stream)); got != "recovered" {
+		t.Fatalf("deltas = %q", got)
+	}
+	if got := stub.chatCalls.Load(); got != 4 {
+		t.Fatalf("chat calls = %d, want 4 (3 rejections + recovery)", got)
+	}
+	adapter.congest.mu.Lock()
+	state, armed := adapter.congest.states["stub-model"]
+	adapter.congest.mu.Unlock()
+	if !armed {
+		t.Fatal("congestion state should be armed for the rejected model")
+	}
+	if state.episodes != 1 {
+		t.Fatalf("episodes = %d, want 1 (rejections share one sliding window)", state.episodes)
+	}
+	// 容量拒绝不是账号限流：闸门不闩、lane 不背冷却债。
+	if adapter.GateStats().Latched {
+		t.Fatal("capacity rejections must not latch the lane gate")
+	}
+}
+
+// TestOrchestrationModelCapacityClientCancel 验证客户端断连终止吸收：
+// stub 永续容量拒绝（pre-content 流不可脱钩），客户端 ctx 到期后泵被
+// cancel、流按 finish 事件队列收口到 EOF，上游调用不再增长——episode
+// 期间「无限续打」的终止界仍是调用方寿命。
+func TestOrchestrationModelCapacityClientCancel(t *testing.T) {
+	stub := &stubUpstream{
+		catalog: []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)},
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return capacityError()
+		},
+	}
+	srv := stubServer(t, stub, nil)
+	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Identity: LaneIdentity{Token: "tok"}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	stream, err := adapter.Stream(ctx, stubRequest())
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	// 断连沿 ctx.Done 分支走 finish(ctx cause) 队列——消费到 EOF 即终局；
+	// 中途若返回真错误也算终止，两种形态都接受，唯独不许挂死。
+	deadline := time.Now().Add(5 * time.Second)
+	var sawError bool
+	for {
+		event, recvErr := stream.Recv(context.Background())
+		if recvErr != nil {
+			break
+		}
+		if event.Type == llm.ResponseEventError {
+			sawError = true
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("stream kept producing events after client death")
+		}
+	}
+	if !sawError {
+		t.Fatal("finish queue should carry the cancellation as an error event")
+	}
+	// 泵死后给一拍让在飞 resend 收尾，随后调用数必须冻结。
+	time.Sleep(50 * time.Millisecond)
+	frozen := stub.chatCalls.Load()
+	time.Sleep(150 * time.Millisecond)
+	if got := stub.chatCalls.Load(); got != frozen {
+		t.Fatalf("chat calls kept growing after client death: %d -> %d", frozen, got)
+	}
+}
+
+// TestOrchestrationModelCapacityOutlivesSilenceCap 验证容量吸收不被
+// pre-event 累计静默上限掐死：把上限压到 50ms，让 episode 实际跨越
+// ~150ms——每次容量拒绝都是上游的活跃应答，reopen 按应答时刻重锚
+// 静默簿记，而不是从首发累计到 180s 必死。
+func TestOrchestrationModelCapacityOutlivesSilenceCap(t *testing.T) {
+	defer func(d time.Duration) { upstreamPreEventSilenceCap = d }(upstreamPreEventSilenceCap)
+	upstreamPreEventSilenceCap = 50 * time.Millisecond
+	stub := &stubUpstream{
+		catalog: []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)},
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			if call <= 5 {
+				// 30ms 的持有期让连续拒绝在首发锚点下累计超 50ms——
+				// 不重锚的话中途的 reopen 会以「静默耗尽」被拒收尾。
+				time.Sleep(30 * time.Millisecond)
+				return capacityError()
+			}
+			return stubSend(stream, stubMeta(), stubDelta("through"), stubStop())
+		},
+	}
+	srv := stubServer(t, stub, nil)
+	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Identity: LaneIdentity{Token: "tok"}})
+
+	stream, err := adapter.Stream(context.Background(), stubRequest())
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := stubDeltas(t, stubDrain(t, stream)); got != "through" {
+		t.Fatalf("deltas = %q", got)
+	}
+	if got := stub.chatCalls.Load(); got != 6 {
+		t.Fatalf("chat calls = %d, want 6", got)
+	}
+}
+
+// TestOrchestrationModelCapacitySharedQueue 验证拥塞期的多会话整形：
+// 4 条并发流同打一个持续拒绝的模型——在飞探针被 congest 槽闸到
+// cap=2，其余会话的重发排队补位，而不是各自连发；墙松后全部打穿，
+// 上游调用数有界。
+func TestOrchestrationModelCapacitySharedQueue(t *testing.T) {
+	stub := &stubUpstream{
+		catalog: []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)},
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			if call <= 5 {
+				return capacityError()
+			}
+			return stubSend(stream, stubMeta(), stubDelta("served"), stubStop())
+		},
+	}
+	srv := stubServer(t, stub, nil)
+	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Identity: LaneIdentity{Token: "tok"}})
+
+	const sessions = 4
+	type result struct {
+		text string
+		err  error
+	}
+	results := make(chan result, sessions)
+	for i := 0; i < sessions; i++ {
+		go func() {
+			stream, err := adapter.Stream(context.Background(), stubRequest())
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			var events []llm.ResponseEvent
+			for {
+				event, recvErr := stream.Recv(context.Background())
+				if errors.Is(recvErr, io.EOF) {
+					break
+				}
+				if recvErr != nil {
+					results <- result{err: recvErr}
+					return
+				}
+				events = append(events, event)
+			}
+			var b strings.Builder
+			for _, event := range events {
+				b.WriteString(event.Delta)
+			}
+			results <- result{text: b.String()}
+		}()
+	}
+	for i := 0; i < sessions; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("session %d: %v", i, r.err)
+		}
+		if r.text != "served" {
+			t.Fatalf("session %d deltas = %q", i, r.text)
+		}
+	}
+	// 5 次拒绝 + 每会话各 1 次成功 = 9 发上限；远小于无整形的连打。
+	if got := stub.chatCalls.Load(); got > 5+sessions || got < sessions {
+		t.Fatalf("chat calls = %d, want within [%d, %d]", got, sessions, 5+sessions)
+	}
+}

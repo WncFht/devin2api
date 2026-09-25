@@ -200,6 +200,7 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 - 该错误**无 Retry-After 头、无 RetryInfo detail**——唯一机器可用信息是文案里的秒数，已解析透传。
 - Connect 响应 header/trailer 只有标准字段，**trailers 恒空**——上游不在 HTTP 层给配额信号；唯一供应商侧锚点是 `usage.responseHeader.x-request-id`（已进 diagnostics）。
 - **瞬时全断态真实存在**：~3 分钟窗口内所有 RPC（含一元）全部 `unavailable: unexpected EOF` 后自愈；10 连发偶发 0 帧 EOF；流式响应在 envelope 头写到一半时被砍（`invalid_argument: protocol error: incomplete envelope`，实测同波次多条独立连接同步死亡，本机 TUN 代理栈在路径上）——`tryReopen` 对传输断裂的 pre-content 重试覆盖的是正确分类。
+- **模型级容量拒绝是第三套独立系统**（2026-09-25 21:15~21:23 实测）：`unimplemented: We are currently experiencing capacity issues with this serving model. Please switch to a different model or try again later.`——swe-2-medium 上 ~75% 请求被 pre-content 快拒（~1s 回程），双 lane 同墙、~8min 自愈；**无 reset hint、无连败升级、无任何惩罚语义**——是 serving 层按模型的准入硬币翻转，不是账号限流，与 429 系统不相交（不发同号探针的守则在这里不适用：实测发作期 ~4-6 rps 总流量零额外惩罚）。本地处置见 `internal/adapter/devin/congest.go`（拥塞窗 + 在飞 cap 的 reopen 滴灌吸收）。
 
 ## 错误分类学（Connect code → 语义）
 
@@ -213,6 +214,7 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 | `unknown`             | provider 层崩坏：坏 schema、`is_custom_tool` 声明、SYSTEM_PROMPT source、缺 model uid；非法 `internal_model` 枚举（99999）**先正常流 105 帧再死**——枚举字段无前置校验                                                                 | provider 内部错，永久                                                                           |
 | `internal`            | （旧观测：numCompletions>1 曾报 `INTERNAL_ERROR`；2026-09-15 复测已变为 `invalid_argument: incomplete envelope`）                                                                                                                     | 流中断                                                                                          |
 | `resource_exhausted`  | 高频请求                                                                                                                                                                                                                              | 真限流，hint 只在文案 `reset in N seconds/minutes`（seconds 与 minutes 两种粒度，代码均已解析） |
+| `unimplemented`       | serving 模型容量不足（`"capacity issues with this serving model"`，2026-09-25 实测）、`assign not scripted` 类未实现 RPC                                                                                                              | 容量形态是模型级准入拒绝（可吸收重试），非限流非请求错；其余按字面「未实现」                    |
 
 含义：`unavailable`/`unknown` 的 "experiencing issues / try later" 文案是误导性模板，真实原因是确定性请求/权限问题。已落实：`isTransientConnectError` 按 unwrap 链区分——connect-go 把传输断裂统一包成 connect.Error（RoundTrip 断 → `unavailable` 包 EOF、envelope 截断 → `invalid_argument: protocol error:`、tcp 重置 → 包 `*net.OpError`），链上带 io.EOF/io.ErrUnexpectedEOF/net.Error 的判传输断裂（建立阶段重试 + pre-content 重发、记 `devin_transport`）；链上干净的 connect.Error 才是上表语义拒绝（记 `devin_connect`，不重试）。
 
