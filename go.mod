@@ -5,7 +5,8 @@ go 1.27.1
 require (
 	connectrpc.com/connect v1.21.0
 	github.com/felixge/fgprof v0.9.5
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/giraffesyo/pdf v0.7.0
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jhump/protoreflect/v2 v2.0.0-beta.2
 	github.com/klauspost/compress v1.20.0
@@ -20,7 +21,6 @@ require (
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/giraffesyo/pdf v0.7.0 // indirect
 	github.com/google/pprof v0.0.0-20260802141513-ef3492d7dac3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
